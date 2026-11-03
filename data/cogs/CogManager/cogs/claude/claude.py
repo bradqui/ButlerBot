@@ -434,7 +434,7 @@ class ClaudeChat(commands.Cog):
         gemini = self.bot.get_cog("GeminiChat")
         return gemini if gemini is not None and hasattr(gemini, "generate_image") else None
 
-    async def _system_prompt(self, guild: discord.Guild, web_search: bool, images: bool) -> str:
+    async def _system_prompt(self, guild: discord.Guild, web_search: bool, images: bool, lookups: bool = False) -> str:
         persona = await self.config.guild(guild).persona() or DEFAULT_PERSONA
         today = datetime.now(timezone.utc).strftime("%A, %B %d, %Y")
         lines = [
@@ -460,6 +460,10 @@ class ClaudeChat(commands.Cog):
         if web_search:
             lines.append("- You can search the web when you need current or specialized information. "
                          "Don't search for things you already know well.")
+        if lookups:
+            lines.append("- You can look up this server's data with the lookup tools (for example people's game "
+                         "libraries, who owns a game, and active sessions and votes). Use them instead of guessing "
+                         "or asking people to check for themselves; \"me\" means the person talking to you.")
         lines.append(f"- You don't know this bot's commands. If someone asks how to use the bot or its commands, "
                      f"point them to `{await self._prefix(guild)}guide <question>`.")
         lines.append(f"Today's date is {today} (UTC).")
@@ -644,10 +648,11 @@ class ClaudeChat(commands.Cog):
         info = MODELS[model]
         web_search = info.web_search and await self.config.guild(member.guild).web_search()
         images = self._image_generator() is not None
+        lookups = self._lookup_tools()
         kwargs = {
             "model": model,
             "max_tokens": MAX_TOKENS,
-            "system": await self._system_prompt(member.guild, web_search, images),
+            "system": await self._system_prompt(member.guild, web_search, images, lookups=bool(lookups)),
             "output_config": {"effort": await self.config.effort()},
             # Top-level cache_control caches the conversation prefix automatically.
             "extra_body": {"cache_control": {"type": "ephemeral"}},
@@ -657,6 +662,7 @@ class ClaudeChat(commands.Cog):
             tools.append(IMAGE_TOOL)
         if web_search:
             tools.append({"type": "web_search_20260209", "name": "web_search", "max_uses": 3})
+        tools.extend(tool for tool, _ in lookups.values())
         if tools:
             kwargs["tools"] = tools
         if info.fallback:
@@ -668,15 +674,27 @@ class ClaudeChat(commands.Cog):
         blocks = []
         totals = dict(EMPTY_USAGE)
         response = None
-        for _ in range(MAX_PAUSE_CONTINUATIONS + 1):
+        lookup_rounds = 0
+        for _ in range(MAX_PAUSE_CONTINUATIONS + MAX_LOOKUP_ROUNDS + 1):
             response = await client.beta.messages.create(messages=messages, **kwargs)
             for k, v in self._usage_from(response, model).items():
                 totals[k] += v
             blocks.extend(response.content)
-            if response.stop_reason != "pause_turn":
-                break
-            # A long web search paused the turn; send it back so Claude can finish.
-            messages = messages + [{"role": "assistant", "content": response.content}]
+            if response.stop_reason == "pause_turn":
+                # A long web search paused the turn; send it back so Claude can finish.
+                messages = messages + [{"role": "assistant", "content": response.content}]
+                continue
+            calls = [b for b in response.content if b.type == "tool_use"]
+            if (response.stop_reason == "tool_use" and calls and lookup_rounds < MAX_LOOKUP_ROUNDS
+                    and all(c.name in lookups for c in calls)):
+                # Lookups (other cogs' read-only tools) get real results within this turn only;
+                # session history keeps just the final text.
+                lookup_rounds += 1
+                results = await self._run_lookups(calls, lookups, member)
+                messages = messages + [{"role": "assistant", "content": response.content},
+                                       {"role": "user", "content": results}]
+                continue
+            break
         totals["requests"] = 1
         await self._record_usage(member, totals)
 
@@ -695,8 +713,10 @@ class ClaudeChat(commands.Cog):
                         image_calls.append({"prompt": prompt.strip(), "edit": bool(args.get("edit"))})
             image_calls = image_calls[:MAX_IMAGES_PER_TURN]
 
-        # Drop "let me search for that" preamble: keep the text written after the last search result.
-        last_result = max((i for i, b in enumerate(blocks) if b.type == "web_search_tool_result"), default=-1)
+        # Drop "let me search/check that" preamble: keep the text written after the last search result or lookup.
+        last_result = max((i for i, b in enumerate(blocks)
+                           if b.type == "web_search_tool_result" or (b.type == "tool_use" and b.name in lookups)),
+                          default=-1)
         text_blocks = [b for b in blocks[last_result + 1:] if b.type == "text"] or [b for b in blocks if b.type == "text"]
         text = "".join(b.text for b in text_blocks).strip()
 
@@ -1089,6 +1109,22 @@ class ClaudeChat(commands.Cog):
                     found[name] = (tool, cog)
         return found
 
+    async def _run_lookups(self, calls, lookups: Dict[str, Tuple[dict, commands.Cog]],
+                           member: discord.Member) -> List[dict]:
+        """Answer lookup tool calls (used by the guide and the AI chat). Returns tool_result blocks."""
+        results = []
+        for call in calls:
+            _, cog = lookups[call.name]
+            try:
+                output = await cog.guide_call_tool(call.name, call.input if isinstance(call.input, dict) else {},
+                                                   member)
+                results.append({"type": "tool_result", "tool_use_id": call.id, "content": str(output)[:8000]})
+            except Exception:
+                log.exception("Lookup %s failed", call.name)
+                results.append({"type": "tool_result", "tool_use_id": call.id, "is_error": True,
+                                "content": "The lookup failed."})
+        return results
+
     async def _guide_call(self, client: anthropic.AsyncAnthropic, member: discord.Member,
                           lookups: Dict[str, Tuple[dict, commands.Cog]], *, messages: List[dict], **kwargs):
         """
@@ -1107,17 +1143,7 @@ class ClaudeChat(commands.Cog):
             if (response.stop_reason != "tool_use" or not calls or round_number == MAX_LOOKUP_ROUNDS
                     or any(b.name not in lookups for b in calls)):
                 break
-            results = []
-            for call in calls:
-                _, cog = lookups[call.name]
-                try:
-                    output = await cog.guide_call_tool(call.name, call.input if isinstance(call.input, dict) else {},
-                                                       member)
-                    results.append({"type": "tool_result", "tool_use_id": call.id, "content": str(output)[:8000]})
-                except Exception:
-                    log.exception("Guide lookup %s failed", call.name)
-                    results.append({"type": "tool_result", "tool_use_id": call.id, "is_error": True,
-                                    "content": "The lookup failed."})
+            results = await self._run_lookups(calls, lookups, member)
             messages += [{"role": "assistant", "content": response.content}, {"role": "user", "content": results}]
         totals["requests"] = 1
         await self._record_usage(member, totals)

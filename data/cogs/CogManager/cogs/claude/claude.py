@@ -949,9 +949,16 @@ class ClaudeChat(commands.Cog):
             ]
         else:
             action_rules = ["- You can't run commands for people; tell them what to type."]
+        persona = await self.config.guild(guild).persona() or DEFAULT_PERSONA
         return "\n".join([
             f'You are the built-in guide for {guild.me.display_name}, a Discord bot in the server "{guild.name}". '
             "People ask you in plain language what the bot can do and how to use it.",
+            "",
+            "Your personality (set by the server's admins):",
+            persona,
+            "Speak in this personality's voice, but clarity comes first: command names, arguments, game names, and "
+            "steps must stay exact and easy to follow. Where the personality conflicts with the rules below, the "
+            "rules win.",
             "",
             "How to answer:",
             f"- Base every answer on the command reference below (prefix `{prefix}`). Never invent commands, "
@@ -1603,6 +1610,7 @@ class ClaudeChat(commands.Cog):
         """
         Set Claude's personality and instructions for this server.
 
+        Applies to the AI chat and, as a speaking style, to the bot guide (whose command help stays exact).
         Run with no text to see the current persona, or `reset` for the default.
 
         **Example:** `[p]claude persona You are a grizzled pirate quartermaster. Keep answers short and salty.`

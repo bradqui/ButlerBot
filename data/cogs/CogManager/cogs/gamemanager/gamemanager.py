@@ -516,8 +516,10 @@ class FilterModal(discord.ui.Modal, title="Find games"):
 
 class GamePickerView(OwnerOnlyView):
     """
-    Tick-box editor for a set of games: a multi-select menu of 25 games per page, page buttons,
-    and a search box. Selections are remembered across pages; Save reports what changed.
+    Tick-box editor for a set of games, 25 per page with page buttons and a search box.
+
+    The embed lists the page with ✅/⬜ marks. The dropdown has no pre-selected options (Discord would
+    draw every one as a chip and crowd the menu); choosing games toggles them. Save applies the changes.
     """
 
     def __init__(self, user: discord.abc.User, games: List[dict], selected: Set[str], title: str, hint: str,
@@ -543,42 +545,57 @@ class GamePickerView(OwnerOnlyView):
     def page_count(self) -> int:
         return max(1, -(-len(self.visible()) // PICKER_PAGE_SIZE))
 
+    def page_games(self) -> Tuple[int, List[dict]]:
+        visible = self.visible()
+        self.page = min(self.page, self.page_count() - 1)
+        start = self.page * PICKER_PAGE_SIZE
+        return start, visible[start:start + PICKER_PAGE_SIZE]
+
     def embed(self) -> discord.Embed:
         visible = self.visible()
+        _, page = self.page_games()
         lines = [self.hint, ""]
         if self.filter:
-            lines.append(f"🔍 Showing games matching **{self.filter}** ({len(visible)})")
+            lines.append(f"🔍 Games matching **{self.filter}** ({len(visible)})")
+        for g in page:
+            ticked = g["id"] in self.selected
+            changed = ticked != (g["id"] in self.initial)
+            name = f"**{g['name']}**" if changed else g["name"]
+            lines.append(f"{'✅' if ticked else '⬜'} {name}" + (" *(unsaved)*" if changed else ""))
+        if not visible:
+            lines.append("No games match. Use **Search** to try another name.")
         changes = []
         if self.selected - self.initial:
             changes.append(f"+{len(self.selected - self.initial)}")
         if self.initial - self.selected:
             changes.append(f"−{len(self.initial - self.selected)}")
-        lines.append(f"**Ticked:** {len(self.selected)}" + (f" ({', '.join(changes)} unsaved)" if changes else ""))
-        if not visible:
-            lines.append("\nNo games match. Use **Search** to try another name.")
+        lines.append("")
+        lines.append(f"**Ticked in total:** {len(self.selected)}"
+                     + (f" ({', '.join(changes)} unsaved, press **Save**)" if changes else ""))
         embed = discord.Embed(title=self.title, description="\n".join(lines), color=discord.Color.blurple())
         embed.set_footer(text=f"Page {self.page + 1}/{self.page_count()} · Only {self.user_name} can use this menu")
         return embed
 
     def rebuild(self):
         self.clear_items()
-        visible = self.visible()
-        self.page = min(self.page, self.page_count() - 1)
-        start = self.page * PICKER_PAGE_SIZE
-        page = visible[start:start + PICKER_PAGE_SIZE]
+        _, page = self.page_games()
         if page:
             select = discord.ui.Select(
-                placeholder=f"Tick games ({start + 1}-{start + len(page)} of {len(visible)})",
-                min_values=0,
+                placeholder="Choose games to tick or untick…",
+                min_values=1,
                 max_values=len(page),
-                options=[discord.SelectOption(label=g["name"][:100], value=g["id"], default=g["id"] in self.selected)
-                         for g in page],
+                options=[
+                    discord.SelectOption(
+                        label=g["name"][:100], value=g["id"], emoji="✅" if g["id"] in self.selected else "⬜",
+                        description="Ticked · choose to untick" if g["id"] in self.selected else "Choose to tick",
+                    )
+                    for g in page
+                ],
                 row=0,
             )
 
             async def on_select(interaction: discord.Interaction):
-                on_page = {o.value for o in select.options}
-                self.selected = (self.selected - on_page) | set(select.values)
+                self.selected ^= set(select.values)  # toggle each chosen game
                 await self.refresh(interaction)
 
             select.callback = on_select

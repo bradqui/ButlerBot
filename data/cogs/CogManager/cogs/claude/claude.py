@@ -307,7 +307,8 @@ class ClaudeChat(commands.Cog):
             guide_model=DEFAULT_GUIDE_MODEL,
         )
         self.config.register_guild(
-            persona=None,
+            persona=None,        # None = use default_persona
+            default_persona=None,  # what `persona reset` returns to; None = DEFAULT_PERSONA
             web_search=True,
             guide_mentions=True, # a plain @mention outside AI threads asks the bot guide
             guide_actions=True,  # the guide may run commands on the asker's behalf
@@ -402,9 +403,17 @@ class ClaudeChat(commands.Cog):
                 threads.append(thread_id)
             del threads[:-500]
 
+    async def _persona(self, guild: discord.Guild) -> str:
+        """The server's persona, else its saved default, else the built-in one."""
+        conf = self.config.guild(guild)
+        return await conf.persona() or await conf.default_persona() or DEFAULT_PERSONA
+
     async def _model_for(self, key: str, author: discord.Member, channel) -> str:
         if key.startswith("USER_"):
             model = await self.config.user(author).model()
+            # A personal choice only counts while that model is still allowed.
+            if model not in await self.config.allowed_models():
+                model = None
         else:
             if isinstance(channel, discord.Thread) and channel.parent is not None:
                 channel = channel.parent
@@ -467,7 +476,7 @@ class ClaudeChat(commands.Cog):
         return gemini if gemini is not None and hasattr(gemini, "generate_image") else None
 
     async def _system_prompt(self, guild: discord.Guild, web_search: bool, images: bool, lookups: bool = False) -> str:
-        persona = await self.config.guild(guild).persona() or DEFAULT_PERSONA
+        persona = await self._persona(guild)
         today = datetime.now(timezone.utc).strftime("%A, %B %d, %Y")
         lines = [
             f'You are {guild.me.display_name}, an AI assistant chatting in the Discord server "{guild.name}".',
@@ -1001,7 +1010,7 @@ class ClaudeChat(commands.Cog):
             ]
         else:
             action_rules = ["- You can't run commands for people; tell them what to type."]
-        persona = await self.config.guild(guild).persona() or DEFAULT_PERSONA
+        persona = await self._persona(guild)
         return "\n".join([
             f'You are the built-in guide for {guild.me.display_name}, a Discord bot in the server "{guild.name}". '
             "People ask you in plain language what the bot can do and how to use it.",
@@ -1416,8 +1425,8 @@ class ClaudeChat(commands.Cog):
         Talk to Claude in your own private conversation.
 
         Your private conversation follows you across channels and only you can
-        continue it (by command or by replying to its answers). Pick your model with
-        `[p]claude mymodel`.
+        continue it (by command or by replying to its answers). It uses the bot's
+        default model; admins can pick their own with `[p]claude mymodel`.
         """
         if not prompt and not ctx.message.attachments:
             return await ctx.send_help()
@@ -1549,7 +1558,7 @@ class ClaudeChat(commands.Cog):
     async def claude_settings(self, ctx: commands.Context):
         """Show the current Claude settings for you, this channel, and this server."""
         g = await self.config.guild(ctx.guild).all()
-        persona = g["persona"] or f"*Default:* {DEFAULT_PERSONA}"
+        persona = g["persona"] or f"*Default:* {g['default_persona'] or DEFAULT_PERSONA}"
         if len(persona) > 300:
             persona = persona[:300] + "…"
         channel = ctx.channel.parent if isinstance(ctx.channel, discord.Thread) and ctx.channel.parent else ctx.channel
@@ -1586,12 +1595,18 @@ class ClaudeChat(commands.Cog):
                 f"{status} **{info.name}** (`{alias_for.get(model, model)}`): ${info.input:g} in / ${info.output:g} out "
                 f"per 1M tokens{'' if info.web_search else ', no web search'}"
             )
-        lines.append("\n✅ = users and channel managers can choose it. The bot owner manages the list.")
+        lines.append("\n✅ = admins (for their private chats) and channel managers can choose it. "
+                     "The bot owner manages the list.")
         await ctx.send("\n".join(lines))
 
     @claude.command(name="mymodel")
+    @checks.admin_or_permissions(manage_guild=True)
     async def claude_mymodel(self, ctx: commands.Context, model: str):
-        """Pick the model for your private conversations (`[p]myai`). Use `reset` for the default."""
+        """
+        Pick the model for your private conversations (`[p]myai`). Admins only. Use `reset` for the default.
+
+        Only models the bot owner allows can be picked (see `[p]claude models`).
+        """
         if model.lower() == "reset":
             await self.config.user(ctx.author).model.set(None)
             self._get_session(f"USER_{ctx.author.id}").reset()
@@ -1630,7 +1645,7 @@ class ClaudeChat(commands.Cog):
     @claude.command(name="allowmodel")
     @checks.is_owner()
     async def claude_allowmodel(self, ctx: commands.Context, model: str):
-        """Let users and channel managers choose a model."""
+        """Let admins (for their private chats) and channel managers choose a model."""
         resolved = self._resolve_model(model)
         if resolved is None:
             return await ctx.send(f"❌ Unknown model. See `{ctx.clean_prefix}claude models`.")
@@ -1642,12 +1657,18 @@ class ClaudeChat(commands.Cog):
     @claude.command(name="disallowmodel")
     @checks.is_owner()
     async def claude_disallowmodel(self, ctx: commands.Context, model: str):
-        """Stop users and channel managers from choosing a model (existing choices keep working)."""
+        """
+        Stop a model from being chosen.
+
+        Private chats that had picked it switch to the default model. Channels that had picked it keep it
+        until a channel manager changes it.
+        """
         resolved = self._resolve_model(model)
         async with self.config.allowed_models() as allowed:
             if resolved in allowed:
                 allowed.remove(resolved)
-        await ctx.send(f"✅ {self._model_label(resolved or model)} can no longer be chosen.")
+        await ctx.send(f"✅ {self._model_label(resolved or model)} can no longer be chosen. Private chats using it "
+                       "now use the default model.")
 
     @claude.command(name="effort")
     @checks.is_owner()
@@ -1729,21 +1750,50 @@ class ClaudeChat(commands.Cog):
         Set Claude's personality and instructions for this server.
 
         Applies to the AI chat and, as a speaking style, to the bot guide (whose command help stays exact).
-        Run with no text to see the current persona, or `reset` for the default.
+        Run with no text to see the current persona, or `reset` to go back to the server's default
+        persona (set with `[p]claude defaultpersona`).
 
         **Example:** `[p]claude persona You are a grizzled pirate quartermaster. Keep answers short and salty.`
         """
-        conf = self.config.guild(ctx.guild).persona
+        conf = self.config.guild(ctx.guild)
         if persona is None:
-            current = await conf() or f"(default) {DEFAULT_PERSONA}"
-            return await ctx.send(f"**Current persona:**{box(current)}")
+            current = await conf.persona()
+            text = current or f"(default) {await self._persona(ctx.guild)}"
+            return await ctx.send(f"**Current persona:**{box(text)}")
         if persona.lower() == "reset":
-            await conf.set(None)
-            return await ctx.send("✅ Persona reset to the default.")
+            await conf.persona.set(None)
+            return await ctx.send(f"✅ Persona reset to the default:{box(await self._persona(ctx.guild))}")
         if len(persona) > 1500:
             return await ctx.send("❌ Keep the persona under 1,500 characters.")
-        await conf.set(persona)
+        await conf.persona.set(persona)
         await ctx.send("✅ Persona updated. It applies to the next message.")
+
+    @claude.command(name="defaultpersona")
+    @checks.admin_or_permissions(manage_guild=True)
+    async def claude_defaultpersona(self, ctx: commands.Context, *, persona: str = None):
+        """
+        Set the persona that `[p]claude persona reset` goes back to.
+
+        - `[p]claude defaultpersona <text>` saves new text as the default.
+        - `[p]claude defaultpersona current` saves the persona in use right now.
+        - `[p]claude defaultpersona clear` goes back to the built-in default.
+        - Run with nothing to see the saved default.
+        """
+        conf = self.config.guild(ctx.guild)
+        if persona is None:
+            saved = await conf.default_persona()
+            return await ctx.send(f"**Default persona:**{box(saved or f'(built-in) {DEFAULT_PERSONA}')}")
+        lowered = persona.lower()
+        if lowered == "clear":
+            await conf.default_persona.set(None)
+            return await ctx.send("✅ The default persona is the built-in one again.")
+        if lowered == "current":
+            persona = await self._persona(ctx.guild)
+        if len(persona) > 1500:
+            return await ctx.send("❌ Keep the persona under 1,500 characters.")
+        await conf.default_persona.set(persona)
+        await ctx.send(f"✅ Saved as the default persona. `{ctx.clean_prefix}claude persona reset` returns to it."
+                       f"{box(persona)}")
 
     @claude.command(name="limit")
     @checks.admin_or_permissions(manage_guild=True)

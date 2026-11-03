@@ -1219,7 +1219,11 @@ class GameManager(commands.Cog):
         await self._edit_message(guild, request.get("channel_id"), request.get("message_id"), embed=embed, view=None)
         channel = guild.get_channel_or_thread(request.get("channel_id") or 0)
         if channel is not None:
-            note = {"own": " and it's in your library", "install": " and it's marked installed for you"}.get(action, "")
+            note = {
+                "own": f" and it's in your library (not marked installed; if you have it installed, run "
+                       f"{await self.cmd(guild, 'games install ' + name)})",
+                "install": " and it's marked installed for you",
+            }.get(action, "")
             text = (f"✅ <@{requester}>, **{name}** was added to the server library{note}." if approve
                     else f"❌ <@{requester}>, your request for **{name}** was denied.")
             try:

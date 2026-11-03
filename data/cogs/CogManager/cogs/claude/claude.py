@@ -1,5 +1,6 @@
 import asyncio
 import base64
+import contextlib
 import logging
 import os
 import re
@@ -130,6 +131,7 @@ GUIDE_MAX_TOKENS = 4000
 GUIDE_MAX_HISTORY = 10      # messages kept per guide conversation
 GUIDE_IDLE_MINUTES = 15
 GUIDE_HELP_CHARS = 600      # help text kept per command in the catalog
+GUIDE_SILENT = "[silent]"   # the guide's answer when a reply to the bot wasn't meant for it
 PRIVILEGE_NAMES = {
     commands.PrivilegeLevel.MOD: "mod",
     commands.PrivilegeLevel.ADMIN: "admin",
@@ -964,6 +966,9 @@ class ClaudeChat(commands.Cog):
             f"- If the question isn't about this bot (general knowledge, chit-chat, homework), say you only answer "
             f"questions about the bot and suggest `{prefix}ai <question>` instead.",
             "- Never ping @everyone or @here.",
+            "- Some messages are replies to the bot's own announcements (shown as \"Replying to …\"). Answer them "
+            "when they're meant for the bot, like a question about what it did. When they're meant for other people "
+            f"or need no answer (\"I'm in!\", \"nice\", \"thanks\"), reply with exactly {GUIDE_SILENT} and nothing else.",
             *action_rules,
             "",
             "# Command reference",
@@ -1062,7 +1067,7 @@ class ClaudeChat(commands.Cog):
                     return {"message": str(block.input.get("message", "")).strip(), "commands": lines}
         return None
 
-    async def _guide_respond(self, message: discord.Message, prompt: str):
+    async def _guide_respond(self, message: discord.Message, prompt: str, may_stay_silent: bool = False):
         """Answer a question about the bot, or do what was asked, in the asker's own short guide conversation."""
         channel = message.channel
         guild = message.guild
@@ -1096,7 +1101,8 @@ class ClaudeChat(commands.Cog):
                 model = DEFAULT_GUIDE_MODEL
 
             try:
-                async with channel.typing():
+                # No "typing…" for replies we might ignore; it would look like an answer that never came.
+                async with (contextlib.nullcontext() if may_stay_silent else channel.typing()):
                     system = await self._guide_system_prompt(guild, prefix, include_owner=level.startswith("bot owner"),
                                                              actions=actions)
                     kwargs = {}
@@ -1125,6 +1131,11 @@ class ClaudeChat(commands.Cog):
             await self._record_usage(message.author, self._usage_from(response, model))
             text = "".join(b.text for b in response.content if b.type == "text").strip()
             action = self._action_call(response) if actions else None
+            if text == GUIDE_SILENT and action is None:
+                session.messages.pop()  # a reply that wasn't for us: leave no trace
+                if not may_stay_silent:
+                    await self._send(message, channel, "😶 I didn't come up with an answer. Try rephrasing?")
+                return
             if response.stop_reason == "refusal" or not (text or action):
                 session.messages.pop()
                 await self._send(message, channel, "🚫 I can't help with that one." if response.stop_reason == "refusal"
@@ -1291,7 +1302,12 @@ class ClaudeChat(commands.Cog):
         mention = rf"<@!?{self.bot.user.id}>"
         # Replies count as mentions too, so only a typed @mention in a fresh message asks the guide.
         guide_mention = ref is None and not in_ai_thread and re.search(mention, message.content) is not None
-        if entry is None and not (in_ai_thread and self.bot.user in message.mentions) and not guide_mention:
+        # Replies to the bot's other messages (game announcements, results...) also go to the guide,
+        # which stays silent when the reply is meant for other people.
+        reply_to_bot = (entry is None and not in_ai_thread and ref is not None
+                        and isinstance(ref.resolved, discord.Message) and ref.resolved.author.id == self.bot.user.id)
+        if (entry is None and not (in_ai_thread and self.bot.user in message.mentions)
+                and not guide_mention and not reply_to_bot):
             return
 
         if await self.bot.cog_disabled_in_guild(self, message.guild):
@@ -1331,7 +1347,7 @@ class ClaudeChat(commands.Cog):
 
         prompt = re.sub(mention, "", message.content).strip()
         if key.startswith("GUIDE_"):
-            await self._guide_respond(message, prompt)
+            await self._guide_respond(message, prompt, may_stay_silent=reply_to_bot)
         else:
             await self._respond(message, prompt, key, owner_id=owner_id)
 
@@ -1488,7 +1504,12 @@ class ClaudeChat(commands.Cog):
     @claude.command(name="guidementions")
     @checks.admin_or_permissions(manage_guild=True)
     async def claude_guidementions(self, ctx: commands.Context, enabled: bool):
-        """Turn on or off answering a plain @mention of the bot (outside AI threads) with the bot guide."""
+        """
+        Turn on or off sending @mentions of the bot, and replies to its messages, to the bot guide.
+
+        Applies outside AI threads. Replies to AI chat answers always continue that chat.
+        The guide stays quiet when a reply is meant for other people ("I'm in!").
+        """
         await self.config.guild(ctx.guild).guide_mentions.set(enabled)
         await ctx.send(f"✅ @mentioning me {'now asks' if enabled else 'no longer asks'} the bot guide. "
                        f"`{ctx.clean_prefix}guide` always works.")

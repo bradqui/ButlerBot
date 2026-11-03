@@ -3,7 +3,6 @@
 # data in settings.json, logs, the Linux venv, pip libs, third-party cog repos).
 
 /data/*
-!/data/config.json
 
 !/data/cogs/
 /data/cogs/*

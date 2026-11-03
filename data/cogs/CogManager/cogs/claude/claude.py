@@ -118,6 +118,24 @@ IMAGE_TOOL = {
     },
 }
 
+# ==========================================
+#        BOT GUIDE (plain-language help)
+# ==========================================
+
+# A cheap model answers "how do I...?" questions from a catalog of every loaded command.
+DEFAULT_GUIDE_MODEL = "claude-haiku-5-5"
+GUIDE_EFFORT = "low"
+GUIDE_MAX_TOKENS = 4000
+GUIDE_MAX_HISTORY = 10      # messages kept per guide conversation
+GUIDE_IDLE_MINUTES = 15
+GUIDE_HELP_CHARS = 600      # help text kept per command in the catalog
+PRIVILEGE_NAMES = {
+    commands.PrivilegeLevel.MOD: "mod",
+    commands.PrivilegeLevel.ADMIN: "admin",
+    commands.PrivilegeLevel.GUILD_OWNER: "server owner",
+    commands.PrivilegeLevel.BOT_OWNER: "bot owner",
+}
+
 NO_MENTIONS = discord.AllowedMentions(everyone=False, users=False, roles=False, replied_user=False)
 EMPTY_USAGE = {"requests": 0, "input": 0, "output": 0, "cache_read": 0, "cache_write": 0, "searches": 0, "cost": 0.0}
 
@@ -167,6 +185,8 @@ class ClaudeChat(commands.Cog):
     `[p]ai` talks in this channel's shared conversation, `[p]myai` keeps a private
     conversation that follows you around, and `[p]aithread` starts a dedicated thread.
     Reply to any of my answers to keep that conversation going.
+
+    `[p]guide` answers questions about the bot itself, like "how do I start a game vote?"
     """
 
     def __init__(self, bot: Red):
@@ -179,10 +199,12 @@ class ClaudeChat(commands.Cog):
             max_history=30,      # messages (user + assistant) kept per conversation
             idle_minutes=60,     # conversation resets after this much inactivity
             registered_threads=[],
+            guide_model=DEFAULT_GUIDE_MODEL,
         )
         self.config.register_guild(
             persona=None,
             web_search=True,
+            guide_mentions=True, # a plain @mention outside AI threads asks the bot guide
             daily_limit=0,       # AI messages per user per day; 0 = unlimited
             usage=dict(EMPTY_USAGE),
             usage_since=None,
@@ -215,6 +237,7 @@ class ClaudeChat(commands.Cog):
             if user_id in members:
                 await self.config.member_from_ids(guild_id, user_id).clear()
         self._sessions.pop(f"USER_{user_id}", None)
+        self._sessions.pop(f"GUIDE_{user_id}", None)
 
     # ==========================================
     #                 HELPERS
@@ -362,6 +385,8 @@ class ClaudeChat(commands.Cog):
         if web_search:
             lines.append("- You can search the web when you need current or specialized information. "
                          "Don't search for things you already know well.")
+        lines.append(f"- You don't know this bot's commands. If someone asks how to use the bot or its commands, "
+                     f"point them to `{await self._prefix(guild)}guide <question>`.")
         lines.append(f"Today's date is {today} (UTC).")
         return "\n".join(lines)
 
@@ -403,7 +428,8 @@ class ClaudeChat(commands.Cog):
             return None, f"couldn't download `{att.filename}`"
         return None, f"`{att.filename}` isn't a file type I can read"
 
-    async def _build_user_turn(self, message: discord.Message, prompt: str, key: str, session: Session) -> Tuple[List[dict], List[str]]:
+    async def _build_user_turn(self, message: discord.Message, prompt: str, key: str, session: Session,
+                               speaker: Optional[str] = None) -> Tuple[List[dict], List[str]]:
         context_lines = []
         attachments = list(message.attachments)
 
@@ -432,7 +458,8 @@ class ClaudeChat(commands.Cog):
             notes.append(f"only the first {MAX_ATTACHMENTS} attachments were read")
 
         text = prompt or "(no message text; see the attachments)"
-        blocks.append({"type": "text", "text": f"{message.author.display_name}: " + "\n".join(context_lines + [text])})
+        speaker = speaker or message.author.display_name
+        blocks.append({"type": "text", "text": f"{speaker}: " + "\n".join(context_lines + [text])})
         return blocks, notes
 
     async def _seed_thread_history(self, thread: discord.Thread, session: Session, before: discord.Message):
@@ -723,6 +750,193 @@ class ClaudeChat(commands.Cog):
             log.debug("Couldn't retitle thread %s: %s", thread.id, e)
 
     # ==========================================
+    #                BOT GUIDE
+    # ==========================================
+
+    async def _permission_level(self, member: discord.Member) -> str:
+        if await self.bot.is_owner(member):
+            return "bot owner"
+        if member.id == member.guild.owner_id:
+            return "server owner"
+        if await self.bot.is_admin(member):
+            return "admin"
+        if member.guild_permissions.administrator:
+            return "has Administrator permission"
+        if await self.bot.is_mod(member):
+            return "mod"
+        return "member"
+
+    def _requirement(self, command: commands.Command) -> Tuple[str, bool]:
+        """(who can run it, whether it's bot-owner only), from the command's checks or the nearest parent's or cog's."""
+        chain = [command, *command.parents]
+        if command.cog is not None:
+            chain.append(command.cog)
+        requires = [r for r in (getattr(obj, "requires", None) for obj in chain) if r is not None]
+        if any(r.privilege_level is commands.PrivilegeLevel.BOT_OWNER for r in requires):
+            return "bot owner only", True
+        for r in requires:
+            level = PRIVILEGE_NAMES.get(r.privilege_level)
+            perms = [name.replace("_", " ") for name, value in (r.user_perms or discord.Permissions.none()) if value]
+            if level and perms:
+                return f"{level} or {', '.join(perms)} permission", False
+            if level:
+                return f"{level} only", False
+            if perms:
+                return f"needs {', '.join(perms)} permission", False
+        return "", False
+
+    async def _command_catalog(self, guild: discord.Guild, prefix: str, include_owner: bool) -> str:
+        """Every command usable in this server, grouped by cog, as plain-text reference for the guide model.
+        Built fresh each time (it's cheap) and sorted so identical bot state gives identical, cacheable text."""
+        bot_name = guild.me.display_name
+
+        def fill(text: str, limit: int) -> List[str]:
+            text = (text or "").replace("[p]", prefix).replace("[botname]", bot_name).strip()
+            if len(text) > limit:
+                text = text[:limit].rstrip() + "…"
+            return [line.strip() for line in text.splitlines() if line.strip()]
+
+        def entries(cmds) -> List[str]:
+            lines = []
+            for command in sorted(cmds, key=lambda c: c.qualified_name):
+                if command.hidden or any(p.hidden for p in command.parents) or not command.is_enabled(guild):
+                    continue
+                requirement, owner_only = self._requirement(command)
+                if owner_only and not include_owner:
+                    continue
+                usage = f"{prefix}{command.qualified_name} {command.signature}".strip()
+                notes = []
+                if command.aliases:
+                    notes.append("aliases: " + ", ".join(command.aliases))
+                if requirement:
+                    notes.append(requirement)
+                head = f"- `{usage}`" + (f" ({'; '.join(notes)})" if notes else "")
+                lines.append("\n  ".join([head] + fill(command.help, GUIDE_HELP_CHARS)))
+            return lines
+
+        sections = []
+        for cog in sorted(self.bot.cogs.values(), key=lambda c: c.qualified_name.lower()):
+            if await self.bot.cog_disabled_in_guild(cog, guild):
+                continue
+            lines = entries(cog.walk_commands())
+            if lines:
+                about = fill(getattr(cog, "help", None) or cog.description, 400)
+                sections.append("\n".join([f"## {cog.qualified_name}", *about, *lines]))
+        loose = entries(c for c in self.bot.walk_commands() if c.cog is None)
+        if loose:
+            sections.append("\n".join(["## Other", *loose]))
+        return "\n\n".join(sections)
+
+    async def _guide_system_prompt(self, guild: discord.Guild, prefix: str, include_owner: bool) -> str:
+        catalog = await self._command_catalog(guild, prefix, include_owner)
+        return "\n".join([
+            f'You are the built-in guide for {guild.me.display_name}, a Discord bot in the server "{guild.name}". '
+            "People ask you in plain language what the bot can do and how to use it.",
+            "",
+            "How to answer:",
+            f"- Base every answer on the command reference below (prefix `{prefix}`). Never invent commands, "
+            "subcommands, arguments, or features that aren't in it. If nothing fits, say so plainly.",
+            "- Give the exact command to type in `inline code`, with a short example using realistic values when it "
+            "helps. In usages, <angle brackets> are required and [square brackets] are optional; people don't type "
+            "the brackets.",
+            "- Keep it short: a sentence or two plus the commands, or a brief numbered list for multi-step setups. "
+            "Use Discord markdown; Discord doesn't render tables.",
+            "- Each question starts with the asker's name and, in parentheses, their permission level. Notes like "
+            "\"admin only\" or \"needs manage messages permission\" say who can run a command. Lead with what the "
+            "asker can do themselves. If it needs more permission, say who can do it (a mod, an admin, the bot owner).",
+            f"- For every detail of one command, they can run `{prefix}help <command>`.",
+            f"- If the question isn't about this bot (general knowledge, chit-chat, homework), say you only answer "
+            f"questions about the bot and suggest `{prefix}ai <question>` instead.",
+            "- Never ping @everyone or @here.",
+            "",
+            "# Command reference",
+            "",
+            catalog,
+        ])
+
+    def _guide_intro(self, prefix: str) -> str:
+        return (
+            "📖 Ask me how to do anything with this bot, in plain English. For example:\n"
+            f"- `{prefix}guide how do I find a game everyone owns?`\n"
+            f"- `{prefix}howdoi start a vote on what to play`\n"
+            f"- `{prefix}guide what can I do with the AI chat?`\n"
+            "Reply to my answers to follow up."
+        )
+
+    async def _guide_respond(self, message: discord.Message, prompt: str):
+        """Answer a question about the bot itself, in the asker's own short guide conversation."""
+        channel = message.channel
+        guild = message.guild
+        prefix = await self._prefix(guild)
+        if not prompt and not message.attachments:
+            await self._send(message, channel, self._guide_intro(prefix))
+            return
+
+        client = await self._get_client()
+        if client is None:
+            await self._send(message, channel, f"⚠️ No Anthropic API key is set. The bot owner can add one with "
+                                               f"`{prefix}set api anthropic api_key,<key>`.")
+            return
+
+        key = f"GUIDE_{message.author.id}"
+        session = self._get_session(key)
+        async with session.lock:
+            if session.messages and time.monotonic() - session.last_active > GUIDE_IDLE_MINUTES * 60:
+                session.reset()
+
+            level = await self._permission_level(message.author)
+            content, notes = await self._build_user_turn(
+                message, prompt, key, session, speaker=f"{message.author.display_name} ({level})"
+            )
+            user_turn = {"role": "user", "content": content}
+            session.messages.append(user_turn)
+            model = await self.config.guide_model()
+            if model not in MODELS:
+                model = DEFAULT_GUIDE_MODEL
+
+            try:
+                async with channel.typing():
+                    system = await self._guide_system_prompt(guild, prefix, include_owner=level == "bot owner")
+                    response = await client.messages.create(
+                        model=model,
+                        max_tokens=GUIDE_MAX_TOKENS,
+                        # The catalog is the big, shared part: give it its own cache breakpoint so every
+                        # new guide conversation reads it from cache. Top-level caching covers the chat itself.
+                        system=[{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}],
+                        output_config={"effort": GUIDE_EFFORT},
+                        messages=session.messages,
+                        extra_body={"cache_control": {"type": "ephemeral"}},
+                    )
+            except Exception as e:
+                if session.messages and session.messages[-1] is user_turn:
+                    session.messages.pop()
+                reply, reset = self._describe_error(e, prefix)
+                if reset:
+                    session.reset()
+                await self._send(message, channel, reply)
+                return
+
+            await self._record_usage(message.author, self._usage_from(response, model))
+            text = "".join(b.text for b in response.content if b.type == "text").strip()
+            if response.stop_reason == "refusal" or not text:
+                session.messages.pop()
+                await self._send(message, channel, "🚫 I can't help with that one." if response.stop_reason == "refusal"
+                                 else "😶 I didn't come up with an answer. Try rephrasing?")
+                return
+
+            reply = text
+            if response.stop_reason == "max_tokens":
+                reply += "\n\n*(My answer was cut off. Ask me to continue.)*"
+            if notes:
+                reply += "\n-# Skipped: " + "; ".join(notes)
+            sent = await self._send(message, channel, reply)
+
+            session.messages.append({"role": "assistant", "content": text})
+            session.last_active = time.monotonic()
+            self._trim(session, GUIDE_MAX_HISTORY)
+            self._remember_answers(sent, key, message.author.id, session.generation)
+
+    # ==========================================
     #              CHAT COMMANDS
     # ==========================================
 
@@ -803,9 +1017,27 @@ class ClaudeChat(commands.Cog):
 
         await self._respond(ctx.message, prompt, f"THREAD_{thread.id}", channel=thread)
 
+    @commands.command(name="guide", aliases=["howto", "howdoi"])
+    @commands.guild_only()
+    @commands.cooldown(1, 4, commands.BucketType.user)
+    async def guide(self, ctx: commands.Context, *, question: str = ""):
+        """
+        Ask how to use this bot, in plain English.
+
+        The guide knows every command enabled in this server and answers with the
+        exact commands to type, based on what you're allowed to do. Reply to its
+        answers to follow up. You can also just @mention me with a question.
+
+        **Examples:**
+        - `[p]guide how do I find a game everyone owns?`
+        - `[p]howdoi start a vote on what to play`
+        - `[p]guide what can mods do with the word filter?`
+        """
+        await self._guide_respond(ctx.message, question)
+
     @commands.Cog.listener()
     async def on_message_without_command(self, message: discord.Message):
-        """Reply-to-continue, and @mentions inside AI threads."""
+        """Reply-to-continue, @mentions inside AI threads, and @mention questions for the bot guide."""
         if message.author.bot or message.guild is None:
             return
         if not message.content and not message.attachments:
@@ -814,7 +1046,10 @@ class ClaudeChat(commands.Cog):
         ref = message.reference
         entry = self._answers.get(ref.message_id) if ref is not None and ref.message_id else None
         in_ai_thread = message.channel.id in self._threads
-        if entry is None and not (in_ai_thread and self.bot.user in message.mentions):
+        mention = rf"<@!?{self.bot.user.id}>"
+        # Replies count as mentions too, so only a typed @mention in a fresh message asks the guide.
+        guide_mention = ref is None and not in_ai_thread and re.search(mention, message.content) is not None
+        if entry is None and not (in_ai_thread and self.bot.user in message.mentions) and not guide_mention:
             return
 
         if await self.bot.cog_disabled_in_guild(self, message.guild):
@@ -826,13 +1061,22 @@ class ClaudeChat(commands.Cog):
 
         if entry is not None:
             key, owner_id, _ = entry
-            if owner_id is not None and owner_id != message.author.id:
-                return  # someone else's private conversation
-        else:
+            # Anyone can follow up on a guide answer (it continues their own guide chat), but private
+            # conversations belong to their owner.
+            if owner_id is not None and owner_id != message.author.id and not key.startswith("GUIDE_"):
+                return
+        elif in_ai_thread:
             key, owner_id = f"THREAD_{message.channel.id}", None
+        else:
+            if not await self.config.guild(message.guild).guide_mentions():
+                return
+            key, owner_id = f"GUIDE_{message.author.id}", message.author.id
 
         # Respect the same permission rules (Permissions cog, cog checks) as the commands.
-        command = self.myai if key.startswith("USER_") else self.ai
+        if key.startswith("GUIDE_"):
+            command = self.guide
+        else:
+            command = self.myai if key.startswith("USER_") else self.ai
         ctx = await self.bot.get_context(message)
         try:
             if not await command.can_run(ctx):
@@ -843,8 +1087,11 @@ class ClaudeChat(commands.Cog):
         if self._reply_cooldown.get_bucket(message).update_rate_limit():
             return
 
-        prompt = re.sub(rf"<@!?{self.bot.user.id}>", "", message.content).strip()
-        await self._respond(message, prompt, key, owner_id=owner_id)
+        prompt = re.sub(mention, "", message.content).strip()
+        if key.startswith("GUIDE_"):
+            await self._guide_respond(message, prompt)
+        else:
+            await self._respond(message, prompt, key, owner_id=owner_id)
 
     # ==========================================
     #              SETTINGS COMMANDS
@@ -871,13 +1118,15 @@ class ClaudeChat(commands.Cog):
         ), inline=False)
         embed.add_field(name="Server", value=(
             f"**Web search:** {'On' if g['web_search'] else 'Off'}\n"
+            f"**@mention asks the guide:** {'On' if g['guide_mentions'] else 'Off'}\n"
             f"**Daily limit:** {g['daily_limit'] or 'Unlimited'} messages per user\n"
             f"**Persona:** {persona}"
         ), inline=False)
         embed.add_field(name="Bot-wide", value=(
             f"**Effort:** {await self.config.effort()}\n"
             f"**Memory:** last {await self.config.max_history()} messages, "
-            f"resets after {await self.config.idle_minutes()} idle minutes"
+            f"resets after {await self.config.idle_minutes()} idle minutes\n"
+            f"**Bot guide (`{ctx.clean_prefix}guide`):** {self._model_label(await self.config.guide_model())}"
         ), inline=False)
         await ctx.send(embed=embed)
 
@@ -992,6 +1241,24 @@ class ClaudeChat(commands.Cog):
         """Turn web search on or off for this server (searches cost $10 per 1,000)."""
         await self.config.guild(ctx.guild).web_search.set(enabled)
         await ctx.send(f"✅ Web search {'enabled' if enabled else 'disabled'}.")
+
+    @claude.command(name="guidementions")
+    @checks.admin_or_permissions(manage_guild=True)
+    async def claude_guidementions(self, ctx: commands.Context, enabled: bool):
+        """Turn on or off answering a plain @mention of the bot (outside AI threads) with the bot guide."""
+        await self.config.guild(ctx.guild).guide_mentions.set(enabled)
+        await ctx.send(f"✅ @mentioning me {'now asks' if enabled else 'no longer asks'} the bot guide. "
+                       f"`{ctx.clean_prefix}guide` always works.")
+
+    @claude.command(name="guidemodel")
+    @checks.is_owner()
+    async def claude_guidemodel(self, ctx: commands.Context, model: str):
+        """Set the model the bot guide (`[p]guide`) uses. Haiku is cheap and plenty for command help."""
+        resolved = self._resolve_model(model)
+        if resolved is None:
+            return await ctx.send(f"❌ Unknown model. See `{ctx.clean_prefix}claude models`.")
+        await self.config.guide_model.set(resolved)
+        await ctx.send(f"✅ The bot guide now uses {self._model_label(resolved)}.")
 
     @claude.command(name="persona")
     @checks.admin_or_permissions(manage_guild=True)

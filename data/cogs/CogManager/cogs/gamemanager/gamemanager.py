@@ -8,6 +8,7 @@ running votes resume after a reload.
 """
 
 import asyncio
+import difflib
 import logging
 import random
 import re
@@ -18,6 +19,7 @@ from datetime import date, datetime, timedelta, timezone, tzinfo
 from typing import Awaitable, Callable, Dict, List, Optional, Set, Tuple, Union
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError, available_timezones
 
+import aiohttp
 import discord
 from discord.ext import tasks
 from redbot.core import Config, app_commands, checks, commands
@@ -70,6 +72,11 @@ LIBRARY_ACTIONS = {
     "uninstall": ("Marked uninstalled", "Wasn't marked installed", discord.Color.orange()),
 }
 MEDALS = ["🥇", "🥈", "🥉"]
+
+# Checking new game names: library near-match -> Steam exact name -> AI web search (Claude cog).
+STEAM_SEARCH_URL = "https://store.steampowered.com/api/storesearch/"
+MAX_CHECKED_NAMES = 10          # bigger bulk adds skip the Steam and AI lookups
+MAX_AI_TITLE_LOOKUPS = 5        # AI web searches per command (about 1¢ each)
 
 # Read-only lookups the Claude cog's bot guide can call (see GameManager.guide_call_tool).
 GUIDE_TOOLS = [
@@ -199,7 +206,32 @@ def resolve_game(games: Dict[str, dict], name: str) -> Tuple[Optional[dict], Lis
     if len(partial) == 1:
         return partial[0], []
     partial.sort(key=lambda g: (not normalize(g["name"]).startswith(key), len(g["name"])))
-    return None, (exact or partial)[:5]
+    if exact or partial:
+        return None, (exact or partial)[:5]
+    # Typos ("rocket leage"): suggest close spellings, but never pick one automatically.
+    by_key = {normalize(g["name"]): g for g in games.values()}
+    return None, [by_key[k] for k in difflib.get_close_matches(key, list(by_key), n=3, cutoff=0.8)]
+
+
+def clean_title(name: str) -> str:
+    """Drop trademark symbols and extra spaces: 'HELLDIVERS™  2' -> 'HELLDIVERS 2'."""
+    return re.sub(r"\s+", " ", re.sub(r"[™®©]", "", name)).strip()[:100]
+
+
+async def steam_exact_title(name: str) -> Optional[Tuple[str, int]]:
+    """(title, app id) if Steam's store search has a game with exactly this name, ignoring case and symbols."""
+    try:
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=8)) as session:
+            async with session.get(STEAM_SEARCH_URL, params={"term": name, "l": "english", "cc": "US"}) as resp:
+                data = await resp.json(content_type=None)
+    except Exception as e:
+        log.debug("Steam search failed for %r: %s", name, e)
+        return None
+    for item in (data or {}).get("items", []):
+        title = clean_title(item.get("name") or "")
+        if item.get("type") == "app" and title and normalize(title) == normalize(name):
+            return title, item.get("id")
+    return None
 
 
 def describe_unresolved(name: str, candidates: List[dict]) -> str:
@@ -537,6 +569,32 @@ class ConfirmView(OwnerOnlyView):
         self.stop()
 
 
+class NameCheckView(OwnerOnlyView):
+    """Accept the corrected game names, keep what was typed, or cancel."""
+
+    def __init__(self, user_id: int, plural: bool):
+        super().__init__(user_id, timeout=180)
+        self.choice: Optional[str] = None
+        for label, style, value in (
+            ("Use the suggested names" if plural else "Use the suggested name", discord.ButtonStyle.success,
+             "suggested"),
+            ("Use what I typed", discord.ButtonStyle.secondary, "typed"),
+            ("Cancel", discord.ButtonStyle.danger, "cancel"),
+        ):
+            button = discord.ui.Button(label=label, style=style)
+            button.callback = self._choose(value)
+            self.add_item(button)
+
+    def _choose(self, value: str):
+        async def callback(interaction: discord.Interaction):
+            self.choice = value
+            self.stop()
+            note = {"suggested": "Using the suggested name.", "typed": "Using the name as typed.",
+                    "cancel": "Cancelled."}[value]
+            await interaction.response.edit_message(content=f"{interaction.message.content}\n-# {note}", view=None)
+        return callback
+
+
 class FilterModal(discord.ui.Modal, title="Find games"):
     query = discord.ui.TextInput(label="Part of the name (empty shows all)", required=False, max_length=100)
 
@@ -699,10 +757,11 @@ class UnknownGamesView(OwnerOnlyView):
     async def _go(self, interaction: discord.Interaction):
         self.stop()
         await interaction.response.edit_message(view=None)
-        embed = await self.cog.add_unknown_games(interaction.guild, interaction.channel, interaction.user,
-                                                 self.names, self.action, add=self.can_add)
-        await interaction.followup.send(embed=embed, ephemeral=interaction.message is not None
-                                        and interaction.message.flags.ephemeral)
+        ephemeral = interaction.message is not None and interaction.message.flags.ephemeral
+        embed = await self.cog.add_unknown_games(interaction, self.names, self.action, add=self.can_add,
+                                                 ephemeral=ephemeral)
+        if embed is not None:
+            await interaction.followup.send(embed=embed, ephemeral=ephemeral)
 
 
 # ==========================================
@@ -1086,13 +1145,15 @@ class GameManager(commands.Cog):
         view = GamePickerView(member, list(games.values()), selected, title, hint, on_save)
         view.message = await self.reply(target, embed=view.embed(), view=view, ephemeral=ephemeral)
 
-    async def add_games(self, guild: discord.Guild, member: discord.Member, names: List[str]) -> Tuple[List[str], List[str]]:
-        """Add games to the server library. Returns (added, already there)."""
+    async def add_games(self, guild: discord.Guild, member: discord.Member, names: List[str],
+                        appids: Optional[Dict[str, int]] = None) -> Tuple[List[str], List[str]]:
+        """Add games to the server library (with Steam app IDs when known). Returns (added, already there)."""
+        appids = appids or {}
         added, existing = [], []
         async with self.config.guild(guild).games() as games:
             known = {normalize(g["name"]): g["name"] for g in games.values()}
             for name in names:
-                name = name.strip()[:100]
+                name = clean_title(name)
                 key = normalize(name)
                 if not key:
                     continue
@@ -1103,20 +1164,105 @@ class GameManager(commands.Cog):
                 while gid in games:
                     gid = generate_id()
                 games[gid] = {"id": gid, "name": name, "description": "", "added_by": str(member.id),
-                              "added_at": utcnow().isoformat()}
+                              "added_at": utcnow().isoformat(), "steam_appid": appids.get(name)}
                 known[key] = name
                 added.append(name)
         return added, existing
 
-    async def add_unknown_games(self, guild, channel, member, names: List[str], action: str, *, add: bool) -> discord.Embed:
-        """The follow-up from UnknownGamesView: add the games (then apply the action), or request them."""
+    async def add_unknown_games(self, interaction: discord.Interaction, names: List[str], action: str, *,
+                                add: bool, ephemeral: bool = False) -> Optional[discord.Embed]:
+        """The follow-up from UnknownGamesView: check the names, then add them (and apply the action) or request them."""
+        guild, member, channel = who(interaction)
+        checked = await self.checked_names(interaction, member, names, ephemeral=ephemeral)
+        if checked is None:
+            return None
+        names, appids = checked
         if not add:
-            return await self.request_games(guild, channel, member, names, action)
-        added, _ = await self.add_games(guild, member, names)
+            return await self.request_games(guild, channel, member, names, action, appids=appids)
+        added, _ = await self.add_games(guild, member, names, appids)
         embed, _ = await self.change_library(guild, member, names, action)
         if added:
             embed.description = f"➕ **Added to the server library:** {', '.join(added)}\n" + embed.description
         return embed
+
+    # ---------- checking new game names ----------
+
+    async def suggest_titles(self, member: discord.Member,
+                             names: List[str]) -> List[Tuple[str, Optional[str], Optional[int], str]]:
+        """
+        For each typed name: (cleaned name, suggested title or None, Steam app ID or None, where it came from).
+        Checks, in order: a close match already in the library, an exact Steam store name, and (if the Claude
+        cog is loaded) an AI web search for the official title.
+        """
+        games = await self.config.guild(member.guild).games()
+        by_key = {normalize(g["name"]): g for g in games.values()}
+        finder = getattr(self.bot.get_cog("ClaudeChat"), "find_game_title", None)
+        lookups_allowed = len(names) <= MAX_CHECKED_NAMES
+        ai_left = MAX_AI_TITLE_LOOKUPS
+        results = []
+        for typed in names:
+            name = clean_title(typed)
+            key = normalize(name)
+            match = by_key.get(key)
+            if match is None and key:
+                close = difflib.get_close_matches(key, list(by_key), n=1, cutoff=0.85)
+                match = by_key[close[0]] if close else None
+            if match is not None:
+                results.append((name, match["name"], match.get("steam_appid"), "already in the library"))
+                continue
+            if not key or not lookups_allowed:
+                results.append((name, None, None, ""))
+                continue
+            steam = await steam_exact_title(name)
+            if steam is not None:
+                results.append((name, steam[0], steam[1], "Steam"))
+                continue
+            found = None
+            if finder is not None and ai_left > 0:
+                ai_left -= 1
+                try:
+                    found = await finder(name, member)
+                except Exception:
+                    log.exception("Game title lookup failed for %r", name)
+            if found:
+                results.append((name, clean_title(found["title"]), found.get("steam_appid"), "web search"))
+            else:
+                results.append((name, None, None, ""))
+        return results
+
+    async def checked_names(self, target: Target, member: discord.Member, names: List[str],
+                            ephemeral: bool = False) -> Optional[Tuple[List[str], Dict[str, int]]]:
+        """
+        Look up proper titles for new game names and let the person confirm any corrections.
+        Returns (final names, Steam app IDs by name), or None if they cancelled or didn't answer.
+        """
+        channel = who(target)[2]
+        async with channel.typing():
+            found = await self.suggest_titles(member, names)
+        suggested, typed, appids, lines = [], [], {}, []
+        for name, title, appid, source in found:
+            typed.append(name)
+            suggested.append(title or name)
+            if appid:
+                appids[title or name] = appid
+            # Capitalization and symbol fixes are applied silently; only real spelling changes need a yes.
+            if title and normalize(title) != normalize(name):
+                lines.append(f"- `{name}` → **{title}** ({source})")
+        if not lines:
+            return suggested, appids
+        plural = len(lines) > 1
+        view = NameCheckView(member.id, plural)
+        view.message = await self.reply(
+            target, view=view, ephemeral=ephemeral,
+            content=f"🔎 I checked {'those names' if plural else 'that name'}:\n" + "\n".join(lines)
+                    + f"\nUse {'these' if plural else 'it'} instead?",
+        )
+        await view.wait()
+        if view.choice == "suggested":
+            return suggested, appids
+        if view.choice == "typed":
+            return typed, {n: a for n, a in appids.items() if n in typed}
+        return None
 
     async def show_library(self, target: Target, member: discord.Member, ephemeral: bool = False):
         guild = who(target)[0]
@@ -1281,15 +1427,17 @@ class GameManager(commands.Cog):
     #            REQUESTS & INSTALLS
     # ==========================================
 
-    async def request_games(self, guild, channel, member, names: List[str], action: Optional[str] = None) -> discord.Embed:
+    async def request_games(self, guild, channel, member, names: List[str], action: Optional[str] = None,
+                            appids: Optional[Dict[str, int]] = None) -> discord.Embed:
         """File requests for new games. Each gets an approval message with Approve/Deny buttons."""
+        appids = appids or {}
         games = await self.config.guild(guild).games()
         known = {normalize(g["name"]): g["name"] for g in games.values()}
         created, exists, pending = [], [], []
         async with self.config.guild(guild).game_requests() as requests:
             requested = {normalize(r["name"]): r for r in requests.values()}
             for name in names:
-                name = name.strip()[:100]
+                name = clean_title(name)
                 key = normalize(name)
                 if not key:
                     continue
@@ -1301,15 +1449,16 @@ class GameManager(commands.Cog):
                     rid = generate_id()
                     requests[rid] = {"id": rid, "name": name, "description": "", "requested_by": str(member.id),
                                      "requested_at": utcnow().isoformat(), "for_action": action,
-                                     "channel_id": channel.id, "message_id": None}
+                                     "channel_id": channel.id, "message_id": None, "steam_appid": appids.get(name)}
                     requested[key] = requests[rid]
                     created.append((rid, name))
 
         then = {"own": " and add it to their library", "install": " and mark it installed for them"}.get(action, "")
         for rid, name in created:
+            store = f"\n[Steam store page](https://store.steampowered.com/app/{appids[name]})" if appids.get(name) else ""
             embed = discord.Embed(title=f"📨 Game request: {name}", color=discord.Color.blue(),
                                   description=f"{member.mention} asked to add **{name}** to the server library. "
-                                              f"Approving will add it{then}.")
+                                              f"Approving will add it{then}.{store}")
             embed.set_footer(text="Game admins can approve or deny")
             try:
                 message = await channel.send(embed=embed, view=request_view(rid), allowed_mentions=NO_PING)
@@ -1337,7 +1486,8 @@ class GameManager(commands.Cog):
             return None
         name, requester, action = request["name"], request["requested_by"], request.get("for_action")
         if approve:
-            await self.add_games(guild, approver, [name])
+            appid = request.get("steam_appid")
+            await self.add_games(guild, approver, [name], {name: appid} if appid else None)
             games = await self.config.guild(guild).games()
             game, _ = resolve_game(games, name)
             if game is not None and action in ("own", "install"):
@@ -1982,9 +2132,13 @@ class GameManager(commands.Cog):
         """
         Ask for games to be added to the server library. Separate several with commas.
 
-        A game admin approves or denies each request with a button.
+        The bot looks up each game's proper title (fixing typos and capitalization) and asks
+        before using a corrected name. A game admin approves or denies each request with a button.
         """
-        await ctx.send(embed=await self.request_games(ctx.guild, ctx.channel, ctx.author, parse_game_names(game_names)))
+        checked = await self.checked_names(ctx, ctx.author, parse_game_names(game_names))
+        if checked is not None:
+            names, appids = checked
+            await ctx.send(embed=await self.request_games(ctx.guild, ctx.channel, ctx.author, names, appids=appids))
 
     @games.command(name="requests")
     async def games_requests(self, ctx: commands.Context):
@@ -2235,9 +2389,15 @@ class GameManager(commands.Cog):
         """
         Add games to the server library. Separate them with commas or put one per line.
 
+        Up to 10 names at a time are checked for their proper titles (typos and capitalization)
+        before adding; you confirm any corrections. Bigger lists are added as typed.
+
         **Example:** `[p]games admin add Rocket League, Halo Infinite`
         """
-        added, existing = await self.add_games(ctx.guild, ctx.author, parse_game_names(game_names))
+        checked = await self.checked_names(ctx, ctx.author, parse_game_names(game_names))
+        if checked is None:
+            return
+        added, existing = await self.add_games(ctx.guild, ctx.author, *checked)
         lines = []
         if added:
             lines.append(f"✅ **Added ({len(added)}):** " + ", ".join(added))
@@ -2466,8 +2626,12 @@ class GameManager(commands.Cog):
     @slash.command(name="request", description="Ask for a game to be added to the server library")
     async def slash_request(self, interaction: discord.Interaction, game: str):
         guild, member, channel = who(interaction)
-        await self.reply(interaction, embed=await self.request_games(guild, channel, member, parse_game_names(game)),
-                         ephemeral=True)
+        await interaction.response.defer(ephemeral=True, thinking=True)  # the name lookup can take a few seconds
+        checked = await self.checked_names(interaction, member, parse_game_names(game), ephemeral=True)
+        if checked is not None:
+            names, appids = checked
+            await self.reply(interaction, embed=await self.request_games(guild, channel, member, names, appids=appids),
+                             ephemeral=True)
 
     @slash.command(name="timezone", description="Set the timezone your session times are read in")
     @app_commands.describe(zone="e.g. America/Chicago, Chicago, or CST. Leave empty to see yours.")

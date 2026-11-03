@@ -75,6 +75,11 @@ Quirks to know:
   - **Name lookups:** they use `resolve_game`, which matches exactly first and accepts a partial match only if it's unique.
   - **One implementation, two front ends:** shared methods take a `Target` (a Context or an Interaction), so text and slash commands reuse the same code.
   - **Game-admin commands:** use the `game_admin()` check, which raises `UserFeedbackCheckFailure` so the user sees why.
+  - **New game names:** they pass through `checked_names` before a request or add (`!games request`, `/games request`, `!games admin add`, and the Request/Add buttons).
+    - `suggest_titles` tries, in order: a library near-match (difflib), Steam's exact-name store search (`steam_exact_title`, no key), then the Claude cog's public `find_game_title(name, member)`.
+    - Fixes that only change capitalization or symbols apply silently. Real spelling changes need the person to confirm (`NameCheckView`).
+    - Games and requests store `steam_appid` when one is known.
+  - **`find_game_title`** (Claude cog) tries Haiku with `web_search_20260209`, then Haiku with `web_search_20250305`, then Sonnet (`TITLE_SEARCHERS`). It remembers the first option the API accepts, and it reports through a strict `report_title` client tool without sending a tool_result back.
 - `censord` reads guild and channel Config on every message.
 - `data/cogs/ButtonGreeter/` holds an **older, stale copy** of `buttongreeter.py`, `__init__.py` and `info.json` next to its `settings.json`. That copy isn't loaded; the live code is in `CogManager/cogs/buttongreeter/`. Don't edit the stale copy by mistake.
 - The `info.json` files have placeholder authors (`"YourName"`, `"Claude"`); the real author is Quillshot.

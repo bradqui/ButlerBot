@@ -174,6 +174,37 @@ GUIDE_ACTION_TOOL = {
     },
 }
 
+# ==========================================
+#     GAME TITLE LOOKUP (for other cogs)
+# ==========================================
+
+# Tried in order until one accepts the web search tool; the first that works is remembered.
+TITLE_SEARCHERS = [
+    ("claude-haiku-5-5", {"type": "web_search_20260209", "name": "web_search", "max_uses": 2}),
+    ("claude-haiku-5-5", {"type": "web_search_20250305", "name": "web_search", "max_uses": 2}),
+    ("claude-sonnet-5-5", {"type": "web_search_20260209", "name": "web_search", "max_uses": 2}),
+]
+TITLE_TOOL = {
+    "name": "report_title",
+    "description": "Report the game you identified. Call this exactly once, after searching.",
+    "strict": True,
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "found": {"type": "boolean",
+                      "description": "true only if you're confident which real game they mean"},
+            "title": {"type": "string",
+                      "description": "The official title exactly as the publisher styles it, without ™ or ®. "
+                                     "Empty if not found."},
+            "steam_appid": {"type": "integer",
+                            "description": "The Steam app ID from its store.steampowered.com/app/<id> URL, or 0 if "
+                                           "it isn't on Steam or you aren't sure."},
+        },
+        "required": ["found", "title", "steam_appid"],
+        "additionalProperties": False,
+    },
+}
+
 NO_MENTIONS = discord.AllowedMentions(everyone=False, users=False, roles=False, replied_user=False)
 EMPTY_USAGE = {"requests": 0, "input": 0, "output": 0, "cache_read": 0, "cache_write": 0, "searches": 0, "cost": 0.0}
 
@@ -296,6 +327,7 @@ class ClaudeChat(commands.Cog):
         self._threads: set = set()
         self._tasks: set = set()
         self._reply_cooldown = commands.CooldownMapping.from_cooldown(1, 4, commands.BucketType.user)
+        self._title_searcher = 0  # index into TITLE_SEARCHERS of the first option that worked
 
     async def cog_load(self):
         self._threads = set(await self.config.registered_threads())
@@ -1086,6 +1118,66 @@ class ClaudeChat(commands.Cog):
             task.add_done_callback(self._tasks.discard)
             # Interactive commands (menus, confirmations) can wait on people; don't hold up the rest forever.
             await asyncio.wait({task}, timeout=ACTION_STEP_TIMEOUT)
+
+    # ---------- public API: official game titles ----------
+
+    async def find_game_title(self, name: str, member: discord.Member) -> Optional[dict]:
+        """
+        For other cogs (GameManager): find the official title of the game someone typed, with a web search.
+        Returns {"title": str, "steam_appid": int or None}, or None if it isn't a game we can identify, the
+        API key is missing, or the lookup failed. Usage counts toward `member`'s server.
+        """
+        client = await self._get_client()
+        if client is None:
+            return None
+        prompt = (
+            "Someone in a Discord server typed the name of a video game, possibly misspelled or with the wrong "
+            f"capitalization: \"{name[:150]}\"\n\n"
+            "Search the web to work out which game they mean, then call report_title with its official title, "
+            "written exactly as the publisher styles it (keep its capitalization and punctuation; leave out ™ and "
+            "®). Include its Steam app ID if it's on Steam. If you can't tell which real game they mean, report "
+            "found as false."
+        )
+        for index in range(self._title_searcher, len(TITLE_SEARCHERS)):
+            model, search = TITLE_SEARCHERS[index]
+            try:
+                result = await self._search_title(client, model, search, prompt, member)
+            except anthropic.BadRequestError as e:
+                log.info("Game title search with %s/%s was rejected (%s); trying the next option.",
+                         model, search["type"], e.message)
+                continue
+            except anthropic.APIError as e:
+                log.warning("Game title search failed: %s", e)
+                return None
+            self._title_searcher = index
+            return result
+        return None
+
+    async def _search_title(self, client: anthropic.AsyncAnthropic, model: str, search: dict, prompt: str,
+                            member: discord.Member) -> Optional[dict]:
+        messages = [{"role": "user", "content": prompt}]
+        totals = dict(EMPTY_USAGE)
+        response = None
+        for _ in range(MAX_PAUSE_CONTINUATIONS + 1):
+            response = await client.messages.create(
+                model=model, max_tokens=4000, output_config={"effort": "low"},
+                tools=[search, TITLE_TOOL], messages=messages,
+            )
+            for k, v in self._usage_from(response, model).items():
+                totals[k] += v
+            if response.stop_reason != "pause_turn":
+                break
+            messages = messages + [{"role": "assistant", "content": response.content}]
+        totals["requests"] = 1
+        await self._record_usage(member, totals)
+        for block in response.content:
+            if block.type == "tool_use" and block.name == TITLE_TOOL["name"] and isinstance(block.input, dict):
+                title = str(block.input.get("title") or "").strip()
+                if not block.input.get("found") or not title:
+                    return None
+                appid = block.input.get("steam_appid")
+                return {"title": title[:100], "steam_appid": appid if isinstance(appid, int) and appid > 0 else None}
+        return None
 
     # ---------- read-only lookups offered by other cogs ----------
 

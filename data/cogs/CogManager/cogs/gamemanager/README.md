@@ -31,6 +31,17 @@ Buttons keep working after restarts and reloads, and running votes pick back up.
 - If a name isn't in the server library at all, a button offers to request it. Game admins, and members when `memberadd` is on, get a button to add it instead.
 - After an approval, the game is also owned or installed for the requester, matching what they were trying to do.
 
+**Proper titles for new games:** before a game is requested or added, the bot looks up its official name.
+1. **A close match already in the library:** "rocket leage" suggests the existing **Rocket League**.
+2. **An exact name on Steam:** "helldivers 2" becomes **HELLDIVERS 2**.
+3. **An AI web search,** when the Claude cog is loaded: "an eggtremely hard game" finds **An Eggstremely Hard Game**. This costs about 1¢ and is limited to 5 lookups per command.
+
+**What happens next:**
+- Fixes to capitalization or symbols are applied automatically.
+- Real spelling changes ask first: **Use the suggested name**, **Use what I typed**, or **Cancel**.
+- Games found on Steam keep their Steam ID, and requests link to the store page.
+- Admin bulk adds of more than 10 names skip the lookups.
+
 ## Finding something to play
 
 | Command | What it does |

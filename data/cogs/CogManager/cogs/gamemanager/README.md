@@ -1,397 +1,125 @@
-# GameManager Cog for Red-DiscordBot
+# GameManager
+
+Track the games your server owns, find something everyone can play, and vote on it.
+
+- **Libraries:** everyone marks the games they own and have installed. Installing a game counts as owning it.
+- **Pickers:** run `!games own` or `!games install` with no names to tick games in a searchable menu, 25 per page.
+- **Finding games:** list what a group owns or has installed in common, and rank favorites.
+- **Looking for group:** `!games lfg <game>` pings everyone who has a game installed.
+- **Sessions:** start one now or schedule it ("friday 9pm"). People join with a button, get a reminder 15 minutes before, and get a ping at the start.
+- **Votes:** the host presses **Start vote**. Everyone votes with buttons, ties are broken by people's rankings, and the winner is announced.
+- **Slash commands:** `/games …` with autocomplete for game names.
+
+Buttons keep working after restarts and reloads, and running votes pick back up.
+
+## Your library
 
-A comprehensive game library management system for Discord servers. Track owned and installed games, rank preferences, find shared games among friends, organize gaming sessions, and run voting polls.
+| Command | What it does |
+|---|---|
+| `!games own [games]` | Add games you own (comma-separated). With no names, opens the picker. Aliases `ownadd`, `iown` |
+| `!games unown [games]` | Remove games from your library. With no names, opens the picker |
+| `!games install [games]` | Mark games installed (and owned). With no names, opens the installed-games picker |
+| `!games uninstall [games]` | Mark games as not installed. They stay in your library |
+| `!games setrank <rank> <game>` | 1 = favorite; 0 clears. Alias `rank` |
+| `!games mygames` | Your library, favorites first. Aliases `library`, `mylibrary` |
+| `!games usergames <member>` | Someone else's library |
+| `!games timezone [zone]` | Set the timezone your session times are read in (`America/Chicago`, `Chicago`, `CST`) |
 
-## Features
+**Name matching:**
+- Names match ignoring case and punctuation ("counterstrike 2" finds "Counter-Strike 2").
+- A partial name is used only when exactly one game fits. For example, "Halo" asks which one you meant when there are two Halo games.
+- If a name isn't in the server library at all, a button offers to request it. Game admins, and members when `memberadd` is on, get a button to add it instead.
+- After an approval, the game is also owned or installed for the requester, matching what they were trying to do.
 
-- **Personal Game Library** - Track which games you own and have installed
-- **Game Rankings** - Rank your games by preference (1 = highest)
-- **Multi-Select Support** - Add/remove multiple games at once via buttons or text commands
-- **Shared Game Discovery** - Find games owned by multiple users
-- **Ranked-Choice Scoring** - See top games based on combined user rankings
-- **Gaming Sessions** - Start sessions, gather players, then vote on what to play
-- **Session Voting** - Vote restricted to session participants on their shared games
-- **Game Requests** - Users can request new games for admin approval
-- **Install Requests** - Admins can request users install specific games
+## Finding something to play
 
-## Installation
+| Command | What it does |
+|---|---|
+| `!games list` / `!games search <text>` | The server library (✅ = you have it installed) |
+| `!games whoowns <game>` / `!games whoinstalled <game>` | Who has a game |
+| `!games shared [members…]` | Games everyone named owns (no names = everyone in this channel with a library) |
+| `!games installed [members…]` | Games everyone named has installed |
+| `!games top [installed] [shared]` | The channel's favorites, by everyone's rankings |
+| `!games lfg <game>` | Ping everyone who has it installed (once per 5 minutes per person) |
+| `!games request <games>` | Ask for games to be added. A game admin approves with a button |
+| `!games requests` / `!games installrequests` | Pending requests |
 
-1. Copy the `gamemanager` folder to your Red-DiscordBot cogs directory
-2. Load the cog:
-   ```
-   [p]load gamemanager
-   ```
+## Sessions and votes
 
-## Commands
-
-### Basic Commands
-
-| Command | Description |
-|---------|-------------|
-| `[p]games list` | Show all available games (full list) |
-| `[p]games search <query>` | Search for games by name |
-| `[p]games mygames` | View your complete game library with ranks |
-
-### Managing Your Library
-
-#### Adding Games You Own
-
-**Interactive Selection:**
-```
-[p]games own
-```
-Opens a multi-select button menu. Click games to toggle selection, then click **Done**.
-
-**By Name (Single or Multiple):**
-```
-[p]games ownadd Counter-Strike 2
-[p]games ownadd Counter-Strike 2, Valorant, Apex Legends
-[p]games ownadd "Left 4 Dead 2", "Team Fortress 2"
-```
-- Separate games with commas
-- Use quotes for games with commas in their name
-- Aliases: `addowned`, `iown`
-
-#### Removing Games
-
-**Interactive Selection:**
-```
-[p]games unown
-```
-
-**By Name:**
-```
-[p]games unown Counter-Strike 2, Valorant
-```
-- Aliases: `removeowned`, `disown`
-
-#### Marking Games as Installed
-
-**Interactive Selection:**
-```
-[p]games install
-```
-
-**By Name:**
-```
-[p]games install Counter-Strike 2, Valorant
-```
-
-#### Marking Games as Uninstalled
-
-**Interactive Selection:**
-```
-[p]games uninstall
-```
-
-**By Name:**
-```
-[p]games uninstall Counter-Strike 2, Valorant
-```
-
-### Ranking Games
-
-Set a rank for a game you own (1 = highest preference):
-```
-[p]games setrank "Counter-Strike 2" 1
-[p]games setrank Valorant 2
-```
-
-### Finding Shared Games
-
-Find games owned by all mentioned users:
-```
-[p]games shared @user1 @user2 @user3
-```
-
-Without mentions, uses all members who can see the current channel:
-```
-[p]games shared
-```
-- Maximum 10 users
-- Minimum 2 users required
-
-### Top Games (Ranked-Choice)
-
-Show top-ranked games for channel members:
-```
-[p]games top
-[p]games top true        # Installed only
-[p]games top false true  # Shared only (owned by everyone)
-```
-
-**Scoring:**
-- Sums all user ranks for each game
-- Unranked games default to rank 100
-- Lower total score = higher priority
-
-### Requesting New Games
-
-Request a game to be added (requires admin approval):
-```
-[p]games request Elden Ring
-```
-
-View pending requests:
-```
-[p]games requests
-```
-
----
-
-## Gaming Sessions
-
-Gaming sessions allow you to gather players first, then vote on what game to play based on games everyone in the session owns.
-
-### Session Workflow
-
-1. **Start a session** - Host creates a general gaming session
-2. **Players join** - Others click the Join button
-3. **Start vote** - Host calls for a vote on shared games
-4. **Vote** - Only session participants can vote
-5. **Play** - Check results and play the winning game!
-
-### Session Commands
-
-**Start a gaming session:**
-```
-[p]games session
-[p]games session Friday Night Gaming
-[p]games play Game Night
-```
-- Optionally provide a title/description
-- You automatically join as the first participant
-- Aliases: `play`
-
-**View active sessions:**
-```
-[p]games sessions
-```
-
-**Start a vote for your session:**
-```
-[p]games sessionvote
-[p]games sessionvote <session_id> 2
-```
-- Only session host or admin can start
-- Needs at least 2 participants
-- Vote options are games **shared by all participants**
-- Only session participants can vote
-- Second argument sets max choices (default: 1)
-
-**View vote results:**
 ```
-[p]games results
-[p]games results <vote_id>
+!games session                          start now
+!games session Raid night               with a title
+!games session friday 9pm Raid night    scheduled (everyone sees it in their own timezone)
+!games session in 2h Rocket League
 ```
 
-**End a vote:**
-```
-[p]games endvote
-```
-
-**End a session:**
-```
-[p]games endsession
-[p]games endsession <session_id>
-```
-- Only session host or admin can end
-- Also cleans up associated vote
-
-### Quick-Vote (Channel-Based)
-
-For a quick vote without a session (all channel members can vote):
-```
-[p]games vote
-[p]games vote 3
-```
-
----
-
-## Admin Commands
-
-All admin commands require either:
-- Server Administrator permission, OR
-- The designated admin role (set with `setrole`)
-
-### Setup
-
-Set the admin role:
-```
-[p]games admin setrole @GameAdmin
-```
-
-### Managing Games
-
-**Add games:**
-```
-[p]games admin add Counter-Strike 2
-[p]games admin add Counter-Strike 2, Valorant, Apex Legends
-```
-
-**Remove games:**
-```
-[p]games admin remove Counter-Strike 2
-[p]games admin remove Counter-Strike 2, Valorant
-```
-
-**Rename a game:**
-```
-[p]games admin rename "CS2" Counter-Strike 2
-```
-
-**Bulk import (one per line):**
-```
-[p]games admin import
-Counter-Strike 2
-Valorant
-Apex Legends
-Overwatch 2
-```
-
-### Handling Requests
-
-**Approve a game request:**
-```
-[p]games admin approve Elden Ring
-```
-
-**Deny a game request:**
-```
-[p]games admin deny Elden Ring
-```
-
-### Install Requests
-
-Request specific users (or all channel members) to install a game:
-```
-[p]games admin requestinstall "Counter-Strike 2" @user1 @user2
-[p]games admin requestinstall Valorant
-```
-
-View pending install requests:
-```
-[p]games installrequests
-```
-
-### Cleanup
-
-Clear all gaming sessions:
-```
-[p]games admin clearsessions
-```
-
-Clear all votes:
-```
-[p]games admin clearvotes
-```
-
----
+**Times:**
+- Accepted forms: `9pm`, `9:30 pm`, `21:00`, `tonight 9pm`, `tomorrow 8pm`, `friday 9pm`, `9pm fri`, `11/14 7pm`, `in 1h30m`, or a pasted Discord timestamp.
+- Times are read in your timezone, falling back to the server default, then UTC.
+- Sessions end on their own 12 hours after they start (or were created).
 
-## Command Aliases
+**Session buttons:** **Join**, **Leave**, **Start vote** (host or game admin), and **End session**.
 
-| Primary | Aliases |
-|---------|---------|
-| `games` | `game`, `gm` |
-| `ownadd` | `addowned`, `iown` |
-| `unown` | `removeowned`, `disown` |
-| `mygames` | `library`, `mylibrary` |
-| `session` | `play` |
+**Vote options** come from the first of these that has any games:
+1. Games everyone has installed.
+2. Games everyone owns.
+3. Games at least two players have installed, with counts on the buttons.
 
----
+**How a vote runs:**
+- Each person picks up to N games, and pressing a game again takes the vote back.
+- The vote ends when everyone has voted or time runs out.
+- A tie goes to the game the players rank higher; if that's still tied, one is picked at random.
 
-## Data Storage
+| Command | What it does |
+|---|---|
+| `!games vote [picks] [duration] [session id]` | Start a vote, same as the button. E.g. `!games vote 2 3m`. Aliases `sessionvote`, `startvote` |
+| `!games results [vote id]` | The tally so far |
+| `!games endvote [vote id]` | End now and announce the winner |
+| `!games sessions` | Active sessions with links |
+| `!games endsession [session id]` | End your latest session here |
 
-All data is stored per-server using Red's Config system:
+## Game admins
 
-- **Games** - Server-wide game list with names and descriptions
-- **Users** - Per-user owned games, installed games, and rankings
-- **Game Requests** - Pending requests for new games
-- **Gaming Sessions** - Active sessions with participants
-- **Votes** - Active voting polls (session or channel-based)
-- **Install Requests** - Admin requests for users to install games
+Game admins are server administrators, Red admins, the bot owner, or anyone with the role set by `!games admin setrole`.
 
-Data persists across bot restarts.
+| Command | What it does |
+|---|---|
+| `!games admin add <games>` | Add games (commas or one per line). Alias `import` |
+| `!games admin remove <games>` | Remove games, and remove them from everyone's lists. Asks for confirmation |
+| `!games admin rename Old -> New` | Rename a game |
+| `!games admin approve <game>` / `deny <game>` | Handle requests (or use the buttons) |
+| `!games admin requestinstall "<game>" [members…]` | Ask people to install a game; they confirm with a button |
+| `!games admin memberadd <true/false>` | Let members add games themselves instead of requesting |
+| `!games admin timezone <zone>` | The server's default timezone for session times |
+| `!games admin setrole [role]` | Set the game admin role (server admins only) |
+| `!games admin settings` | Show the settings |
+| `!games admin clearsessions` / `clearvotes` | End all sessions / cancel all votes |
 
----
+## Slash commands
 
-## Examples
+The bot owner turns these on once:
 
-### Setting Up Your Library
-
-```
-# Add multiple games at once
-[p]games ownadd Counter-Strike 2, Valorant, Apex Legends, Minecraft
-
-# Mark some as installed
-[p]games install Counter-Strike 2, Minecraft
-
-# Set your rankings
-[p]games setrank "Counter-Strike 2" 1
-[p]games setrank Minecraft 2
-[p]games setrank Valorant 3
-
-# View your library
-[p]games mygames
 ```
-
-### Organizing a Game Night
-
+!slash enable games
+!slash sync
 ```
-# 1. Start a session
-[p]games session Friday Night Gaming
 
-# 2. Wait for friends to click "Join Session"
+The `/games` commands are `own`, `unown`, `install`, `uninstall`, `library`, `rank`, `whoowns`, `lfg`, `shared`, `top`, `session`, `vote`, `endsession`, `request` and `timezone`.
+- Game names autocomplete as you type, including after a comma.
+- Library changes and pickers are only visible to you.
 
-# 3. Check who's joined
-[p]games sessions
-
-# 4. Start the vote (host only)
-[p]games sessionvote
-
-# 5. Everyone votes by clicking buttons
-
-# 6. Check results
-[p]games results
-
-# 7. End the session when done
-[p]games endsession
-```
+## Asking in plain English
 
-### Finding Games to Play
+With the Claude cog loaded, `!guide` (or an @mention of the bot) can explain these commands and run them for you. For example:
 
 ```
-# See what games your group shares
-[p]games shared @friend1 @friend2 @friend3
-
-# See top-ranked games for the channel
-[p]games top
-
-# Quick vote for channel members
-[p]games vote 2
+!guide add Rocket League to my games and mark it installed
 ```
-
----
-
-## Tips
-
-1. **Use quotes** for game names with spaces when using text commands:
-   ```
-   [p]games setrank "Counter-Strike 2" 1
-   ```
-
-2. **Build your library first** - Session votes only show games that ALL participants own
-
-3. **Interactive menus** support pagination - use the navigation buttons to see more games
-
-4. **Rankings affect scoring** - set ranks on your favorite games to influence the `top` command results
-
-5. **Session votes are restricted** - only participants who joined the session can vote
 
-6. **Buttons persist** - Session and vote buttons remain functional even after bot restarts
+It runs with your own permissions. Game-admin commands wait for you to press **Run**.
 
----
+## Data
 
-## Support
+Everything is stored per server in Red's Config (identifier `8675309420`): games, each player's owned, installed and ranked games, requests, sessions and votes. Personal timezones are stored per user.
 
-For issues or feature requests, contact your server administrator or the bot maintainer.
+Timezone support needs the `tzdata` package (`!pipinstall tzdata`).

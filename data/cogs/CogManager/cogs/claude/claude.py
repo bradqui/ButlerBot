@@ -5,6 +5,7 @@ import os
 import re
 import time
 from collections import OrderedDict
+from copy import copy
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Dict, List, Optional, Tuple
@@ -136,6 +137,40 @@ PRIVILEGE_NAMES = {
     commands.PrivilegeLevel.BOT_OWNER: "bot owner",
 }
 
+# The guide can also run commands for people. They run as the asker (same permission checks as typing
+# them), and anything needing elevated rights waits for the asker to press Run.
+MAX_ACTION_COMMANDS = 5
+ACTION_STEP_TIMEOUT = 20      # seconds to wait for one command before starting the next
+ACTION_CONFIRM_TIMEOUT = 120
+ACTION_BLOCKED_COMMANDS = {"guide", "ai", "myai", "aithread"}
+GUIDE_ACTION_TOOL = {
+    "name": "run_commands",
+    "description": (
+        "Run bot commands for the asker, in order, exactly as if they had typed them. Use this when the asker "
+        "wants the bot to do something, not when they ask how to do it."
+    ),
+    "strict": True,
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "message": {
+                "type": "string",
+                "description": "One or two short sentences for the asker: what you're doing, and anything left "
+                               "for them or others to do afterwards.",
+            },
+            "commands": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": f"1-{MAX_ACTION_COMMANDS} commands from the reference, in the order to run them, "
+                               "without the prefix and with every argument filled in, e.g. "
+                               "\"games install Rocket League\".",
+            },
+        },
+        "required": ["message", "commands"],
+        "additionalProperties": False,
+    },
+}
+
 NO_MENTIONS = discord.AllowedMentions(everyone=False, users=False, roles=False, replied_user=False)
 EMPTY_USAGE = {"requests": 0, "input": 0, "output": 0, "cache_read": 0, "cache_write": 0, "searches": 0, "cost": 0.0}
 
@@ -178,6 +213,42 @@ def split_for_discord(text: str, limit: int = 1900) -> List[str]:
     return pages or [text]
 
 
+class ActionConfirmView(discord.ui.View):
+    """Run / Cancel buttons for guide actions that need elevated permissions. Only the asker can press them."""
+
+    def __init__(self, user_id: int):
+        super().__init__(timeout=ACTION_CONFIRM_TIMEOUT)
+        self.user_id = user_id
+        self.approved: Optional[bool] = None
+        self.message: Optional[discord.Message] = None
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("Only the person who asked can confirm this.", ephemeral=True)
+            return False
+        return True
+
+    async def _finish(self, interaction: discord.Interaction, approved: bool, note: str):
+        self.approved = approved
+        self.stop()
+        await interaction.response.edit_message(content=f"{interaction.message.content}\n-# {note}", view=None)
+
+    @discord.ui.button(label="Run", emoji="▶️", style=discord.ButtonStyle.success)
+    async def run(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._finish(interaction, True, "Running…")
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
+    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._finish(interaction, False, "Cancelled. Nothing was run.")
+
+    async def on_timeout(self):
+        if self.message is not None:
+            try:
+                await self.message.edit(content=f"{self.message.content}\n-# Timed out. Nothing was run.", view=None)
+            except discord.HTTPException:
+                pass
+
+
 class ClaudeChat(commands.Cog):
     """
     Chat with Anthropic's Claude.
@@ -205,6 +276,7 @@ class ClaudeChat(commands.Cog):
             persona=None,
             web_search=True,
             guide_mentions=True, # a plain @mention outside AI threads asks the bot guide
+            guide_actions=True,  # the guide may run commands on the asker's behalf
             daily_limit=0,       # AI messages per user per day; 0 = unlimited
             usage=dict(EMPTY_USAGE),
             usage_since=None,
@@ -711,19 +783,18 @@ class ClaudeChat(commands.Cog):
         log.exception("Unexpected error in Claude cog", exc_info=e)
         return "❌ Something went wrong while talking to Claude. The error was logged.", False
 
-    async def _send(self, message: discord.Message, channel, text: str) -> List[discord.Message]:
+    async def _send(self, message: discord.Message, channel, text: str,
+                    view: Optional[discord.ui.View] = None) -> List[discord.Message]:
+        """Send a possibly long reply. `view` goes on the last page."""
         sent = []
-        for i, page in enumerate(split_for_discord(text)):
+        pages = split_for_discord(text)
+        for i, page in enumerate(pages):
+            kwargs = {"allowed_mentions": NO_MENTIONS}
+            if view is not None and i == len(pages) - 1:
+                kwargs["view"] = view
             if i == 0 and channel == message.channel:
-                msg = await channel.send(
-                    page,
-                    reference=message.to_reference(fail_if_not_exists=False),
-                    mention_author=False,
-                    allowed_mentions=NO_MENTIONS,
-                )
-            else:
-                msg = await channel.send(page, allowed_mentions=NO_MENTIONS)
-            sent.append(msg)
+                kwargs.update(reference=message.to_reference(fail_if_not_exists=False), mention_author=False)
+            sent.append(await channel.send(page, **kwargs))
         return sent
 
     async def _retitle_thread(self, thread: discord.Thread, prompt: str, model: str, member: discord.Member):
@@ -755,34 +826,54 @@ class ClaudeChat(commands.Cog):
 
     async def _permission_level(self, member: discord.Member) -> str:
         if await self.bot.is_owner(member):
-            return "bot owner"
-        if member.id == member.guild.owner_id:
-            return "server owner"
-        if await self.bot.is_admin(member):
-            return "admin"
-        if member.guild_permissions.administrator:
-            return "has Administrator permission"
-        if await self.bot.is_mod(member):
-            return "mod"
-        return "member"
+            level = "bot owner"
+        elif member.id == member.guild.owner_id:
+            level = "server owner"
+        elif await self.bot.is_admin(member):
+            level = "admin"
+        elif member.guild_permissions.administrator:
+            level = "has Administrator permission"
+        elif await self.bot.is_mod(member):
+            level = "mod"
+        else:
+            level = "member"
+        # Cogs with their own roles (e.g. GameManager's game admin) can report them via guide_member_roles().
+        extra = []
+        for cog in self.bot.cogs.values():
+            hook = getattr(cog, "guide_member_roles", None)
+            if hook is not None:
+                try:
+                    extra.extend(await hook(member))
+                except Exception:
+                    log.debug("guide_member_roles failed in %s", cog.qualified_name, exc_info=True)
+        return ", ".join([level, *extra])
 
     def _requirement(self, command: commands.Command) -> Tuple[str, bool]:
-        """(who can run it, whether it's bot-owner only), from the command's checks or the nearest parent's or cog's."""
+        """
+        (who can run it, whether it's bot-owner only), from the command's checks or the nearest parent's or cog's.
+        Custom check functions can describe themselves with a `requirement` attribute (e.g. "game admin").
+        """
         chain = [command, *command.parents]
         if command.cog is not None:
             chain.append(command.cog)
         requires = [r for r in (getattr(obj, "requires", None) for obj in chain) if r is not None]
         if any(r.privilege_level is commands.PrivilegeLevel.BOT_OWNER for r in requires):
             return "bot owner only", True
-        for r in requires:
-            level = PRIVILEGE_NAMES.get(r.privilege_level)
-            perms = [name.replace("_", " ") for name, value in (r.user_perms or discord.Permissions.none()) if value]
-            if level and perms:
-                return f"{level} or {', '.join(perms)} permission", False
-            if level:
-                return f"{level} only", False
-            if perms:
-                return f"needs {', '.join(perms)} permission", False
+        for obj in chain:
+            r = getattr(obj, "requires", None)
+            if r is not None:
+                level = PRIVILEGE_NAMES.get(r.privilege_level)
+                perms = [name.replace("_", " ") for name, value in (r.user_perms or discord.Permissions.none()) if value]
+                if level and perms:
+                    return f"{level} or {', '.join(perms)} permission", False
+                if level:
+                    return f"{level} only", False
+                if perms:
+                    return f"needs {', '.join(perms)} permission", False
+            for check in getattr(obj, "checks", None) or []:
+                label = getattr(check, "requirement", None)
+                if label:
+                    return f"{label} only", False
         return "", False
 
     async def _command_catalog(self, guild: discord.Guild, prefix: str, include_owner: bool) -> str:
@@ -827,8 +918,33 @@ class ClaudeChat(commands.Cog):
             sections.append("\n".join(["## Other", *loose]))
         return "\n\n".join(sections)
 
-    async def _guide_system_prompt(self, guild: discord.Guild, prefix: str, include_owner: bool) -> str:
+    async def _guide_system_prompt(self, guild: discord.Guild, prefix: str, include_owner: bool, actions: bool) -> str:
         catalog = await self._command_catalog(guild, prefix, include_owner)
+        if actions:
+            action_rules = [
+                "",
+                "Doing things for people:",
+                "- When the asker wants the bot to do something (\"add Rocket League to my games\"), call run_commands "
+                "with the exact commands. When they ask how to do something (\"how do I add a game?\"), explain the "
+                "commands instead of running them.",
+                "- Commands run as the asker, with the asker's own permissions, as if they typed them.",
+                "- Use only commands from the reference, without the prefix, with every argument filled in. Never run "
+                "a command without arguments when that opens an interactive menu; fill in the arguments.",
+                "- Prefer commands the asker can run. If something needs a permission they clearly don't have, say "
+                "who can do it instead of calling the tool. Server roles can grant extra access, and the bot checks "
+                "permissions again before running anything.",
+                f"- Up to {MAX_ACTION_COMMANDS} commands, run in order, each finishing before the next starts. You "
+                "won't see their output, so order dependent steps correctly (add a game to the server library before "
+                "marking it installed).",
+                "- If part of the request can't happen yet (a vote needs at least two players, so others must join "
+                "the session first), do what you can and say in your message what's left.",
+                "- Commands that need mod, admin, or game admin rights wait for the asker to press Run.",
+                "- Only ban, kick, mute, warn, or delete messages when the asker explicitly asks for exactly that. "
+                "If a request is ambiguous, ask a short question instead of guessing.",
+                "- Never run guide or AI chat commands (guide, ai, myai, aithread).",
+            ]
+        else:
+            action_rules = ["- You can't run commands for people; tell them what to type."]
         return "\n".join([
             f'You are the built-in guide for {guild.me.display_name}, a Discord bot in the server "{guild.name}". '
             "People ask you in plain language what the bot can do and how to use it.",
@@ -848,28 +964,112 @@ class ClaudeChat(commands.Cog):
             f"- If the question isn't about this bot (general knowledge, chit-chat, homework), say you only answer "
             f"questions about the bot and suggest `{prefix}ai <question>` instead.",
             "- Never ping @everyone or @here.",
+            *action_rules,
             "",
             "# Command reference",
             "",
             catalog,
         ])
 
-    def _guide_intro(self, prefix: str) -> str:
-        return (
-            "📖 Ask me how to do anything with this bot, in plain English. For example:\n"
-            f"- `{prefix}guide how do I find a game everyone owns?`\n"
-            f"- `{prefix}howdoi start a vote on what to play`\n"
-            f"- `{prefix}guide what can I do with the AI chat?`\n"
-            "Reply to my answers to follow up."
-        )
+    def _guide_intro(self, prefix: str, actions: bool) -> str:
+        lines = [
+            "📖 Ask me how to do anything with this bot, in plain English. For example:",
+            f"- `{prefix}guide how do I find a game everyone owns?`",
+            f"- `{prefix}guide how do I start a vote on what to play?`",
+        ]
+        if actions:
+            lines.append(f"- `{prefix}guide add Rocket League to my games and mark it installed`")
+            lines.append("I can run commands for you too. Anything that needs extra permissions waits for you to press Run.")
+        lines.append("Reply to my answers to follow up.")
+        return "\n".join(lines)
+
+    # ---------- acting on the asker's behalf ----------
+
+    def _find_command(self, text: str) -> Optional[commands.Command]:
+        """The most specific command at the start of `text` (e.g. "games admin add Halo" -> games admin add)."""
+        tokens = text.split()
+        for n in range(min(len(tokens), 4), 0, -1):
+            command = self.bot.get_command(" ".join(tokens[:n]))
+            if command is not None:
+                return command
+        return None
+
+    async def _action_context(self, message: discord.Message, content: str) -> commands.Context:
+        """A context for `content` as if the asker had typed it (same author, channel, and permissions)."""
+        fake = copy(message)
+        fake.content = content
+        return await self.bot.get_context(fake)
+
+    async def _plan_actions(self, message: discord.Message, raw_commands: List[str],
+                            prefix: str) -> Tuple[List[str], List[str], bool]:
+        """Check each proposed command. Returns (runnable command lines, problems, whether to ask first)."""
+        prefixes = sorted(await self.bot.get_valid_prefixes(message.guild), key=len, reverse=True)
+        planned, problems, confirm = [], [], False
+        for raw in raw_commands[:MAX_ACTION_COMMANDS]:
+            text = raw.strip().strip("`").strip()
+            for p in prefixes:
+                if text.startswith(p):
+                    text = text[len(p):].strip()
+                    break
+            text = text.lstrip("/").strip()
+            if not text:
+                continue
+            command = self._find_command(text)
+            if command is None or command.hidden:
+                problems.append(f"`{prefix}{text}` isn't a command")
+                continue
+            if (command.root_parent or command).qualified_name in ACTION_BLOCKED_COMMANDS:
+                problems.append(f"I don't run `{prefix}{command.qualified_name}` for people")
+                continue
+            requirement, owner_only = self._requirement(command)
+            if owner_only:
+                problems.append(f"`{prefix}{command.qualified_name}` is for the bot owner to run themselves")
+                continue
+            ctx = await self._action_context(message, prefix + text)
+            try:
+                allowed = await command.can_run(ctx, check_all_parents=True)
+            except commands.CommandError:
+                allowed = False
+            if not allowed:
+                problems.append(f"you don't have permission for `{prefix}{command.qualified_name}`")
+                continue
+            confirm = confirm or bool(requirement)
+            planned.append(prefix + text)
+        if len(raw_commands) > MAX_ACTION_COMMANDS:
+            problems.append(f"I only run {MAX_ACTION_COMMANDS} commands at a time")
+        return planned, problems, confirm
+
+    async def _run_actions(self, message: discord.Message, lines: List[str]):
+        """Invoke each command as the asker, in order. Their output and errors appear as usual."""
+        for content in lines:
+            ctx = await self._action_context(message, content)
+            if not ctx.valid:
+                continue
+            task = asyncio.create_task(self.bot.invoke(ctx))
+            self._tasks.add(task)
+            task.add_done_callback(self._tasks.discard)
+            # Interactive commands (menus, confirmations) can wait on people; don't hold up the rest forever.
+            await asyncio.wait({task}, timeout=ACTION_STEP_TIMEOUT)
+
+    @staticmethod
+    def _action_call(response) -> Optional[dict]:
+        if response.stop_reason != "tool_use":
+            return None
+        for block in response.content:
+            if block.type == "tool_use" and block.name == GUIDE_ACTION_TOOL["name"] and isinstance(block.input, dict):
+                lines = [c for c in block.input.get("commands", []) if isinstance(c, str) and c.strip()]
+                if lines:
+                    return {"message": str(block.input.get("message", "")).strip(), "commands": lines}
+        return None
 
     async def _guide_respond(self, message: discord.Message, prompt: str):
-        """Answer a question about the bot itself, in the asker's own short guide conversation."""
+        """Answer a question about the bot, or do what was asked, in the asker's own short guide conversation."""
         channel = message.channel
         guild = message.guild
         prefix = await self._prefix(guild)
+        actions = await self.config.guild(guild).guide_actions()
         if not prompt and not message.attachments:
-            await self._send(message, channel, self._guide_intro(prefix))
+            await self._send(message, channel, self._guide_intro(prefix, actions))
             return
 
         client = await self._get_client()
@@ -880,6 +1080,7 @@ class ClaudeChat(commands.Cog):
 
         key = f"GUIDE_{message.author.id}"
         session = self._get_session(key)
+        pending: Optional[Tuple[List[str], Optional[ActionConfirmView]]] = None
         async with session.lock:
             if session.messages and time.monotonic() - session.last_active > GUIDE_IDLE_MINUTES * 60:
                 session.reset()
@@ -896,7 +1097,11 @@ class ClaudeChat(commands.Cog):
 
             try:
                 async with channel.typing():
-                    system = await self._guide_system_prompt(guild, prefix, include_owner=level == "bot owner")
+                    system = await self._guide_system_prompt(guild, prefix, include_owner=level.startswith("bot owner"),
+                                                             actions=actions)
+                    kwargs = {}
+                    if actions:
+                        kwargs["tools"] = [GUIDE_ACTION_TOOL]
                     response = await client.messages.create(
                         model=model,
                         max_tokens=GUIDE_MAX_TOKENS,
@@ -906,6 +1111,7 @@ class ClaudeChat(commands.Cog):
                         output_config={"effort": GUIDE_EFFORT},
                         messages=session.messages,
                         extra_body={"cache_control": {"type": "ephemeral"}},
+                        **kwargs,
                     )
             except Exception as e:
                 if session.messages and session.messages[-1] is user_turn:
@@ -918,23 +1124,58 @@ class ClaudeChat(commands.Cog):
 
             await self._record_usage(message.author, self._usage_from(response, model))
             text = "".join(b.text for b in response.content if b.type == "text").strip()
-            if response.stop_reason == "refusal" or not text:
+            action = self._action_call(response) if actions else None
+            if response.stop_reason == "refusal" or not (text or action):
                 session.messages.pop()
                 await self._send(message, channel, "🚫 I can't help with that one." if response.stop_reason == "refusal"
                                  else "😶 I didn't come up with an answer. Try rephrasing?")
                 return
 
-            reply = text
-            if response.stop_reason == "max_tokens":
-                reply += "\n\n*(My answer was cut off. Ask me to continue.)*"
+            view = None
+            if action is not None:
+                # Like image calls in the main chat, no tool_result goes back: the commands post their own output,
+                # and history records a plain-text note instead.
+                planned, problems, confirm = await self._plan_actions(message, action["commands"], prefix)
+                summary = action["message"] or text or "Here's what I can do."
+                lines = [f"🛠️ {summary}" if planned else summary]
+                if planned and confirm:
+                    lines.append("These need extra permissions, so press **Run** to go ahead:")
+                    lines.extend(f"`{c}`" for c in planned)
+                    view = ActionConfirmView(message.author.id)
+                elif planned:
+                    lines.append("-# Running: " + " · ".join(f"`{c}`" for c in planned))
+                if problems:
+                    lines.append("-# Skipped: " + "; ".join(problems))
+                reply = "\n".join(lines)
+                record = summary
+                if planned:
+                    record += f"\n[{'Asked the user to confirm' if confirm else 'Ran'}: {'; '.join(planned)}]"
+                if problems:
+                    record += f"\n[Skipped: {'; '.join(problems)}]"
+                pending = (planned, view) if planned else None
+            else:
+                reply = record = text
+                if response.stop_reason == "max_tokens":
+                    reply += "\n\n*(My answer was cut off. Ask me to continue.)*"
             if notes:
-                reply += "\n-# Skipped: " + "; ".join(notes)
-            sent = await self._send(message, channel, reply)
+                reply += "\n-# Skipped attachments: " + "; ".join(notes)
+            sent = await self._send(message, channel, reply, view=view)
+            if view is not None:
+                view.message = sent[-1]
 
-            session.messages.append({"role": "assistant", "content": text})
+            session.messages.append({"role": "assistant", "content": record})
             session.last_active = time.monotonic()
             self._trim(session, GUIDE_MAX_HISTORY)
             self._remember_answers(sent, key, message.author.id, session.generation)
+
+        # Outside the lock, so waiting for a confirmation doesn't block the asker's next question.
+        if pending is not None:
+            planned, view = pending
+            if view is not None:
+                await view.wait()
+                if not view.approved:
+                    return
+            await self._run_actions(message, planned)
 
     # ==========================================
     #              CHAT COMMANDS
@@ -1017,23 +1258,24 @@ class ClaudeChat(commands.Cog):
 
         await self._respond(ctx.message, prompt, f"THREAD_{thread.id}", channel=thread)
 
-    @commands.command(name="guide", aliases=["howto", "howdoi"])
+    @commands.command(name="guide")
     @commands.guild_only()
     @commands.cooldown(1, 4, commands.BucketType.user)
-    async def guide(self, ctx: commands.Context, *, question: str = ""):
+    async def guide(self, ctx: commands.Context, *, request: str = ""):
         """
-        Ask how to use this bot, in plain English.
+        Ask how to use this bot, or ask it to do something, in plain English.
 
-        The guide knows every command enabled in this server and answers with the
-        exact commands to type, based on what you're allowed to do. Reply to its
-        answers to follow up. You can also just @mention me with a question.
+        The guide knows every command enabled in this server. Ask "how do I…" and it tells you
+        what to type; ask it to do something and it runs the commands for you, with your own
+        permissions. Anything that needs mod, admin, or game admin rights waits for you to press Run.
+        Reply to its answers to follow up. You can also just @mention me.
 
         **Examples:**
-        - `[p]guide how do I find a game everyone owns?`
-        - `[p]howdoi start a vote on what to play`
+        - `[p]guide how do I start a vote on what to play?`
+        - `[p]guide add Rocket League to my games and mark it installed`
         - `[p]guide what can mods do with the word filter?`
         """
-        await self._guide_respond(ctx.message, question)
+        await self._guide_respond(ctx.message, request)
 
     @commands.Cog.listener()
     async def on_message_without_command(self, message: discord.Message):
@@ -1119,6 +1361,7 @@ class ClaudeChat(commands.Cog):
         embed.add_field(name="Server", value=(
             f"**Web search:** {'On' if g['web_search'] else 'Off'}\n"
             f"**@mention asks the guide:** {'On' if g['guide_mentions'] else 'Off'}\n"
+            f"**Guide runs commands for people:** {'On' if g['guide_actions'] else 'Off'}\n"
             f"**Daily limit:** {g['daily_limit'] or 'Unlimited'} messages per user\n"
             f"**Persona:** {persona}"
         ), inline=False)
@@ -1249,6 +1492,19 @@ class ClaudeChat(commands.Cog):
         await self.config.guild(ctx.guild).guide_mentions.set(enabled)
         await ctx.send(f"✅ @mentioning me {'now asks' if enabled else 'no longer asks'} the bot guide. "
                        f"`{ctx.clean_prefix}guide` always works.")
+
+    @claude.command(name="guideactions")
+    @checks.admin_or_permissions(manage_guild=True)
+    async def claude_guideactions(self, ctx: commands.Context, enabled: bool):
+        """
+        Let the bot guide run commands for people when they ask it to do something.
+
+        Commands always run with the asker's own permissions. Ones that need mod, admin, or
+        game admin rights wait for the asker to press Run. When off, the guide only explains.
+        """
+        await self.config.guild(ctx.guild).guide_actions.set(enabled)
+        await ctx.send("✅ The guide can now run commands for people." if enabled
+                       else "✅ The guide now only explains commands.")
 
     @claude.command(name="guidemodel")
     @checks.is_owner()

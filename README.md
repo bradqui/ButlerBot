@@ -12,13 +12,13 @@ All of them live in [`data/cogs/CogManager/cogs/`](data/cogs/CogManager/cogs/).
 
 | Cog | What it does | Main commands |
 |---|---|---|
-| [`claude`](data/cogs/CogManager/cogs/claude/) | AI chat with Anthropic's Claude (Sonnet 5.5 by default). It has shared channel conversations, private conversations, and AI threads. Replying to an answer continues the conversation. It reads images, PDFs, and text files, can search the web and cite sources, and tracks usage and cost, with optional daily limits. Image requests are handed to Gemini. It also includes a **bot guide** that uses Haiku to answer plain-English questions about the bot's own commands. | `!ai`, `!myai`, `!aithread`, `!guide`, `!claude …` |
+| [`claude`](data/cogs/CogManager/cogs/claude/) | AI chat with Anthropic's Claude (Sonnet 5.5 by default). It has shared channel conversations, private conversations, and AI threads. Replying to an answer continues the conversation. It reads images, PDFs, and text files, can search the web and cite sources, and tracks usage and cost, with optional daily limits. Image requests are handed to Gemini. It also includes a **bot guide** that uses Haiku to answer plain-English questions about the bot's commands, or to run them for you. Commands run with your own permissions, and anything that needs elevated rights waits for you to press **Run**. | `!ai`, `!myai`, `!aithread`, `!guide`, `!claude …` |
 | [`gemini`](data/cogs/CogManager/cogs/gemini/) | Image generation with Google Gemini. The Claude cog calls it for "draw…" requests. | `!draw`, `!draw edit`, `!gemini …` |
-| [`gamemanager`](data/cogs/CogManager/cogs/gamemanager/) | Per-server game library: games people own and have installed, rankings, a shared-game finder, play sessions, and timed votes. See its [README](data/cogs/CogManager/cogs/gamemanager/README.md). | `!games …` (aliases `game`, `gm`) |
+| [`gamemanager`](data/cogs/CogManager/cogs/gamemanager/) | Per-server game library: tick-box pickers for the games people own and have installed, rankings, a shared-game finder, "looking for group" pings, scheduled sessions with join buttons and reminders, and votes on what to play. See its [README](data/cogs/CogManager/cogs/gamemanager/README.md). | `!games …` (aliases `game`, `gm`), `/games …` |
 | [`buttongreeter`](data/cogs/CogManager/cogs/buttongreeter/) | Welcome flow for new members: alliance and role buttons, a `[TAG] Name` nickname, then agreeing to the rules. | `!bg …`, `!changerole`, `!forceclass`, `!forcerulesremove` |
 | [`censord`](data/cogs/CogManager/cogs/censord/) | Word filter with `off`/`low`/`high` levels, CSV word lists, per-channel overrides, and threshold punishments (delete, kick or ban). | `!censor …` |
 
-Not sure how to do something? Ask the bot: `!guide how do I start a game vote?`, or @mention it with a question.
+Not sure how to do something? Ask the bot: `!guide how do I start a game vote?`, or @mention it. You can also ask it to do things: `!guide add Rocket League to my games and mark it installed`.
 
 ### Third-party cogs (not in this repo)
 
@@ -69,10 +69,16 @@ Then, in Discord, as the bot owner:
 
 ```
 !pipinstall anthropic
+!pipinstall tzdata
 !set api anthropic api_key,<your Anthropic key>     (delete the message afterwards)
 !reload gemini
+!reload gamemanager
 !load claude
+!slash enable games
+!slash sync
 ```
+
+The last two turn on the `/games` slash commands. Buttons on game sessions and votes posted before this update stop working; start new ones.
 
 The Gemini cog needs its own key, set with `!gemini setkey <key>`, if it isn't set already.
 

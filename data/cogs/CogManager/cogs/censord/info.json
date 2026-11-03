@@ -1,0 +1,9 @@
+{
+    "author": ["YourName"],
+    "description": "Advanced chat censorship with configurable levels (Low/High), CSV word management, and threshold-based punishments.",
+    "install_msg": "The Censord cog has been installed. Default CSV files for 'Low' and 'High' filters have been created in the cog's data folder. Use [p]censor config to view settings.",
+    "short": "CSV-based Chat Censor",
+    "tags": ["censorship", "moderation", "filter"],
+    "min_bot_version": "3.5.0",
+    "hidden": false
+}

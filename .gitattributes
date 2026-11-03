@@ -1,0 +1,2 @@
+# The bot runs on Linux (Docker); keep LF line endings in the working tree.
+* text=auto eol=lf

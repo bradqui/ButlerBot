@@ -1,0 +1,1096 @@
+import asyncio
+import base64
+import logging
+import os
+import re
+import time
+from collections import OrderedDict
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from typing import Dict, List, Optional, Tuple
+
+import anthropic
+import discord
+from redbot.core import Config, checks, commands
+from redbot.core.bot import Red
+from redbot.core.utils.chat_formatting import box, humanize_number, pagify
+
+log = logging.getLogger("red.claude")
+
+
+# ==========================================
+#              MODELS & PRICING
+# ==========================================
+
+@dataclass(frozen=True)
+class ModelInfo:
+    name: str
+    input: float        # $ per 1M input tokens
+    output: float       # $ per 1M output tokens
+    cache_read: float   # $ per 1M cached input tokens read
+    cache_write: float  # $ per 1M input tokens written to cache (5 min TTL)
+    web_search: bool    # supports the web_search_20260209 server tool
+    fallback: bool      # supports server-side `fallbacks: "default"` on refusals
+
+
+MODELS: Dict[str, ModelInfo] = {
+    "claude-sonnet-5-5": ModelInfo("Sonnet 5.5", 2.00, 10.00, 0.20, 2.50, True, True),
+    "claude-opus-5-5": ModelInfo("Opus 5.5", 4.00, 20.00, 0.20, 5.00, True, True),
+    "claude-haiku-5-5": ModelInfo("Haiku 5.5", 0.10, 0.50, 0.01, 0.125, False, False),
+}
+MODEL_ALIASES = {
+    "sonnet": "claude-sonnet-5-5",
+    "opus": "claude-opus-5-5",
+    "haiku": "claude-haiku-5-5",
+}
+DEFAULT_MODEL = "claude-sonnet-5-5"
+WEB_SEARCH_COST = 0.01  # $10 per 1,000 searches
+EFFORT_LEVELS = ("low", "medium", "high")
+FALLBACK_BETA = "server-side-fallback-2026-07-01"
+MAX_TOKENS = 16000  # covers thinking + reply; non-streaming safe
+MAX_PAUSE_CONTINUATIONS = 3
+
+DEFAULT_PERSONA = "You are friendly, helpful, and to the point."
+
+# ==========================================
+#               ATTACHMENTS
+# ==========================================
+
+IMAGE_TYPES = {"image/png", "image/jpeg", "image/gif", "image/webp"}
+TEXT_EXTENSIONS = {
+    ".txt", ".md", ".py", ".js", ".ts", ".json", ".csv", ".log", ".yaml", ".yml", ".ini",
+    ".cfg", ".toml", ".html", ".css", ".xml", ".sql", ".sh", ".lua", ".java", ".c", ".cpp",
+    ".h", ".cs", ".go", ".rs",
+}
+MAX_IMAGE_BYTES = 5 * 1024 * 1024
+MAX_PDF_BYTES = 20 * 1024 * 1024
+MAX_TEXT_BYTES = 100 * 1024
+MAX_ATTACHMENTS = 5
+
+# ==========================================
+#         IMAGE REQUESTS (Gemini draws)
+# ==========================================
+
+# Fast path: obvious requests go straight to Gemini without spending Claude tokens.
+# Anchored at the start of the prompt so "help me draw conclusions..." stays with Claude.
+POLITE = r"^((please|can you|could you|would you|will you)\s+)?"
+IMAGE_NEW_TRIGGERS = [
+    re.compile(POLITE + r"(draw|paint|sketch|illustrate)\s+(?!conclusion)"),
+    re.compile(POLITE + r"(generate|create|make)\s+(me\s+)?an?\s+(image|picture|drawing|illustration|photo)\b"),
+    re.compile(r"^(an?\s+)?(image|picture|photo|drawing)\s+of\s+"),
+]
+# Only checked right after an image was made in the same conversation.
+IMAGE_UPDATE_TRIGGERS = [
+    re.compile(r"^(update|edit|change|modify)\s+(the\s+)?(image|picture|drawing)\b"),
+    re.compile(r"^(now\s+)?(make|change)\s+it\s+"),
+    re.compile(r"^(now\s+)?add\s+.+\s+to\s+(the\s+)?(image|picture|drawing)\b"),
+]
+
+# Fallback: image requests the patterns miss reach Claude, which can hand them off with this tool.
+MAX_IMAGES_PER_TURN = 2
+IMAGE_TOOL = {
+    "name": "generate_image",
+    "description": (
+        "Create a new image, or change the most recently generated image, and post it in the chat. "
+        "Call this whenever someone wants a picture, drawing, painting, illustration, logo, meme, or other "
+        "visual made or changed, however they phrase it. Do not call it to describe or analyze an image, or "
+        "when people are only talking about images. This is the only way you can produce images."
+    ),
+    "strict": True,
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "prompt": {
+                "type": "string",
+                "description": (
+                    "A complete, vivid image-generation prompt describing the final image: subject, style, "
+                    "composition, colors, mood, and any relevant details from the conversation. When editing, "
+                    "describe the whole desired result including the change (e.g. 'the same dragon, but blue')."
+                ),
+            },
+            "edit": {
+                "type": "boolean",
+                "description": "true to change the most recently generated image in this conversation; false for a new image.",
+            },
+        },
+        "required": ["prompt", "edit"],
+        "additionalProperties": False,
+    },
+}
+
+NO_MENTIONS = discord.AllowedMentions(everyone=False, users=False, roles=False, replied_user=False)
+EMPTY_USAGE = {"requests": 0, "input": 0, "output": 0, "cache_read": 0, "cache_write": 0, "searches": 0, "cost": 0.0}
+
+
+@dataclass
+class Session:
+    """In-memory conversation. History holds plain user/assistant turns only (no thinking blocks)."""
+    messages: List[dict] = field(default_factory=list)
+    last_active: float = 0.0
+    generation: int = 0          # bumped on every reset; lets stale reply-chains be detected
+    last_was_image: bool = False # enables the "make it blue" fast path
+    seeded: bool = False
+    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+
+    def reset(self):
+        self.messages.clear()
+        self.generation += 1
+        self.last_was_image = False
+
+
+def utc_today() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+
+def split_for_discord(text: str, limit: int = 1900) -> List[str]:
+    """Pagify, closing and reopening ``` code fences that get cut across pages."""
+    pages = []
+    reopen = ""
+    for page in pagify(text, page_length=limit):
+        page = reopen + page
+        open_lang = None
+        for match in re.finditer(r"```(\w*)", page):
+            open_lang = match.group(1) if open_lang is None else None
+        if open_lang is not None:
+            page += "\n```"
+            reopen = f"```{open_lang}\n"
+        else:
+            reopen = ""
+        pages.append(page)
+    return pages or [text]
+
+
+class ClaudeChat(commands.Cog):
+    """
+    Chat with Anthropic's Claude.
+
+    `[p]ai` talks in this channel's shared conversation, `[p]myai` keeps a private
+    conversation that follows you around, and `[p]aithread` starts a dedicated thread.
+    Reply to any of my answers to keep that conversation going.
+    """
+
+    def __init__(self, bot: Red):
+        self.bot = bot
+        self.config = Config.get_conf(self, identifier=5528341907, force_registration=True)
+        self.config.register_global(
+            default_model=DEFAULT_MODEL,
+            allowed_models=list(MODELS.keys()),
+            effort="low",
+            max_history=30,      # messages (user + assistant) kept per conversation
+            idle_minutes=60,     # conversation resets after this much inactivity
+            registered_threads=[],
+        )
+        self.config.register_guild(
+            persona=None,
+            web_search=True,
+            daily_limit=0,       # AI messages per user per day; 0 = unlimited
+            usage=dict(EMPTY_USAGE),
+            usage_since=None,
+        )
+        self.config.register_channel(model=None)
+        self.config.register_user(model=None)
+        self.config.register_member(usage=dict(EMPTY_USAGE), daily={"date": "", "count": 0})
+
+        self._client: Optional[anthropic.AsyncAnthropic] = None
+        self._client_key: Optional[str] = None
+        self._sessions: Dict[str, Session] = {}
+        # bot answer message id -> (session_key, owner_id or None, session generation)
+        self._answers: "OrderedDict[int, Tuple[str, Optional[int], int]]" = OrderedDict()
+        self._threads: set = set()
+        self._tasks: set = set()
+        self._reply_cooldown = commands.CooldownMapping.from_cooldown(1, 4, commands.BucketType.user)
+
+    async def cog_load(self):
+        self._threads = set(await self.config.registered_threads())
+
+    async def cog_unload(self):
+        for task in self._tasks:
+            task.cancel()
+        if self._client is not None:
+            await self._client.close()
+
+    async def red_delete_data_for_user(self, *, requester, user_id: int):
+        await self.config.user_from_id(user_id).clear()
+        for guild_id, members in (await self.config.all_members()).items():
+            if user_id in members:
+                await self.config.member_from_ids(guild_id, user_id).clear()
+        self._sessions.pop(f"USER_{user_id}", None)
+
+    # ==========================================
+    #                 HELPERS
+    # ==========================================
+
+    async def _get_client(self) -> Optional[anthropic.AsyncAnthropic]:
+        tokens = await self.bot.get_shared_api_tokens("anthropic")
+        key = tokens.get("api_key")
+        if not key:
+            return None
+        if self._client is None or key != self._client_key:
+            if self._client is not None:
+                await self._client.close()
+            self._client = anthropic.AsyncAnthropic(api_key=key, timeout=300.0, max_retries=2)
+            self._client_key = key
+        return self._client
+
+    async def _prefix(self, guild: Optional[discord.Guild]) -> str:
+        for prefix in await self.bot.get_valid_prefixes(guild):
+            if not prefix.startswith("<@"):
+                return prefix
+        return "!"
+
+    def _resolve_model(self, name: str) -> Optional[str]:
+        name = name.lower().strip()
+        model = MODEL_ALIASES.get(name, name)
+        return model if model in MODELS else None
+
+    def _model_label(self, model: Optional[str]) -> str:
+        info = MODELS.get(model)
+        return f"{info.name} (`{model}`)" if info else f"`{model}`"
+
+    def _session_key(self, ctx: commands.Context, private: bool) -> str:
+        if private:
+            return f"USER_{ctx.author.id}"
+        if ctx.channel.id in self._threads:
+            return f"THREAD_{ctx.channel.id}"
+        return f"CHANNEL_{ctx.channel.id}"
+
+    def _get_session(self, key: str) -> Session:
+        if key not in self._sessions:
+            self._sessions[key] = Session()
+        return self._sessions[key]
+
+    def _remember_answers(self, sent: List[discord.Message], key: str, owner_id: Optional[int], generation: int):
+        for msg in sent:
+            self._answers[msg.id] = (key, owner_id, generation)
+        while len(self._answers) > 5000:
+            self._answers.popitem(last=False)
+
+    async def _register_thread(self, thread_id: int):
+        self._threads.add(thread_id)
+        async with self.config.registered_threads() as threads:
+            if thread_id not in threads:
+                threads.append(thread_id)
+            del threads[:-500]
+
+    async def _model_for(self, key: str, author: discord.Member, channel) -> str:
+        if key.startswith("USER_"):
+            model = await self.config.user(author).model()
+        else:
+            if isinstance(channel, discord.Thread) and channel.parent is not None:
+                channel = channel.parent
+            model = await self.config.channel(channel).model()
+        model = model or await self.config.default_model()
+        return model if model in MODELS else DEFAULT_MODEL
+
+    async def _is_exempt(self, member: discord.Member) -> bool:
+        return (
+            await self.bot.is_owner(member)
+            or member.guild_permissions.administrator
+            or await self.bot.is_mod(member)
+        )
+
+    async def _limit_reached(self, member: discord.Member) -> Optional[int]:
+        limit = await self.config.guild(member.guild).daily_limit()
+        if not limit or await self._is_exempt(member):
+            return None
+        daily = await self.config.member(member).daily()
+        if daily["date"] == utc_today() and daily["count"] >= limit:
+            return limit
+        return None
+
+    async def _count_request(self, member: discord.Member):
+        async with self.config.member(member).daily() as daily:
+            if daily["date"] != utc_today():
+                daily["date"] = utc_today()
+                daily["count"] = 0
+            daily["count"] += 1
+
+    def _usage_from(self, response, requested_model: str) -> dict:
+        usage = response.usage
+        info = MODELS.get(response.model) or MODELS[requested_model]
+        inp = usage.input_tokens or 0
+        out = usage.output_tokens or 0
+        cache_read = getattr(usage, "cache_read_input_tokens", 0) or 0
+        cache_write = getattr(usage, "cache_creation_input_tokens", 0) or 0
+        server_tools = getattr(usage, "server_tool_use", None)
+        searches = (getattr(server_tools, "web_search_requests", 0) or 0) if server_tools else 0
+        cost = (
+            inp * info.input + out * info.output + cache_read * info.cache_read + cache_write * info.cache_write
+        ) / 1_000_000 + searches * WEB_SEARCH_COST
+        return {
+            "requests": 1, "input": inp, "output": out, "cache_read": cache_read,
+            "cache_write": cache_write, "searches": searches, "cost": cost,
+        }
+
+    async def _record_usage(self, member: discord.Member, usage: dict):
+        guild_conf = self.config.guild(member.guild)
+        if await guild_conf.usage_since() is None:
+            await guild_conf.usage_since.set(utc_today())
+        for scope in (guild_conf, self.config.member(member)):
+            async with scope.usage() as totals:
+                for k, v in usage.items():
+                    totals[k] = totals.get(k, 0) + v
+
+    def _image_generator(self):
+        """The Gemini cog if it's loaded and exposes the image API, else None."""
+        gemini = self.bot.get_cog("GeminiChat")
+        return gemini if gemini is not None and hasattr(gemini, "generate_image") else None
+
+    async def _system_prompt(self, guild: discord.Guild, web_search: bool, images: bool) -> str:
+        persona = await self.config.guild(guild).persona() or DEFAULT_PERSONA
+        today = datetime.now(timezone.utc).strftime("%A, %B %d, %Y")
+        lines = [
+            f'You are {guild.me.display_name}, an AI assistant chatting in the Discord server "{guild.name}".',
+            persona,
+            "",
+            "How to write for Discord:",
+            "- Use Discord markdown: **bold**, *italics*, `inline code`, ```code blocks``` with a language tag, "
+            "> quotes, - bullet lists, and # headers sparingly. Discord does not render tables, so use lists instead.",
+            "- Keep replies conversational and reasonably short (a few short paragraphs at most) unless someone "
+            "asks for detail or the task needs it.",
+            "- Each user message starts with the speaker's display name and a colon. In shared conversations "
+            "several people may be talking, so keep track of who said what and use names when it helps. "
+            "Don't start your own replies with a name.",
+            "- Never ping @everyone or @here.",
+        ]
+        if images:
+            lines.append("- When someone wants an image made or changed, use the generate_image tool rather than "
+                         "describing the image in text. You don't need to add a caption; the image is posted for you.")
+        else:
+            lines.append("- You can't create images right now. If someone asks for one, say image generation "
+                         "is currently unavailable.")
+        if web_search:
+            lines.append("- You can search the web when you need current or specialized information. "
+                         "Don't search for things you already know well.")
+        lines.append(f"Today's date is {today} (UTC).")
+        return "\n".join(lines)
+
+    # ==========================================
+    #           BUILDING THE USER TURN
+    # ==========================================
+
+    async def _referenced_message(self, message: discord.Message) -> Optional[discord.Message]:
+        ref = message.reference
+        if ref is None or ref.message_id is None:
+            return None
+        if isinstance(ref.resolved, discord.Message):
+            return ref.resolved
+        try:
+            return await message.channel.fetch_message(ref.message_id)
+        except discord.HTTPException:
+            return None
+
+    async def _attachment_block(self, att: discord.Attachment) -> Tuple[Optional[dict], Optional[str]]:
+        ctype = (att.content_type or "").split(";")[0].strip().lower()
+        ext = os.path.splitext(att.filename)[1].lower()
+        try:
+            if ctype in IMAGE_TYPES:
+                if att.size > MAX_IMAGE_BYTES:
+                    return None, f"`{att.filename}` is too large (images up to 5 MB)"
+                data = base64.standard_b64encode(await att.read()).decode("utf-8")
+                return {"type": "image", "source": {"type": "base64", "media_type": ctype, "data": data}}, None
+            if ctype == "application/pdf" or ext == ".pdf":
+                if att.size > MAX_PDF_BYTES:
+                    return None, f"`{att.filename}` is too large (PDFs up to 20 MB)"
+                data = base64.standard_b64encode(await att.read()).decode("utf-8")
+                return {"type": "document", "source": {"type": "base64", "media_type": "application/pdf", "data": data}}, None
+            if ctype.startswith("text/") or ext in TEXT_EXTENSIONS:
+                if att.size > MAX_TEXT_BYTES:
+                    return None, f"`{att.filename}` is too large (text files up to 100 KB)"
+                text = (await att.read()).decode("utf-8", errors="replace")
+                return {"type": "text", "text": f"Contents of attached file {att.filename}:\n```\n{text}\n```"}, None
+        except discord.HTTPException:
+            return None, f"couldn't download `{att.filename}`"
+        return None, f"`{att.filename}` isn't a file type I can read"
+
+    async def _build_user_turn(self, message: discord.Message, prompt: str, key: str, session: Session) -> Tuple[List[dict], List[str]]:
+        context_lines = []
+        attachments = list(message.attachments)
+
+        ref = await self._referenced_message(message)
+        if ref is not None:
+            entry = self._answers.get(ref.id)
+            already_in_history = entry is not None and entry[0] == key and entry[2] == session.generation
+            if not already_in_history:
+                quoted = ref.content.strip()
+                if len(quoted) > 1500:
+                    quoted = quoted[:1500] + "…"
+                if quoted:
+                    context_lines.append(f'(Replying to {ref.author.display_name}: "{quoted}")')
+                else:
+                    context_lines.append(f"(Replying to a message from {ref.author.display_name})")
+                attachments.extend(ref.attachments)
+
+        blocks, notes = [], []
+        for att in attachments[:MAX_ATTACHMENTS]:
+            block, note = await self._attachment_block(att)
+            if block:
+                blocks.append(block)
+            if note:
+                notes.append(note)
+        if len(attachments) > MAX_ATTACHMENTS:
+            notes.append(f"only the first {MAX_ATTACHMENTS} attachments were read")
+
+        text = prompt or "(no message text; see the attachments)"
+        blocks.append({"type": "text", "text": f"{message.author.display_name}: " + "\n".join(context_lines + [text])})
+        return blocks, notes
+
+    async def _seed_thread_history(self, thread: discord.Thread, session: Session, before: discord.Message):
+        """After a restart, rebuild an AI thread's context from its recent messages."""
+        session.seeded = True
+        try:
+            history = [m async for m in thread.history(limit=20, before=before)]
+        except discord.HTTPException:
+            return
+        for msg in reversed(history):
+            if not msg.content:
+                continue
+            if msg.author == self.bot.user:
+                session.messages.append({"role": "assistant", "content": msg.content})
+            elif not msg.author.bot:
+                session.messages.append({"role": "user", "content": f"{msg.author.display_name}: {msg.content}"})
+        while session.messages and session.messages[0]["role"] != "user":
+            session.messages.pop(0)
+
+    # ==========================================
+    #               CORE PIPELINE
+    # ==========================================
+
+    async def _respond(self, message: discord.Message, prompt: str, key: str, *,
+                       owner_id: Optional[int] = None, channel=None):
+        """Answer `message` in conversation `key`. `channel` overrides where the answer goes (used by aithread)."""
+        channel = channel or message.channel
+        guild = message.guild
+        prefix = await self._prefix(guild)
+
+        client = await self._get_client()
+        if client is None:
+            await self._send(message, channel, f"⚠️ No Anthropic API key is set. The bot owner can add one with "
+                                               f"`{prefix}set api anthropic api_key,<key>`.")
+            return
+
+        limit = await self._limit_reached(message.author)
+        if limit:
+            await self._send(message, channel, f"⏳ You've used all {limit} of today's AI messages. "
+                                               "The limit resets at midnight UTC.")
+            return
+
+        session = self._get_session(key)
+        async with session.lock:
+            idle = await self.config.idle_minutes()
+            if session.messages and time.monotonic() - session.last_active > idle * 60:
+                session.reset()
+            if isinstance(channel, discord.Thread) and key.startswith("THREAD_") and not session.seeded:
+                await self._seed_thread_history(channel, session, message)
+
+            if await self._fast_path_image(message, prompt, key, session, owner_id, channel):
+                return
+
+            content, notes = await self._build_user_turn(message, prompt, key, session)
+            user_turn = {"role": "user", "content": content}
+            session.messages.append(user_turn)
+            model = await self._model_for(key, message.author, channel)
+
+            try:
+                async with channel.typing():
+                    text, sources, stop_reason, image_calls = await self._call_claude(client, model, session, message.author)
+            except Exception as e:
+                if session.messages and session.messages[-1] is user_turn:
+                    session.messages.pop()
+                reply, reset = self._describe_error(e, prefix)
+                if reset:
+                    session.reset()
+                await self._send(message, channel, reply)
+                return
+
+            if stop_reason == "refusal" or not (text or image_calls):
+                session.messages.pop()
+                reply = ("🚫 I can't help with that one." if stop_reason == "refusal"
+                         else "😶 I didn't come up with a reply. Try rephrasing?")
+                await self._send(message, channel, reply)
+                return
+
+            sent = []
+            if text or notes:
+                reply = text + sources
+                if stop_reason == "max_tokens":
+                    reply += "\n\n*(My reply was cut off. Ask me to continue.)*"
+                if notes:
+                    reply += "\n-# Skipped: " + "; ".join(notes)
+                sent += await self._send(message, channel, reply.strip())
+
+            # History stays plain text: image calls are recorded as a note Claude can refer back to.
+            record = [text] if text else []
+            for call in image_calls:
+                image_msg = await self._generate_image(message, channel, key, call)
+                if image_msg is not None:
+                    sent.append(image_msg)
+                    record.append(f'[Generated an image: "{call["prompt"]}"]')
+                else:
+                    record.append("[Tried to generate an image, but it failed.]")
+
+            session.messages.append({"role": "assistant", "content": "\n".join(record)})
+            session.last_was_image = any(r.startswith("[Generated") for r in record)
+            session.last_active = time.monotonic()
+            self._trim(session, await self.config.max_history())
+            self._remember_answers(sent, key, owner_id, session.generation)
+            await self._count_request(message.author)
+
+    async def _call_claude(self, client: anthropic.AsyncAnthropic, model: str, session: Session,
+                           member: discord.Member) -> Tuple[str, str, str, List[dict]]:
+        """Returns (reply text, sources footer, stop_reason, generate_image calls)."""
+        info = MODELS[model]
+        web_search = info.web_search and await self.config.guild(member.guild).web_search()
+        images = self._image_generator() is not None
+        kwargs = {
+            "model": model,
+            "max_tokens": MAX_TOKENS,
+            "system": await self._system_prompt(member.guild, web_search, images),
+            "output_config": {"effort": await self.config.effort()},
+            # Top-level cache_control caches the conversation prefix automatically.
+            "extra_body": {"cache_control": {"type": "ephemeral"}},
+        }
+        tools = []
+        if images:
+            tools.append(IMAGE_TOOL)
+        if web_search:
+            tools.append({"type": "web_search_20260209", "name": "web_search", "max_uses": 3})
+        if tools:
+            kwargs["tools"] = tools
+        if info.fallback:
+            # On a safety-classifier refusal, Anthropic re-runs the request on a recommended model.
+            kwargs["betas"] = [FALLBACK_BETA]
+            kwargs["extra_body"]["fallbacks"] = "default"
+
+        messages = list(session.messages)
+        blocks = []
+        totals = dict(EMPTY_USAGE)
+        response = None
+        for _ in range(MAX_PAUSE_CONTINUATIONS + 1):
+            response = await client.beta.messages.create(messages=messages, **kwargs)
+            for k, v in self._usage_from(response, model).items():
+                totals[k] += v
+            blocks.extend(response.content)
+            if response.stop_reason != "pause_turn":
+                break
+            # A long web search paused the turn; send it back so Claude can finish.
+            messages = messages + [{"role": "assistant", "content": response.content}]
+        totals["requests"] = 1
+        await self._record_usage(member, totals)
+
+        if response.stop_reason == "refusal":
+            return "", "", "refusal", []
+
+        # Image requests: run them instead of sending tool results back, which saves a second API call.
+        # A max_tokens stop can truncate a tool input, so don't act on calls from a cut-off turn.
+        image_calls = []
+        if response.stop_reason == "tool_use":
+            for b in blocks:
+                if b.type == "tool_use" and b.name == "generate_image":
+                    args = b.input if isinstance(b.input, dict) else {}
+                    prompt = args.get("prompt")
+                    if isinstance(prompt, str) and prompt.strip():
+                        image_calls.append({"prompt": prompt.strip(), "edit": bool(args.get("edit"))})
+            image_calls = image_calls[:MAX_IMAGES_PER_TURN]
+
+        # Drop "let me search for that" preamble: keep the text written after the last search result.
+        last_result = max((i for i, b in enumerate(blocks) if b.type == "web_search_tool_result"), default=-1)
+        text_blocks = [b for b in blocks[last_result + 1:] if b.type == "text"] or [b for b in blocks if b.type == "text"]
+        text = "".join(b.text for b in text_blocks).strip()
+
+        sources = OrderedDict()
+        for b in text_blocks:
+            for citation in getattr(b, "citations", None) or []:
+                url = getattr(citation, "url", None)
+                if url and url not in sources:
+                    title = (getattr(citation, "title", None) or url).replace("[", "").replace("]", "")
+                    sources[url] = title[:60]
+        footer = ""
+        if sources:
+            links = [f"[{title}](<{url}>)" for url, title in list(sources.items())[:5]]
+            footer = "\n\n**Sources:** " + " · ".join(links)
+        return text, footer, response.stop_reason, image_calls
+
+    async def _fast_path_image(self, message: discord.Message, prompt: str, key: str, session: Session,
+                               owner_id: Optional[int], channel) -> bool:
+        """Send obvious image requests straight to Gemini, skipping Claude. Returns True if handled."""
+        gemini = self._image_generator()
+        if gemini is None:
+            return False  # Claude will explain that images are unavailable
+        lowered = prompt.strip().lower()
+        is_new = any(p.match(lowered) for p in IMAGE_NEW_TRIGGERS)
+        is_update = session.last_was_image and any(p.match(lowered) for p in IMAGE_UPDATE_TRIGGERS)
+        if not (is_new or is_update):
+            return False
+
+        async with channel.typing():
+            sent = await gemini.generate_image(prompt, key, message, channel=channel, user=message.author, new=is_new)
+        if sent is None:
+            return True  # Gemini already posted the error
+
+        # Note the image in Claude's history so later questions about it make sense.
+        session.messages.append({"role": "user", "content": f"{message.author.display_name}: {prompt}"})
+        session.messages.append({"role": "assistant", "content": f'[Generated an image: "{prompt}"]'})
+        session.last_was_image = True
+        session.last_active = time.monotonic()
+        self._trim(session, await self.config.max_history())
+        self._remember_answers([sent], key, owner_id, session.generation)
+        await self._count_request(message.author)
+        return True
+
+    async def _generate_image(self, message: discord.Message, channel, key: str, call: dict) -> Optional[discord.Message]:
+        """Run one generate_image tool call through the Gemini cog. Gemini posts its own errors."""
+        gemini = self._image_generator()
+        if gemini is None:
+            return None
+        # Without a live Gemini session there is nothing to edit, so start fresh from the full prompt.
+        new = not (call["edit"] and key in getattr(gemini, "image_sessions", {}))
+        async with channel.typing():
+            return await gemini.generate_image(call["prompt"], key, message, channel=channel, user=message.author, new=new)
+
+    def _trim(self, session: Session, max_messages: int):
+        if len(session.messages) > max_messages:
+            del session.messages[: len(session.messages) - max_messages]
+        while session.messages and session.messages[0]["role"] != "user":
+            session.messages.pop(0)
+
+    def _describe_error(self, e: Exception, prefix: str) -> Tuple[str, bool]:
+        """Map an exception to (user-facing message, whether to reset the conversation)."""
+        if isinstance(e, anthropic.AuthenticationError):
+            return f"🔑 The Anthropic API key was rejected. The bot owner can update it with `{prefix}set api anthropic api_key,<key>`.", False
+        if isinstance(e, anthropic.PermissionDeniedError):
+            return "🔒 The Anthropic API key isn't allowed to use this model.", False
+        if isinstance(e, anthropic.NotFoundError):
+            return f"❓ That model wasn't found. Pick another with `{prefix}claude channelmodel` or `{prefix}claude mymodel`.", False
+        if isinstance(e, anthropic.RateLimitError):
+            return "⏳ Claude is getting too many requests right now. Try again in a minute.", False
+        if isinstance(e, anthropic.BadRequestError):
+            msg = e.message or ""
+            if "credit balance" in msg.lower():
+                return "💳 The Anthropic account is out of credits. The bot owner needs to top it up.", False
+            if "too long" in msg.lower():
+                return "🧹 This conversation got too long, so I've started a fresh one. Please ask again.", True
+            log.warning("Claude rejected a request: %s", msg)
+            return f"⚠️ Claude couldn't process that request:{box(msg[:500])}", False
+        if isinstance(e, anthropic.APIStatusError):
+            if e.status_code >= 500:
+                return "🛑 Claude is overloaded or having trouble right now. Try again shortly.", False
+            log.warning("Anthropic API error %s: %s", e.status_code, e.message)
+            return f"⚠️ Anthropic API error ({e.status_code}).", False
+        if isinstance(e, anthropic.APITimeoutError):
+            return "⌛ Claude took too long to respond. Try again.", False
+        if isinstance(e, anthropic.APIConnectionError):
+            return "📡 I couldn't reach the Anthropic API. Try again shortly.", False
+        log.exception("Unexpected error in Claude cog", exc_info=e)
+        return "❌ Something went wrong while talking to Claude. The error was logged.", False
+
+    async def _send(self, message: discord.Message, channel, text: str) -> List[discord.Message]:
+        sent = []
+        for i, page in enumerate(split_for_discord(text)):
+            if i == 0 and channel == message.channel:
+                msg = await channel.send(
+                    page,
+                    reference=message.to_reference(fail_if_not_exists=False),
+                    mention_author=False,
+                    allowed_mentions=NO_MENTIONS,
+                )
+            else:
+                msg = await channel.send(page, allowed_mentions=NO_MENTIONS)
+            sent.append(msg)
+        return sent
+
+    async def _retitle_thread(self, thread: discord.Thread, prompt: str, model: str, member: discord.Member):
+        client = await self._get_client()
+        if client is None:
+            return
+        try:
+            response = await client.messages.create(
+                model=model,
+                max_tokens=1000,
+                output_config={"effort": "low"},
+                messages=[{"role": "user", "content": (
+                    "Write a short title (3-6 words) for a conversation that starts with the message below. "
+                    "Reply with only the title.\n\n" + prompt[:1000]
+                )}],
+            )
+            usage = self._usage_from(response, model)
+            usage["requests"] = 0
+            await self._record_usage(member, usage)
+            title = "".join(b.text for b in response.content if b.type == "text").strip().strip('"*').strip()
+            if response.stop_reason == "end_turn" and title:
+                await thread.edit(name=f"🤖 {title}"[:100])
+        except (anthropic.APIError, discord.HTTPException) as e:
+            log.debug("Couldn't retitle thread %s: %s", thread.id, e)
+
+    # ==========================================
+    #              CHAT COMMANDS
+    # ==========================================
+
+    @commands.group(name="ai", aliases=["chat", "ask", "g"], invoke_without_command=True)
+    @commands.guild_only()
+    @commands.cooldown(1, 4, commands.BucketType.user)
+    async def ai(self, ctx: commands.Context, *, prompt: str = ""):
+        """
+        Talk to Claude in this channel's shared conversation.
+
+        Everyone in the channel shares one conversation, so Claude can follow along
+        with multiple people. Attach images, PDFs, or text files and Claude will read them.
+        Reply to any of Claude's answers to keep going without typing the command.
+
+        Start with "draw", "paint", or "image of" to go straight to the image generator
+        (Gemini). Other ways of asking for a picture work too; Claude hands them off.
+        Reply "make it blue" or similar to change the last image.
+
+        **Examples:**
+        - `[p]ai what's a good name for a guild?`
+        - `[p]ai summarize this` (with a PDF attached)
+        - `[p]ai could you make us a banner with a dragon guarding a castle?`
+        """
+        if not prompt and not ctx.message.attachments:
+            return await ctx.send_help()
+        await self._respond(ctx.message, prompt, self._session_key(ctx, private=False))
+
+    @ai.command(name="reset")
+    @checks.mod_or_permissions(manage_channels=True)
+    async def ai_reset(self, ctx: commands.Context):
+        """Wipe this channel's shared conversation memory."""
+        self._get_session(self._session_key(ctx, private=False)).reset()
+        await ctx.send("🧹 Shared conversation for this channel wiped.")
+
+    @commands.group(name="myai", invoke_without_command=True)
+    @commands.guild_only()
+    @commands.cooldown(1, 4, commands.BucketType.user)
+    async def myai(self, ctx: commands.Context, *, prompt: str = ""):
+        """
+        Talk to Claude in your own private conversation.
+
+        Your private conversation follows you across channels and only you can
+        continue it (by command or by replying to its answers). Pick your model with
+        `[p]claude mymodel`.
+        """
+        if not prompt and not ctx.message.attachments:
+            return await ctx.send_help()
+        await self._respond(ctx.message, prompt, self._session_key(ctx, private=True), owner_id=ctx.author.id)
+
+    @myai.command(name="reset")
+    async def myai_reset(self, ctx: commands.Context):
+        """Wipe your private conversation memory."""
+        self._get_session(self._session_key(ctx, private=True)).reset()
+        await ctx.send("🧹 Your private conversation wiped.")
+
+    @commands.command(name="aithread")
+    @commands.guild_only()
+    @commands.cooldown(1, 10, commands.BucketType.user)
+    async def aithread(self, ctx: commands.Context, *, prompt: str):
+        """
+        Start a new thread for a conversation with Claude.
+
+        Inside the thread, @mention me or reply to my messages to keep talking.
+        """
+        if isinstance(ctx.channel, discord.Thread):
+            return await ctx.send("We're already in a thread. Just @mention me or reply to my messages here.")
+        name = "🤖 " + (prompt[:80] + "…" if len(prompt) > 80 else prompt)
+        try:
+            thread = await ctx.message.create_thread(name=name, auto_archive_duration=1440)
+        except discord.HTTPException as e:
+            return await ctx.send(f"❌ I couldn't create a thread here: {e.text or e}")
+        await self._register_thread(thread.id)
+
+        model = await self._model_for(f"THREAD_{thread.id}", ctx.author, ctx.channel)
+        task = asyncio.create_task(self._retitle_thread(thread, prompt, model, ctx.author))
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
+
+        await self._respond(ctx.message, prompt, f"THREAD_{thread.id}", channel=thread)
+
+    @commands.Cog.listener()
+    async def on_message_without_command(self, message: discord.Message):
+        """Reply-to-continue, and @mentions inside AI threads."""
+        if message.author.bot or message.guild is None:
+            return
+        if not message.content and not message.attachments:
+            return
+
+        ref = message.reference
+        entry = self._answers.get(ref.message_id) if ref is not None and ref.message_id else None
+        in_ai_thread = message.channel.id in self._threads
+        if entry is None and not (in_ai_thread and self.bot.user in message.mentions):
+            return
+
+        if await self.bot.cog_disabled_in_guild(self, message.guild):
+            return
+        if not await self.bot.ignored_channel_or_guild(message):
+            return
+        if not await self.bot.allowed_by_whitelist_blacklist(message.author):
+            return
+
+        if entry is not None:
+            key, owner_id, _ = entry
+            if owner_id is not None and owner_id != message.author.id:
+                return  # someone else's private conversation
+        else:
+            key, owner_id = f"THREAD_{message.channel.id}", None
+
+        # Respect the same permission rules (Permissions cog, cog checks) as the commands.
+        command = self.myai if key.startswith("USER_") else self.ai
+        ctx = await self.bot.get_context(message)
+        try:
+            if not await command.can_run(ctx):
+                return
+        except commands.CommandError:
+            return
+
+        if self._reply_cooldown.get_bucket(message).update_rate_limit():
+            return
+
+        prompt = re.sub(rf"<@!?{self.bot.user.id}>", "", message.content).strip()
+        await self._respond(message, prompt, key, owner_id=owner_id)
+
+    # ==========================================
+    #              SETTINGS COMMANDS
+    # ==========================================
+
+    @commands.group(name="claude")
+    @commands.guild_only()
+    async def claude(self, ctx: commands.Context):
+        """Claude AI settings and usage."""
+
+    @claude.command(name="settings")
+    async def claude_settings(self, ctx: commands.Context):
+        """Show the current Claude settings for you, this channel, and this server."""
+        g = await self.config.guild(ctx.guild).all()
+        persona = g["persona"] or f"*Default:* {DEFAULT_PERSONA}"
+        if len(persona) > 300:
+            persona = persona[:300] + "…"
+        channel = ctx.channel.parent if isinstance(ctx.channel, discord.Thread) and ctx.channel.parent else ctx.channel
+        embed = discord.Embed(title="🤖 Claude Settings", color=discord.Color.orange())
+        embed.add_field(name="Models", value=(
+            f"**Your private chats:** {self._model_label(await self._model_for(f'USER_{ctx.author.id}', ctx.author, ctx.channel))}\n"
+            f"**This channel:** {self._model_label(await self._model_for('CHANNEL', ctx.author, channel))}\n"
+            f"**Bot default:** {self._model_label(await self.config.default_model())}"
+        ), inline=False)
+        embed.add_field(name="Server", value=(
+            f"**Web search:** {'On' if g['web_search'] else 'Off'}\n"
+            f"**Daily limit:** {g['daily_limit'] or 'Unlimited'} messages per user\n"
+            f"**Persona:** {persona}"
+        ), inline=False)
+        embed.add_field(name="Bot-wide", value=(
+            f"**Effort:** {await self.config.effort()}\n"
+            f"**Memory:** last {await self.config.max_history()} messages, "
+            f"resets after {await self.config.idle_minutes()} idle minutes"
+        ), inline=False)
+        await ctx.send(embed=embed)
+
+    @claude.command(name="models")
+    async def claude_models(self, ctx: commands.Context):
+        """List the available Claude models and their prices."""
+        allowed = await self.config.allowed_models()
+        alias_for = {v: k for k, v in MODEL_ALIASES.items()}
+        lines = []
+        for model, info in MODELS.items():
+            status = "✅" if model in allowed else "🚫"
+            lines.append(
+                f"{status} **{info.name}** (`{alias_for.get(model, model)}`): ${info.input:g} in / ${info.output:g} out "
+                f"per 1M tokens{'' if info.web_search else ', no web search'}"
+            )
+        lines.append("\n✅ = users and channel managers can choose it. The bot owner manages the list.")
+        await ctx.send("\n".join(lines))
+
+    @claude.command(name="mymodel")
+    async def claude_mymodel(self, ctx: commands.Context, model: str):
+        """Pick the model for your private conversations (`[p]myai`). Use `reset` for the default."""
+        if model.lower() == "reset":
+            await self.config.user(ctx.author).model.set(None)
+            self._get_session(f"USER_{ctx.author.id}").reset()
+            return await ctx.send("✅ Your private chats now use the default model.")
+        resolved = self._resolve_model(model)
+        if resolved is None or resolved not in await self.config.allowed_models():
+            return await ctx.send(f"❌ That model isn't available. See `{ctx.clean_prefix}claude models`.")
+        await self.config.user(ctx.author).model.set(resolved)
+        self._get_session(f"USER_{ctx.author.id}").reset()
+        await ctx.send(f"✅ Your private chats now use {self._model_label(resolved)}.")
+
+    @claude.command(name="channelmodel")
+    @checks.mod_or_permissions(manage_channels=True)
+    async def claude_channelmodel(self, ctx: commands.Context, model: str):
+        """Pick the model for this channel's shared conversation and its AI threads. Use `reset` for the default."""
+        channel = ctx.channel.parent if isinstance(ctx.channel, discord.Thread) and ctx.channel.parent else ctx.channel
+        if model.lower() == "reset":
+            await self.config.channel(channel).model.set(None)
+            return await ctx.send(f"✅ {channel.mention} now uses the default model.")
+        resolved = self._resolve_model(model)
+        if resolved is None or resolved not in await self.config.allowed_models():
+            return await ctx.send(f"❌ That model isn't available. See `{ctx.clean_prefix}claude models`.")
+        await self.config.channel(channel).model.set(resolved)
+        await ctx.send(f"✅ {channel.mention} now uses {self._model_label(resolved)}.")
+
+    @claude.command(name="defaultmodel")
+    @checks.is_owner()
+    async def claude_defaultmodel(self, ctx: commands.Context, model: str):
+        """Set the bot-wide default model."""
+        resolved = self._resolve_model(model)
+        if resolved is None:
+            return await ctx.send(f"❌ Unknown model. See `{ctx.clean_prefix}claude models`.")
+        await self.config.default_model.set(resolved)
+        await ctx.send(f"✅ Default model is now {self._model_label(resolved)}.")
+
+    @claude.command(name="allowmodel")
+    @checks.is_owner()
+    async def claude_allowmodel(self, ctx: commands.Context, model: str):
+        """Let users and channel managers choose a model."""
+        resolved = self._resolve_model(model)
+        if resolved is None:
+            return await ctx.send(f"❌ Unknown model. See `{ctx.clean_prefix}claude models`.")
+        async with self.config.allowed_models() as allowed:
+            if resolved not in allowed:
+                allowed.append(resolved)
+        await ctx.send(f"✅ {self._model_label(resolved)} can now be chosen.")
+
+    @claude.command(name="disallowmodel")
+    @checks.is_owner()
+    async def claude_disallowmodel(self, ctx: commands.Context, model: str):
+        """Stop users and channel managers from choosing a model (existing choices keep working)."""
+        resolved = self._resolve_model(model)
+        async with self.config.allowed_models() as allowed:
+            if resolved in allowed:
+                allowed.remove(resolved)
+        await ctx.send(f"✅ {self._model_label(resolved or model)} can no longer be chosen.")
+
+    @claude.command(name="effort")
+    @checks.is_owner()
+    async def claude_effort(self, ctx: commands.Context, level: str):
+        """
+        Set how hard Claude thinks before answering: `low`, `medium`, or `high`.
+
+        Higher effort gives better answers to hard questions but is slower and costs more.
+        `low` suits casual chat.
+        """
+        level = level.lower()
+        if level not in EFFORT_LEVELS:
+            return await ctx.send("❌ Effort must be `low`, `medium`, or `high`.")
+        await self.config.effort.set(level)
+        await ctx.send(f"✅ Effort set to **{level}**.")
+
+    @claude.command(name="memory")
+    @checks.is_owner()
+    async def claude_memory(self, ctx: commands.Context, max_messages: int, idle_minutes: int):
+        """
+        Set how much Claude remembers.
+
+        `max_messages`: how many recent messages (yours and Claude's) to keep (4-100).
+        `idle_minutes`: start fresh after this long without activity (5-1440).
+        """
+        if not 4 <= max_messages <= 100 or not 5 <= idle_minutes <= 1440:
+            return await ctx.send("❌ Use 4-100 messages and 5-1440 idle minutes.")
+        await self.config.max_history.set(max_messages)
+        await self.config.idle_minutes.set(idle_minutes)
+        await ctx.send(f"✅ Claude now remembers the last {max_messages} messages and resets after {idle_minutes} idle minutes.")
+
+    @claude.command(name="websearch")
+    @checks.admin_or_permissions(manage_guild=True)
+    async def claude_websearch(self, ctx: commands.Context, enabled: bool):
+        """Turn web search on or off for this server (searches cost $10 per 1,000)."""
+        await self.config.guild(ctx.guild).web_search.set(enabled)
+        await ctx.send(f"✅ Web search {'enabled' if enabled else 'disabled'}.")
+
+    @claude.command(name="persona")
+    @checks.admin_or_permissions(manage_guild=True)
+    async def claude_persona(self, ctx: commands.Context, *, persona: str = None):
+        """
+        Set Claude's personality and instructions for this server.
+
+        Run with no text to see the current persona, or `reset` for the default.
+
+        **Example:** `[p]claude persona You are a grizzled pirate quartermaster. Keep answers short and salty.`
+        """
+        conf = self.config.guild(ctx.guild).persona
+        if persona is None:
+            current = await conf() or f"(default) {DEFAULT_PERSONA}"
+            return await ctx.send(f"**Current persona:**{box(current)}")
+        if persona.lower() == "reset":
+            await conf.set(None)
+            return await ctx.send("✅ Persona reset to the default.")
+        if len(persona) > 1500:
+            return await ctx.send("❌ Keep the persona under 1,500 characters.")
+        await conf.set(persona)
+        await ctx.send("✅ Persona updated. It applies to the next message.")
+
+    @claude.command(name="limit")
+    @checks.admin_or_permissions(manage_guild=True)
+    async def claude_limit(self, ctx: commands.Context, messages_per_day: int):
+        """
+        Limit how many AI messages each user can send per day (0 = unlimited).
+
+        Mods, admins, and the bot owner are exempt. Resets at midnight UTC.
+        """
+        if messages_per_day < 0:
+            return await ctx.send("❌ Use 0 or more.")
+        await self.config.guild(ctx.guild).daily_limit.set(messages_per_day)
+        await ctx.send("✅ Daily limit removed." if messages_per_day == 0
+                       else f"✅ Users can now send {messages_per_day} AI messages per day.")
+
+    @claude.command(name="usage")
+    async def claude_usage(self, ctx: commands.Context, member: discord.Member = None):
+        """
+        Show Claude usage and estimated cost.
+
+        Admins see the server's totals and top users (or a specific member's).
+        Everyone else sees their own.
+        """
+        is_admin = await self._is_exempt(ctx.author) or ctx.author.guild_permissions.manage_guild
+        if member is not None and member != ctx.author and not is_admin:
+            return await ctx.send("❌ You can only view your own usage.")
+
+        def describe(u: dict) -> str:
+            return (
+                f"**Requests:** {humanize_number(u['requests'])} · **Web searches:** {humanize_number(u['searches'])}\n"
+                f"**Tokens:** {humanize_number(u['input'])} in · {humanize_number(u['output'])} out · "
+                f"{humanize_number(u['cache_read'])} cache read · {humanize_number(u['cache_write'])} cache write\n"
+                f"**Estimated cost:** ${u['cost']:.2f}"
+            )
+
+        if member is not None or not is_admin:
+            target = member or ctx.author
+            usage = await self.config.member(target).usage()
+            daily = await self.config.member(target).daily()
+            today = daily["count"] if daily["date"] == utc_today() else 0
+            embed = discord.Embed(title=f"Claude usage: {target.display_name}", color=discord.Color.orange())
+            embed.description = describe(usage) + f"\n**Messages today:** {today}"
+            return await ctx.send(embed=embed)
+
+        g = await self.config.guild(ctx.guild).all()
+        embed = discord.Embed(title=f"Claude usage: {ctx.guild.name}", color=discord.Color.orange())
+        embed.description = describe(g["usage"])
+        members = await self.config.all_members(ctx.guild)
+        top = sorted(members.items(), key=lambda kv: kv[1]["usage"]["cost"], reverse=True)[:10]
+        lines = []
+        for user_id, data in top:
+            if data["usage"]["requests"] == 0:
+                continue
+            m = ctx.guild.get_member(user_id)
+            name = m.display_name if m else f"User {user_id}"
+            lines.append(f"{name}: ${data['usage']['cost']:.2f} ({data['usage']['requests']} requests)")
+        if lines:
+            embed.add_field(name="Top users", value="\n".join(lines), inline=False)
+        embed.set_footer(text=f"Since {g['usage_since'] or 'n/a'} · Estimates from published API prices")
+        await ctx.send(embed=embed)
+
+    @claude.command(name="resetusage")
+    @checks.admin_or_permissions(manage_guild=True)
+    async def claude_resetusage(self, ctx: commands.Context):
+        """Reset this server's usage statistics and daily counts."""
+        await self.config.guild(ctx.guild).usage.set(dict(EMPTY_USAGE))
+        await self.config.guild(ctx.guild).usage_since.set(utc_today())
+        await self.config.clear_all_members(ctx.guild)
+        await ctx.send("✅ Usage statistics reset.")
+
+    @claude.command(name="key")
+    @checks.is_owner()
+    async def claude_key(self, ctx: commands.Context):
+        """Show how to set the Anthropic API key."""
+        is_set = bool((await self.bot.get_shared_api_tokens("anthropic")).get("api_key"))
+        await ctx.send(
+            f"API key is **{'set' if is_set else 'not set'}**.\n"
+            f"Set it with `{ctx.clean_prefix}set api anthropic api_key,<your key>` "
+            "(get one at <https://console.anthropic.com/settings/keys>). Delete your message afterwards."
+        )

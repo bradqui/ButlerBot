@@ -1,0 +1,27 @@
+# Whitelist: only our own code and docs are tracked.
+# Everything else under data/ is runtime state (bot token, API keys, user/server
+# data in settings.json, logs, the Linux venv, pip libs, third-party cog repos).
+
+/data/*
+!/data/config.json
+
+!/data/cogs/
+/data/cogs/*
+!/data/cogs/CogManager/
+/data/cogs/CogManager/*
+!/data/cogs/CogManager/cogs/
+/data/cogs/CogManager/cogs/*
+
+# Custom cogs (add a line here for each new one)
+!/data/cogs/CogManager/cogs/buttongreeter/
+!/data/cogs/CogManager/cogs/censord/
+!/data/cogs/CogManager/cogs/claude/
+!/data/cogs/CogManager/cogs/gamemanager/
+!/data/cogs/CogManager/cogs/gemini/
+
+# Never track config data, even inside a cog folder
+settings.json
+
+__pycache__/
+*.pyc
+/.vscode/

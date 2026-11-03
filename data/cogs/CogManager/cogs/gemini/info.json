@@ -1,0 +1,10 @@
+{
+    "author": ["Quillshot"],
+    "version": "2.0.0",
+    "description": "Image generation with Google Gemini. Chat is handled by the Claude cog, which hands image requests to this cog.",
+    "install_msg": "Thank you for installing! \n\n1. Get API key: https://aistudio.google.com/app/apikey\n2. Run `[p]gemini setkey <key>`.\n3. Try `[p]draw a castle at sunset`.",
+    "requirements": ["pillow", "google-genai"],
+    "tags": ["ai", "gemini", "google", "image"],
+    "min_bot_version": "3.5.0",
+    "end_user_data_statement": "Stores User IDs for image model preferences. Image sessions are in RAM only."
+}

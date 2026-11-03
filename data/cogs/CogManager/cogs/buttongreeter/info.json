@@ -1,0 +1,10 @@
+{
+    "author": "Quillshot",
+    "version": "2.0.0",
+    "install_msg": "ButtonGreeter 2.0 installed. Configure roles and rules with [p]bg.",
+    "short": "Roles, Nicknames, and Rules verification.",
+    "description": "Welcome system with role buttons, nickname updates, and mandatory rules agreement.",
+    "tags": ["welcome", "buttons", "roles", "nickname", "rules"],
+    "requirements": [],
+    "min_bot_version": "3.5.0"
+}

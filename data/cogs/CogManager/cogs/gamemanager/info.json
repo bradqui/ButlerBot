@@ -1,0 +1,15 @@
+{
+    "name": "GameManager",
+    "short": "Manage your game library and find games to play with friends.",
+    "description": "A comprehensive game library management system for Discord communities. Track owned and installed games, rank your preferences, find shared games among users, start play sessions, and vote on what to play next. Features interactive Discord buttons for easy game management.",
+    "end_user_data_statement": "This cog stores user IDs along with their game ownership, installation status, and ranking preferences. This data is stored per-guild and can be cleared by server administrators.",
+    "install_msg": "Thank you for installing GameManager! Use `[p]games` to get started. Admins can use `[p]games admin add <game>` to add games to the list.",
+    "author": ["Claude"],
+    "required_cogs": {},
+    "requirements": [],
+    "tags": ["games", "gaming", "library", "multiplayer", "voting", "sessions"],
+    "min_bot_version": "3.5.0",
+    "hidden": false,
+    "disabled": false,
+    "type": "COG"
+}

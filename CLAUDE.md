@@ -44,7 +44,7 @@ Quirks to know:
 - **typing_extensions:** both AI cogs' `__init__.py` swap in a newer `typing_extensions` before importing their SDK, because pydantic needs `typing_extensions.Sentinel` and the venv's copy (4.13.2) lacks it. Red appends `Downloader/lib` to the *end* of `sys.path`, so the old venv copy wins otherwise. Gemini vendors a copy in `gemini/lib/`; Claude loads `Downloader/lib/typing_extensions.py` directly.
 - **Claude cog design:**
   - Conversation history is stored as plain user/assistant **text** turns with no thinking blocks, so trimming old turns is safe under Anthropic's preserved-thinking rules.
-  - **Persona:** the server's `persona` is used first, then its saved `default_persona` (`!claude defaultpersona <text|current|clear>`), then the built-in `DEFAULT_PERSONA` (see `_persona()`). `!claude persona reset` clears `persona`, so the saved default takes over.
+  - **Persona:** the server's `persona` is used first, then its saved `default_persona` (`!claude defaultpersona <text|current|clear>`; up to `MAX_PERSONA_CHARS` = 3,000 characters, or attach a `.txt` file since Discord messages stop at 2,000), then the built-in `DEFAULT_PERSONA` (see `_persona()`). `!claude persona reset` clears `persona`, so the saved default takes over.
   - **Model choice:** `!claude mymodel` is admin-only. A personal model counts only while it's in `allowed_models`; disallowing a model sends those private chats back to the default. Channel models (mods) are unaffected. Fable isn't in `MODELS`.
   - In every user turn, the speaker's display name comes first (`Name: message`).
   - Sessions live in RAM, keyed `CHANNEL_<id>`, `THREAD_<id>` or `USER_<id>`. They reset on reload or after `idle_minutes`.

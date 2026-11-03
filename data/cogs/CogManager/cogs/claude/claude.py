@@ -53,6 +53,7 @@ MAX_TOKENS = 16000  # covers thinking + reply; non-streaming safe
 MAX_PAUSE_CONTINUATIONS = 3
 
 DEFAULT_PERSONA = "You are friendly, helpful, and to the point."
+MAX_PERSONA_CHARS = 3000
 
 # ==========================================
 #               ATTACHMENTS
@@ -1750,23 +1751,49 @@ class ClaudeChat(commands.Cog):
         Set Claude's personality and instructions for this server.
 
         Applies to the AI chat and, as a speaking style, to the bot guide (whose command help stays exact).
+        Up to 3,000 characters. Discord messages stop at 2,000, so for a long persona attach it as a
+        `.txt` file to `[p]claude persona` instead of typing it.
+
         Run with no text to see the current persona, or `reset` to go back to the server's default
         persona (set with `[p]claude defaultpersona`).
 
         **Example:** `[p]claude persona You are a grizzled pirate quartermaster. Keep answers short and salty.`
         """
         conf = self.config.guild(ctx.guild)
+        persona, error = await self._persona_input(ctx, persona)
+        if error:
+            return await ctx.send(error)
         if persona is None:
             current = await conf.persona()
-            text = current or f"(default) {await self._persona(ctx.guild)}"
-            return await ctx.send(f"**Current persona:**{box(text)}")
+            return await self._send_persona(ctx, "**Current persona:**",
+                                            current or f"(default) {await self._persona(ctx.guild)}")
         if persona.lower() == "reset":
             await conf.persona.set(None)
-            return await ctx.send(f"✅ Persona reset to the default:{box(await self._persona(ctx.guild))}")
-        if len(persona) > 1500:
-            return await ctx.send("❌ Keep the persona under 1,500 characters.")
+            return await self._send_persona(ctx, "✅ Persona reset to the default:", await self._persona(ctx.guild))
         await conf.persona.set(persona)
-        await ctx.send("✅ Persona updated. It applies to the next message.")
+        await ctx.send(f"✅ Persona updated ({len(persona):,} characters). It applies to the next message.")
+
+    async def _persona_input(self, ctx: commands.Context, typed: Optional[str]) -> Tuple[Optional[str], Optional[str]]:
+        """(persona text from the command or an attached text file, error message)."""
+        text = typed
+        if ctx.message.attachments:
+            att = ctx.message.attachments[0]
+            if att.size > 50_000:
+                return None, "❌ That file is too big for a persona."
+            try:
+                text = (await att.read()).decode("utf-8", errors="replace").strip()
+            except discord.HTTPException:
+                return None, "❌ I couldn't download that file. Try again?"
+            if not text:
+                return None, "❌ That file is empty."
+        if text is not None and len(text) > MAX_PERSONA_CHARS:
+            return None, f"❌ Keep the persona under {MAX_PERSONA_CHARS:,} characters (that's {len(text):,})."
+        return text, None
+
+    async def _send_persona(self, ctx: commands.Context, heading: str, text: str):
+        """Show a persona in code blocks, split to fit Discord's 2,000-character message limit."""
+        for i, page in enumerate(pagify(text, page_length=1800)):
+            await ctx.send((heading if i == 0 else "") + box(page))
 
     @claude.command(name="defaultpersona")
     @checks.admin_or_permissions(manage_guild=True)
@@ -1774,26 +1801,27 @@ class ClaudeChat(commands.Cog):
         """
         Set the persona that `[p]claude persona reset` goes back to.
 
-        - `[p]claude defaultpersona <text>` saves new text as the default.
+        - `[p]claude defaultpersona <text>` saves new text as the default (or attach it as a `.txt` file).
         - `[p]claude defaultpersona current` saves the persona in use right now.
         - `[p]claude defaultpersona clear` goes back to the built-in default.
         - Run with nothing to see the saved default.
         """
         conf = self.config.guild(ctx.guild)
+        persona, error = await self._persona_input(ctx, persona)
+        if error:
+            return await ctx.send(error)
         if persona is None:
             saved = await conf.default_persona()
-            return await ctx.send(f"**Default persona:**{box(saved or f'(built-in) {DEFAULT_PERSONA}')}")
+            return await self._send_persona(ctx, "**Default persona:**", saved or f"(built-in) {DEFAULT_PERSONA}")
         lowered = persona.lower()
         if lowered == "clear":
             await conf.default_persona.set(None)
             return await ctx.send("✅ The default persona is the built-in one again.")
         if lowered == "current":
             persona = await self._persona(ctx.guild)
-        if len(persona) > 1500:
-            return await ctx.send("❌ Keep the persona under 1,500 characters.")
         await conf.default_persona.set(persona)
-        await ctx.send(f"✅ Saved as the default persona. `{ctx.clean_prefix}claude persona reset` returns to it."
-                       f"{box(persona)}")
+        await ctx.send(f"✅ Saved as the default persona ({len(persona):,} characters). "
+                       f"`{ctx.clean_prefix}claude persona reset` returns to it.")
 
     @claude.command(name="limit")
     @checks.admin_or_permissions(manage_guild=True)

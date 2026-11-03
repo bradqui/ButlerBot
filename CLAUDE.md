@@ -59,6 +59,10 @@ Quirks to know:
   - **Extension hooks for other cogs:**
     - A check predicate with a `requirement` attribute (e.g. GameManager's `game_admin()`, `"game admin"`) shows up as "(game admin only)" in the catalog and triggers confirmation.
     - A cog method `async guide_member_roles(member) -> List[str]` adds roles to the asker's permission label.
+    - **Read-only lookups:** a cog with `guide_tools() -> List[tool dict]` and `async guide_call_tool(name, args, asker) -> str` offers lookup tools.
+      - `_guide_call` runs a loop of up to 3 rounds per answer: tool_use → tool_result → final answer. The tool blocks stay within that turn; history stores only the final text.
+      - A `run_commands` call ends the loop.
+      - GameManager offers `games_library`, `games_game` and `games_activity`. Prefix new tool names with the cog's name to avoid clashes.
   - When Claude calls `generate_image` (strict schema: `prompt`, `edit`), the cog runs it through Gemini and **does not send a tool_result back**. This saves a second API call. History records a text note such as `[Generated an image: "…"]` instead of tool blocks, so it stays text-only. Pricing for the usage estimates is in the `MODELS` table in `claude.py`; update it if prices change.
 - **Command name conflicts:** the old chat Gemini and the Claude cog both define `ai`/`myai`/`aithread`. Only the image-only Gemini can be loaded alongside Claude.
 - `buttongreeter` views use `timeout=None` but aren't registered as persistent views, so buttons on welcome messages sent before a restart or reload stop working.

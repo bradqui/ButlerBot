@@ -118,6 +118,13 @@ With the Claude cog loaded, `!guide` (or an @mention of the bot) can explain the
 
 It runs with your own permissions. Game-admin commands wait for you to press **Run**.
 
+The guide can also look things up before answering:
+- anyone's library
+- who owns or has installed a game, or whether it's been requested
+- active sessions and votes
+
+So questions like `!guide what games do Alex and I both have installed?` or `!guide is Barony installed for me?` get real answers.
+
 ## Data
 
 Everything is stored per server in Red's Config (identifier `8675309420`): games, each player's owned, installed and ranked games, requests, sessions and votes. Personal timezones are stored per user.

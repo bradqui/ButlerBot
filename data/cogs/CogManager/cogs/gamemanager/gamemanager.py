@@ -71,6 +71,43 @@ LIBRARY_ACTIONS = {
 }
 MEDALS = ["🥇", "🥈", "🥉"]
 
+# Read-only lookups the Claude cog's bot guide can call (see GameManager.guide_call_tool).
+GUIDE_TOOLS = [
+    {
+        "name": "games_library",
+        "description": "Look up a server member's game library: the games they own, which ones are installed, and "
+                       "their rankings (1 = favorite).",
+        "strict": True,
+        "input_schema": {
+            "type": "object",
+            "properties": {"member": {"type": "string",
+                                      "description": "Their display name, username, or mention, or \"me\" for the "
+                                                     "person asking."}},
+            "required": ["member"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "games_game",
+        "description": "Look up one game: whether it's in the server library (or waiting for approval), and who owns "
+                       "it or has it installed.",
+        "strict": True,
+        "input_schema": {
+            "type": "object",
+            "properties": {"game": {"type": "string", "description": "The game's name, even partial."}},
+            "required": ["game"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "games_activity",
+        "description": "List this server's active game sessions and running votes: titles, hosts, players, start "
+                       "times, vote options, and current tallies.",
+        "strict": True,
+        "input_schema": {"type": "object", "properties": {}, "required": [], "additionalProperties": False},
+    },
+]
+
 
 # ==========================================
 #                 HELPERS
@@ -737,6 +774,101 @@ class GameManager(commands.Cog):
     async def guide_member_roles(self, member: discord.Member) -> List[str]:
         """Extra roles the Claude cog's bot guide should know about (it can't see this cog's admin role)."""
         return ["game admin"] if await self.is_game_admin(member) else []
+
+    # ==========================================
+    #        LOOKUPS FOR THE CLAUDE BOT GUIDE
+    # ==========================================
+
+    def guide_tools(self) -> List[dict]:
+        return GUIDE_TOOLS
+
+    async def guide_call_tool(self, name: str, args: dict, asker: discord.Member) -> str:
+        """Answer one of GUIDE_TOOLS as plain text. Read-only."""
+        if name == "games_library":
+            return await self._lookup_library(asker, str(args.get("member") or "me"))
+        if name == "games_game":
+            return await self._lookup_game(asker.guild, str(args.get("game") or ""))
+        if name == "games_activity":
+            return await self._lookup_activity(asker.guild)
+        return f"Unknown lookup: {name}"
+
+    def _display(self, guild: discord.Guild, user_id) -> str:
+        member = guild.get_member(int(user_id))
+        return member.display_name if member else f"a former member ({user_id})"
+
+    async def _lookup_library(self, asker: discord.Member, who_text: str) -> str:
+        guild = asker.guild
+        if who_text.strip().lower() in ("", "me", "myself", "i", "self", asker.display_name.lower()):
+            member = asker
+        else:
+            member, candidates = self.find_member(guild, who_text)
+            if member is None:
+                close = ", ".join(m.display_name for m in candidates)
+                return f"No member matches \"{who_text}\"." + (f" Close matches: {close}." if close else "")
+        games = await self.config.guild(guild).games()
+        data = (await self.config.guild(guild).users()).get(str(member.id), {})
+        installed = [g for g in data.get("installed", []) if g in games]
+        owned_only = [g for g in data.get("owned", []) if g in games and g not in installed]
+        ranks = data.get("ranks", {})
+        if not installed and not owned_only:
+            return f"{member.display_name} has no games in their library."
+
+        def listing(ids):
+            ids = sorted(ids, key=lambda g: (ranks.get(g) is None, ranks.get(g) or 0, games[g]["name"].lower()))
+            names = [games[g]["name"] + (f" (rank {ranks[g]})" if ranks.get(g) else "") for g in ids[:150]]
+            return ", ".join(names) + (f", and {len(ids) - 150} more" if len(ids) > 150 else "") or "none"
+
+        return (f"{member.display_name}'s library: {len(installed) + len(owned_only)} games, {len(installed)} installed.\n"
+                f"Installed: {listing(installed)}\nOwned but not installed: {listing(owned_only)}")
+
+    async def _lookup_game(self, guild: discord.Guild, name: str) -> str:
+        games = await self.config.guild(guild).games()
+        game, candidates = resolve_game(games, name)
+        if game is None:
+            requests = await self.config.guild(guild).game_requests()
+            pending = next((r for r in requests.values() if normalize(r["name"]) == normalize(name)), None)
+            if pending:
+                return (f"\"{pending['name']}\" isn't in the server library yet. "
+                        f"{self._display(guild, pending['requested_by'])} requested it; it's waiting for a game admin.")
+            close = ", ".join(g["name"] for g in candidates)
+            return f"No game called \"{name}\" in the server library." + (f" Close matches: {close}." if close else "")
+        users = await self.config.guild(guild).users()
+        installed, owned_only = [], []
+        for uid, data in users.items():
+            if guild.get_member(int(uid)) is None:
+                continue
+            if game["id"] in data.get("installed", []):
+                installed.append(self._display(guild, uid))
+            elif game["id"] in data.get("owned", []):
+                owned_only.append(self._display(guild, uid))
+        return (f"{game['name']} is in the server library.\n"
+                f"Installed by {len(installed)}: {', '.join(sorted(installed, key=str.lower)) or 'nobody'}\n"
+                f"Owned but not installed by {len(owned_only)}: {', '.join(sorted(owned_only, key=str.lower)) or 'nobody'}")
+
+    async def _lookup_activity(self, guild: discord.Guild) -> str:
+        sessions = await self.config.guild(guild).play_sessions()
+        votes = await self.config.guild(guild).votes()
+        if not sessions and not votes:
+            return "No active game sessions or votes."
+        lines = []
+        for s in sorted(sessions.values(), key=lambda s: s.get("starts_at") or s["created_at"]):
+            starts = parse_iso(s.get("starts_at"))
+            when = f"starts {stamp(starts)} (write it exactly like that; Discord shows it in each reader's timezone)" \
+                if starts else "started on creation"
+            players = ", ".join(self._display(guild, u) for u in s["participants"])
+            extra = " A vote is running." if s.get("vote_id") in votes else ""
+            extra += f" Vote winner: {s['winner']}." if s.get("winner") else ""
+            lines.append(f"Session \"{s['title']}\" (ID {s['id']}), host {self._display(guild, s['host_id'])}, {when}. "
+                         f"Players ({len(s['participants'])}): {players}.{extra}")
+        for v in votes.values():
+            names = v.get("names") or {}
+            tally = ", ".join(f"{names.get(g, g)}: {v['tallies'].get(g, 0)}" for g in v.get("games", []))
+            waiting = [self._display(guild, u) for u in v["allowed_voters"] if u not in v["user_votes"]]
+            ends = parse_iso(v.get("ends_at"))
+            lines.append(f"Vote for \"{v.get('title', 'a session')}\" (ID {v['id']})"
+                         + (f", ends {stamp(ends, 'R')}" if ends else "") + f". Tally: {tally or 'no options'}. "
+                         f"Still to vote: {', '.join(waiting) or 'nobody'}.")
+        return "\n".join(lines)
 
     async def can_add_games(self, member: discord.Member) -> bool:
         return await self.config.guild(member.guild).member_add() or await self.is_game_admin(member)

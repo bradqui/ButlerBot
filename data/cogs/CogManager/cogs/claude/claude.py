@@ -141,6 +141,7 @@ PRIVILEGE_NAMES = {
 
 # The guide can also run commands for people. They run as the asker (same permission checks as typing
 # them), and anything needing elevated rights waits for the asker to press Run.
+MAX_LOOKUP_ROUNDS = 3         # rounds of read-only lookups (other cogs' guide tools) per guide answer
 MAX_ACTION_COMMANDS = 5
 ACTION_STEP_TIMEOUT = 20      # seconds to wait for one command before starting the next
 ACTION_CONFIRM_TIMEOUT = 120
@@ -920,7 +921,8 @@ class ClaudeChat(commands.Cog):
             sections.append("\n".join(["## Other", *loose]))
         return "\n\n".join(sections)
 
-    async def _guide_system_prompt(self, guild: discord.Guild, prefix: str, include_owner: bool, actions: bool) -> str:
+    async def _guide_system_prompt(self, guild: discord.Guild, prefix: str, include_owner: bool, actions: bool,
+                                   lookups: bool = False) -> str:
         catalog = await self._command_catalog(guild, prefix, include_owner)
         if actions:
             action_rules = [
@@ -969,6 +971,8 @@ class ClaudeChat(commands.Cog):
             "- Some messages are replies to the bot's own announcements (shown as \"Replying to …\"). Answer them "
             "when they're meant for the bot, like a question about what it did. When they're meant for other people "
             f"or need no answer (\"I'm in!\", \"nice\", \"thanks\"), reply with exactly {GUIDE_SILENT} and nothing else.",
+            *(["- Use the lookup tools to check facts (someone's games, who owns a game, running sessions and votes) "
+               "instead of guessing. The asker doesn't see lookups, so answer in your own words."] if lookups else []),
             *action_rules,
             "",
             "# Command reference",
@@ -1056,6 +1060,62 @@ class ClaudeChat(commands.Cog):
             # Interactive commands (menus, confirmations) can wait on people; don't hold up the rest forever.
             await asyncio.wait({task}, timeout=ACTION_STEP_TIMEOUT)
 
+    # ---------- read-only lookups offered by other cogs ----------
+
+    def _lookup_tools(self) -> Dict[str, Tuple[dict, commands.Cog]]:
+        """
+        Tools other cogs offer the guide for looking things up. A cog provides `guide_tools()`, which returns
+        Anthropic tool definitions, and `async guide_call_tool(name, args, asker) -> str` to answer them.
+        """
+        found = {}
+        for cog in sorted(self.bot.cogs.values(), key=lambda c: c.qualified_name):
+            if not (hasattr(cog, "guide_tools") and hasattr(cog, "guide_call_tool")):
+                continue
+            try:
+                tools = cog.guide_tools()
+            except Exception:
+                log.exception("guide_tools failed in %s", cog.qualified_name)
+                continue
+            for tool in tools:
+                name = tool.get("name")
+                if name and name != GUIDE_ACTION_TOOL["name"] and name not in found:
+                    found[name] = (tool, cog)
+        return found
+
+    async def _guide_call(self, client: anthropic.AsyncAnthropic, member: discord.Member,
+                          lookups: Dict[str, Tuple[dict, commands.Cog]], *, messages: List[dict], **kwargs):
+        """
+        One guide turn. The model may call lookup tools for up to MAX_LOOKUP_ROUNDS rounds; their results go back
+        within this turn only. Returns the final response. A run_commands call ends the loop (it's handled by
+        the caller without a tool_result), so session history stays plain text.
+        """
+        messages = list(messages)
+        totals = dict(EMPTY_USAGE)
+        response = None
+        for round_number in range(MAX_LOOKUP_ROUNDS + 1):
+            response = await client.messages.create(messages=messages, **kwargs)
+            for k, v in self._usage_from(response, kwargs["model"]).items():
+                totals[k] += v
+            calls = [b for b in response.content if b.type == "tool_use"]
+            if (response.stop_reason != "tool_use" or not calls or round_number == MAX_LOOKUP_ROUNDS
+                    or any(b.name not in lookups for b in calls)):
+                break
+            results = []
+            for call in calls:
+                _, cog = lookups[call.name]
+                try:
+                    output = await cog.guide_call_tool(call.name, call.input if isinstance(call.input, dict) else {},
+                                                       member)
+                    results.append({"type": "tool_result", "tool_use_id": call.id, "content": str(output)[:8000]})
+                except Exception:
+                    log.exception("Guide lookup %s failed", call.name)
+                    results.append({"type": "tool_result", "tool_use_id": call.id, "is_error": True,
+                                    "content": "The lookup failed."})
+            messages += [{"role": "assistant", "content": response.content}, {"role": "user", "content": results}]
+        totals["requests"] = 1
+        await self._record_usage(member, totals)
+        return response
+
     @staticmethod
     def _action_call(response) -> Optional[dict]:
         if response.stop_reason != "tool_use":
@@ -1100,15 +1160,16 @@ class ClaudeChat(commands.Cog):
             if model not in MODELS:
                 model = DEFAULT_GUIDE_MODEL
 
+            lookups = self._lookup_tools()
             try:
                 # No "typing…" for replies we might ignore; it would look like an answer that never came.
                 async with (contextlib.nullcontext() if may_stay_silent else channel.typing()):
                     system = await self._guide_system_prompt(guild, prefix, include_owner=level.startswith("bot owner"),
-                                                             actions=actions)
-                    kwargs = {}
-                    if actions:
-                        kwargs["tools"] = [GUIDE_ACTION_TOOL]
-                    response = await client.messages.create(
+                                                             actions=actions, lookups=bool(lookups))
+                    tools = [tool for tool, _ in lookups.values()] + ([GUIDE_ACTION_TOOL] if actions else [])
+                    kwargs = {"tools": tools} if tools else {}
+                    response = await self._guide_call(
+                        client, message.author, lookups,
                         model=model,
                         max_tokens=GUIDE_MAX_TOKENS,
                         # The catalog is the big, shared part: give it its own cache breakpoint so every
@@ -1128,7 +1189,6 @@ class ClaudeChat(commands.Cog):
                 await self._send(message, channel, reply)
                 return
 
-            await self._record_usage(message.author, self._usage_from(response, model))
             text = "".join(b.text for b in response.content if b.type == "text").strip()
             action = self._action_call(response) if actions else None
             if text == GUIDE_SILENT and action is None:

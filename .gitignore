@@ -12,11 +12,15 @@
 /data/cogs/CogManager/cogs/*
 
 # Custom cogs (add a line here for each new one)
+!/data/cogs/CogManager/cogs/activitystats/
+!/data/cogs/CogManager/cogs/butlerfun/
 !/data/cogs/CogManager/cogs/buttongreeter/
 !/data/cogs/CogManager/cogs/censord/
 !/data/cogs/CogManager/cogs/claude/
 !/data/cogs/CogManager/cogs/gamemanager/
 !/data/cogs/CogManager/cogs/gemini/
+!/data/cogs/CogManager/cogs/handbook/
+!/data/cogs/CogManager/cogs/speakup/
 
 # Never track config data, even inside a cog folder
 settings.json

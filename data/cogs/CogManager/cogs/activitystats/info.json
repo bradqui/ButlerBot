@@ -1,0 +1,15 @@
+{
+    "name": "ActivityStats",
+    "short": "Server activity stats for members and admins.",
+    "description": "Counts messages, voice time and games played, keeping hourly totals (never message text). Members see channel activity, leaderboards, a busy-times heatmap, voice and game stats, and their own numbers. Admins get active-member, retention, quiet-member, join/leave, dead-channel, game-night attendance, command-usage and library-coverage reports, plus an optional weekly digest. The Claude cog can answer stats questions in plain English.",
+    "end_user_data_statement": "This cog stores hourly message counts per member and channel, voice channel visits, games shown in Discord activity status, join and leave times, bot command use, and questions the bot guide couldn't answer. It never stores message text. Members can opt out and delete their data with [p]stats ignoreme.",
+    "install_msg": "Thanks for installing ActivityStats! Members can run `[p]stats`; admins can see `[p]stats admin`. To count messages from before tracking started, run `[p]stats admin backfill 30`.",
+    "author": ["Quillshot"],
+    "required_cogs": {},
+    "requirements": ["matplotlib"],
+    "tags": ["stats", "analytics", "activity", "voice", "leaderboard"],
+    "min_bot_version": "3.5.0",
+    "hidden": false,
+    "disabled": false,
+    "type": "COG"
+}

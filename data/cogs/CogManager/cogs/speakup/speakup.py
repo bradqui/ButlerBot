@@ -27,7 +27,7 @@ from typing import Dict, List, Optional, Tuple
 import aiohttp
 import discord
 from discord.ext import tasks
-from redbot.core import Config, checks, commands
+from redbot.core import Config, app_commands, checks, commands
 from redbot.core.bot import Red
 
 log = logging.getLogger("red.speakup")
@@ -51,6 +51,7 @@ TIME_COOLDOWN = 5 * 60           # one clock reaction per channel per 5 minutes
 STEAM_COOLDOWN = 6 * 3600        # one card per game per channel per 6 hours
 MISTAKE_COOLDOWN = 30            # per person
 SUMMARIES_PER_HOUR = 10          # per person
+SUMMARY_CACHE_SECONDS = 3600     # a link's summary is reused for an hour
 MAX_REMINDERS = 25               # per person
 MAX_REMINDER_DAYS = 365
 
@@ -334,13 +335,18 @@ class SpeakUp(commands.Cog):
         self._cooldowns: Dict[tuple, float] = {}
         self._summaries: Dict[int, List[float]] = {}   # user ID -> recent summary times
         self._steam_names: Dict[int, str] = {}
+        self._summary_cache: Dict[str, Tuple[float, str]] = {}   # URL -> (when, summary)
+        # Right-click a message → Apps → Summarize link (bot owner: [p]slash enable "Summarize link" message)
+        self.summarize_menu = app_commands.ContextMenu(name="Summarize link", callback=self.summarize_from_menu)
 
     async def cog_load(self):
         self.bot.add_dynamic_items(DismissButton, ScheduleButton, SteamButton)
+        self.bot.tree.add_command(self.summarize_menu)
         self.reminder_loop.start()
 
     async def cog_unload(self):
         self.bot.remove_dynamic_items(DismissButton, ScheduleButton, SteamButton)
+        self.bot.tree.remove_command(self.summarize_menu.name, type=self.summarize_menu.type)
         self.reminder_loop.cancel()
 
     async def red_delete_data_for_user(self, *, requester, user_id: int):
@@ -447,13 +453,13 @@ class SpeakUp(commands.Cog):
         self._track(message, {"kind": "link", "url": links[0], "author": message.author.id})
         return True
 
-    async def _article_links(self, message: discord.Message, links: List[str]) -> List[str]:
+    async def _article_links(self, message: discord.Message, links: List[str], wait: bool = True) -> List[str]:
         """
         Drop links Discord previews as a picture or GIF. Previews usually arrive a moment after the message, so
-        if there are none yet, wait briefly and look again.
+        for a brand-new message with none yet, wait briefly and look again.
         """
         embeds = message.embeds
-        if not embeds:
+        if not embeds and wait:
             await asyncio.sleep(EMBED_WAIT)
             try:
                 embeds = (await message.channel.fetch_message(message.id)).embeds
@@ -571,18 +577,61 @@ class SpeakUp(commands.Cog):
 
     # ---------- link summaries ----------
 
-    async def _answer_link(self, channel, message: discord.PartialMessage, entry: dict, clicker: discord.Member) -> bool:
-        recent = [t for t in self._summaries.get(clicker.id, []) if time.time() - t < 3600]
+    def _summary_allowed(self, user: discord.abc.User) -> bool:
+        """Per-person rate limit on summaries (they cost a little each). Counts the request when allowed."""
+        recent = [t for t in self._summaries.get(user.id, []) if time.time() - t < 3600]
         if len(recent) >= SUMMARIES_PER_HOUR:
+            return False
+        self._summaries[user.id] = recent + [time.time()]
+        return True
+
+    async def summarize(self, url: str, member: discord.Member) -> Optional[str]:
+        """A summary of `url` from the Claude cog, reusing one made in the last hour (clicks and menu share it)."""
+        cached = self._summary_cache.get(url)
+        if cached and time.time() - cached[0] < SUMMARY_CACHE_SECONDS:
+            return cached[1]
+        claude = self.bot.get_cog("ClaudeChat")
+        if claude is None or not hasattr(claude, "summarize_link"):
+            return None
+        summary = await claude.summarize_link(url, member)
+        if summary:
+            self._summary_cache[url] = (time.time(), summary)
+            if len(self._summary_cache) > 200:
+                oldest = min(self._summary_cache, key=lambda u: self._summary_cache[u][0])
+                self._summary_cache.pop(oldest)
+        return summary
+
+    async def summarize_from_menu(self, interaction: discord.Interaction, message: discord.Message):
+        """Right-click a message → Apps → Summarize link: a summary only the person asking can see."""
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        if interaction.guild is None:
+            return await interaction.followup.send("Use this on a message in a server.", ephemeral=True)
+        if self.bot.get_cog("ClaudeChat") is None:
+            return await interaction.followup.send("Summaries need the AI chat, which isn't running right now.",
+                                                   ephemeral=True)
+        links = await self._article_links(message, summary_links(message.content), wait=False)
+        if not links:
+            return await interaction.followup.send("There's no article or video link in that message to summarize.",
+                                                   ephemeral=True)
+        if not self._summary_allowed(interaction.user):
+            return await interaction.followup.send(f"⏳ That's {SUMMARIES_PER_HOUR} summaries this hour. Try again "
+                                                   "later.", ephemeral=True)
+        summary = await self.summarize(links[0], interaction.user)
+        if not summary:
+            return await interaction.followup.send("😶 I couldn't read that page. It may block bots, need a login, or "
+                                                   "be mostly video.", ephemeral=True)
+        await interaction.followup.send(f"{LINK_EMOJI} **Summary** of <{links[0]}>\n{summary}", ephemeral=True,
+                                        suppress_embeds=True)
+
+    async def _answer_link(self, channel, message: discord.PartialMessage, entry: dict, clicker: discord.Member) -> bool:
+        if not self._summary_allowed(clicker):
             await channel.send(f"⏳ {clicker.mention}, that's {SUMMARIES_PER_HOUR} summaries this hour. Try again later.",
                                delete_after=15, allowed_mentions=discord.AllowedMentions(users=[clicker]))
             return False
-        claude = self.bot.get_cog("ClaudeChat")
-        if claude is None or not hasattr(claude, "summarize_link"):
+        if self.bot.get_cog("ClaudeChat") is None:
             return False
-        self._summaries[clicker.id] = recent + [time.time()]
         async with channel.typing():
-            summary = await claude.summarize_link(entry["url"], clicker)
+            summary = await self.summarize(entry["url"], clicker)
         reference = message.to_reference(fail_if_not_exists=False)
         if not summary:
             view = discord.ui.View(timeout=None)

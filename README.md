@@ -85,6 +85,7 @@ Then, in Discord, as the bot owner. Delete the messages containing keys afterwar
 !load censord
 !slash enable games
 !slash enable catchup
+!slash enable "Summarize link" message
 !slash sync
 ```
 

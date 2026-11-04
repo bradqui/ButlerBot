@@ -37,10 +37,12 @@ ButlerBot sometimes offers help without being asked. Its replies never ping anyo
 |---|---|
 | A time while making plans ("anyone up for 9?", "friday 8pm?") | Adds a 🕘 reaction. Click it to see the time in everyone's own timezone, with a **Schedule a session** button. |
 | A Steam store link | Replies with a small card: price, any sale, who here owns it, and **I own this** / **I want this** buttons. |
-| An article or video link | Adds a 📄 reaction. Click it for a three-line summary. |
+| An article or video link | Adds a 📄 reaction. Click it for a three-line summary, posted in the channel. |
 | A command that doesn't exist | Suggests the one you probably meant, with a **Run it** button. |
 
 **Reactions are offers:** nothing happens unless someone clicks.
+
+**Want a summary just for you?** Right-click any message with a link (long-press on mobile) → **Apps** → **Summarize link**. Only you see the result, and nothing is posted in the channel.
 
 **Limits:**
 - 🕘 at most once every few minutes per channel.

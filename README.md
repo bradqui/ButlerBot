@@ -14,7 +14,7 @@ All of them live in [`data/cogs/CogManager/cogs/`](data/cogs/CogManager/cogs/).
 |---|---|---|
 | [`claude`](data/cogs/CogManager/cogs/claude/) | AI chat with Anthropic's Claude (Sonnet 5.5 by default). It has shared channel conversations, private conversations, and AI threads. Replying to an answer continues the conversation. It reads images, PDFs, and text files, can search the web and cite sources, and tracks usage and cost, with optional daily limits. Image requests are handed to Gemini. It also includes **the butler**, a guide that uses Haiku to answer plain-English questions about the bot's commands, or to run them for you. Commands run with your own permissions, and anything that needs elevated rights waits for you to press **Run**. | `!ai`, `!myai`, `!aithread`, `!butler` (alias `!guide`), `!claude …` |
 | [`gemini`](data/cogs/CogManager/cogs/gemini/) | Image generation with Google Gemini. The Claude cog calls it for "draw…" requests. | `!draw`, `!draw edit`, `!gemini …` |
-| [`gamemanager`](data/cogs/CogManager/cogs/gamemanager/) | Per-server game library: tick-box pickers for the games people own and have installed, rankings, a shared-game finder, "looking for group" pings, scheduled sessions with join buttons and reminders, and votes on what to play. See its [README](data/cogs/CogManager/cogs/gamemanager/README.md). | `!games …` (aliases `game`, `gm`), `/games …` |
+| [`gamemanager`](data/cogs/CogManager/cogs/gamemanager/) | Per-server game library and game nights:<br>- tick-box pickers for the games people own and have installed, and a step-by-step profile setup<br>- rankings, a shared-game finder, and "looking for group" pings<br>- scheduled and weekly sessions with join buttons, reminders and Discord events<br>- votes on what to play<br>- wishlists with Steam sale alerts<br><br>See its [README](data/cogs/CogManager/cogs/gamemanager/README.md). | `!games …` (aliases `game`, `gm`), `/games …` |
 | [`activitystats`](data/cogs/CogManager/cogs/activitystats/) | Server activity stats. Everyone sees messages per channel, leaderboards, a heatmap of busy times, voice time, most-played games and their own stats. Admins get active-member trends, new-member retention, quiet members, joins and leaves, dead channels, game-night attendance, command usage, unanswered guide questions, library coverage and an optional weekly digest. Stores hourly counts, never message text; members can opt out. The butler and AI chat can answer stats questions. | `!stats …`, `!stats admin …` |
 | [`speakup`](data/cogs/CogManager/cogs/speakup/) | The bot chiming in when it can help:<br>- a clock reaction on times in chat (click it to see the time in everyone's timezone and schedule a session)<br>- cards for Steam store links (price, sale, who owns it, add and wishlist buttons)<br>- a summary offer on article and video links<br>- "did you mean…" for mistyped commands<br><br>Also reminders. Quiet it per channel, per person or per feature. | `!speakup …`, `!remindme`, `!reminders` |
 | [`butlerfun`](data/cogs/CogManager/cogs/butlerfun/) | AI extras on top of the Claude cog:<br>- `/catchup`: a summary of a channel since you last spoke, only for you<br>- `!judge`: ButlerBot settles an argument in character<br>- `!adventure`: a group text adventure in a thread<br>- `!maketrivia`: writes a list for Red's trivia game<br>- `!guessgame`: Gemini paints a game from the server's library and the first correct guess wins | `/catchup`, `!catchup`, `!judge`, `!adventure`, `!maketrivia`, `!guessgame` |
@@ -30,7 +30,7 @@ Not sure how to do something? Ask the bot: `!butler how do I start a game vote?`
 
 These are installed on the server with Red's Downloader and updated with `!cog update`, so they aren't tracked here:
 
-antispam, autoroom, system, easytranslate, chatchart, clearchannel, consolelogs, customhelp (loaded), and roletools, autoroler (installed but not loaded).
+antispam, autoroom, system, easytranslate, chatchart, clearchannel and consolelogs (loaded); customhelp (unloaded: the handbook cog replaces it); roletools and autoroler (installed but not loaded).
 
 To change one, fork it into a new, differently named cog under `CogManager/cogs/` instead of editing the Downloader copy.
 
@@ -49,45 +49,50 @@ data/cogs/CogManager/cogs/<cog>/   our custom cogs
 
 ## Deploying
 
-The server updates by pulling `main` in the folder that contains `data/`.
+The server runs the bot in Docker. It updates by pulling `main` in the folder that contains `data/`. The repo is public, so pulling needs no key.
 
 ### First-time setup on the server
 
-Run these as the user that owns `data/`:
+Run these as the user that owns `data/`, in the folder that contains it. They adopt the existing folder without touching the untracked runtime files:
 
 ```sh
-# 1. Read-only deploy key (add the .pub contents in GitHub → Settings → Deploy keys)
-ssh-keygen -t ed25519 -f ~/.ssh/red_deploy -N ""
-# then point git at it, e.g. in ~/.ssh/config:
-#   Host github.com
-#     IdentityFile ~/.ssh/red_deploy
-
-# 2. Adopt the existing folder without touching untracked runtime files
 git init -b main
-git remote add origin git@github.com:bradqui/ButlerBot.git
+git remote add origin https://github.com/bradqui/ButlerBot.git
 git fetch origin
-git reset origin/main        # moves the branch only; files are unchanged
-git status                   # review what differs from the repo
+git reset origin/main          # moves the branch only; files are unchanged
+git status                     # review what differs from the repo
 git diff
-git reset --hard origin/main # take the repo's versions of the tracked files
+git reset --hard origin/main   # take the repo's versions of the tracked files
+git branch --set-upstream-to=origin/main main
 ```
 
-Then, in Discord, as the bot owner:
+Then, in Discord, as the bot owner. Delete the messages containing keys afterwards.
 
 ```
 !pipinstall anthropic
 !pipinstall tzdata
-!set api anthropic api_key,<your Anthropic key>     (delete the message afterwards)
-!reload gemini
-!reload gamemanager
+!set api anthropic api_key,<your Anthropic key>
+!gemini setkey <your Gemini key>
+!unload customhelp
 !load claude
+!load gemini
+!load gamemanager
+!load activitystats
+!load speakup
+!load butlerfun
+!load handbook
+!load buttongreeter
+!load censord
 !slash enable games
+!slash enable catchup
 !slash sync
 ```
 
-The last two turn on the `/games` slash commands. Buttons on game sessions and votes posted before this update stop working; start new ones.
-
-The Gemini cog needs its own key, set with `!gemini setkey <key>`, if it isn't set already.
+**Notes on that list:**
+- **`!unload customhelp` first:** the handbook cog replaces `!help`, and only one cog can do that.
+- **Already-loaded cogs:** use `!reload <cog>` instead of `!load`.
+- **Bot permissions:** besides the usual ones, the bot needs **Manage Events** (session events) and **Add Reactions** (time and link offers).
+- **Command reference:** `!handbook export` generates it for [`docs/reference/`](docs/reference/).
 
 ### Updating
 
@@ -105,6 +110,20 @@ Then run `!reload <cog>` in Discord for each cog that changed. If a cog's `info.
 - Never commit secrets. The bot token and API keys live in untracked `settings.json` files.
 
 See [CLAUDE.md](CLAUDE.md) for the full architecture notes and per-cog quirks.
+
+## Using these cogs on your own bot
+
+They were written for this server, but they're ordinary Red 3.5 cogs, and you're welcome to borrow them under the MIT license. This repo isn't laid out as a Downloader repo, so install by hand:
+
+1. Copy a cog's folder into your bot's cog path (`[p]paths` shows it).
+2. Install its `info.json` requirements with `[p]pipinstall`.
+3. `[p]load` it.
+
+Some cogs build on others:
+- `butlerfun` and parts of `speakup` need `claude`.
+- Session scheduling, Steam cards and `guessgame` need `gamemanager`.
+- `guessgame` also needs `gemini`.
+- Everything degrades gracefully when a partner cog is missing.
 
 ## License
 

@@ -24,6 +24,12 @@ Not sure which command you need? Ask in plain English. ButlerBot knows every com
   - Anything that needs mod, admin or game admin rights waits for you to press **Run** first.
   - It never runs a command you couldn't run yourself.
 
+## Questions that aren't about the bot
+
+Ask ButlerBot something unrelated, like "summarize yesterday's election" or "help with my homework", and it passes the question to the [AI chat]({{ '/ai/' | relative_url }}). You get the same answer as `!ai`, in the channel's shared AI conversation. **The handoff:**
+- counts toward any daily AI limit;
+- only happens where you're allowed to use `!ai`.
+
 ## It can look things up
 
 Before answering, ButlerBot can check real data:
@@ -50,6 +56,7 @@ If nothing the bot has fits your question, ButlerBot says so plainly. Admins see
 {: .staff }
 > Admins control this with:
 > - `!claude guidementions on|off`, whether @mentions and replies reach the butler;
-> - `!claude guideactions on|off`, whether it may run commands.
+> - `!claude guideactions on|off`, whether it may run commands;
+> - `!claude butlerhandoff on|off`, whether off-topic questions go to the AI chat (otherwise it just suggests `!ai`).
 >
 > The bot owner picks its model with `!claude guidemodel`.

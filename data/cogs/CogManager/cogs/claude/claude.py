@@ -133,6 +133,7 @@ GUIDE_MAX_HISTORY = 10      # messages kept per guide conversation
 GUIDE_IDLE_MINUTES = 15
 GUIDE_HELP_CHARS = 600      # help text kept per command in the catalog
 GUIDE_SILENT = "[silent]"   # the guide's answer when a reply to the bot wasn't meant for it
+GUIDE_HANDOFF = "[ai]"      # the guide's answer for questions that aren't about the bot: passed to the AI chat
 GUIDE_NO_COMMAND = "[no-command]"   # the guide's flag when no command does what was asked (logged for admins)
 PRIVILEGE_NAMES = {
     commands.PrivilegeLevel.MOD: "mod",
@@ -332,6 +333,7 @@ class ClaudeChat(commands.Cog):
             web_search=True,
             guide_mentions=True, # a plain @mention outside AI threads asks the bot guide
             guide_actions=True,  # the guide may run commands on the asker's behalf
+            guide_handoff=True,  # questions that aren't about the bot go on to the AI chat
             daily_limit=0,       # AI messages per user per day; 0 = unlimited
             usage=dict(EMPTY_USAGE),
             usage_since=None,
@@ -402,9 +404,21 @@ class ClaudeChat(commands.Cog):
     def _session_key(self, ctx: commands.Context, private: bool) -> str:
         if private:
             return f"USER_{ctx.author.id}"
-        if ctx.channel.id in self._threads:
-            return f"THREAD_{ctx.channel.id}"
-        return f"CHANNEL_{ctx.channel.id}"
+        return self._channel_key(ctx.channel)
+
+    def _channel_key(self, channel) -> str:
+        """The shared conversation `[p]ai` uses in this channel (or AI thread)."""
+        return f"THREAD_{channel.id}" if channel.id in self._threads else f"CHANNEL_{channel.id}"
+
+    async def _can_hand_off(self, message: discord.Message) -> bool:
+        """Whether a guide question may go on to the AI chat: the server allows it and the asker may use [p]ai here."""
+        if not await self.config.guild(message.guild).guide_handoff():
+            return False
+        ctx = await self.bot.get_context(message)
+        try:
+            return await self.ai.can_run(ctx)
+        except commands.CommandError:
+            return False
 
     def _get_session(self, key: str) -> Session:
         if key not in self._sessions:
@@ -1096,8 +1110,9 @@ class ClaudeChat(commands.Cog):
             "asker can do themselves. If it needs more permission, say who can do it (a mod, an admin, the bot owner).",
             f"- {MENTION_RULE} In commands, a <@id> mention works wherever a member is expected.",
             f"- For every detail of one command, they can run `{prefix}help <command>`.",
-            f"- If the question isn't about this bot (general knowledge, chit-chat, homework), say you only answer "
-            f"questions about the bot and suggest `{prefix}ai <question>` instead.",
+            "- If the question isn't about this bot at all (general knowledge, news, chit-chat, homework, opinions), "
+            f"reply with exactly {GUIDE_HANDOFF} and nothing else: it's passed on to the AI chat, which answers it. "
+            "If it mixes a bot question with something else, answer the bot part yourself.",
             "- Never ping @everyone or @here.",
             "- Some messages are replies to the bot's own announcements (shown as \"Replying to …\"). Answer them "
             "when they're meant for the bot, like a question about what it did. When they're meant for other people "
@@ -1548,6 +1563,16 @@ class ClaudeChat(commands.Cog):
                     except Exception:
                         log.exception("Couldn't record an unanswered guide question")
             action = self._action_call(response) if actions else None
+            if text == GUIDE_HANDOFF and action is None:
+                session.messages.pop()  # not a bot question: leave no trace in the guide chat
+                if may_stay_silent:
+                    return  # a reply to one of our announcements that wasn't for us
+                if await self._can_hand_off(message):
+                    await self._respond(message, prompt, self._channel_key(message.channel))
+                else:
+                    await self._send(message, channel, f"🤵 That's not about the bot, so it's outside my remit. "
+                                                       f"Try `{prefix}ai {prompt[:80]}`.")
+                return
             if text == GUIDE_SILENT and action is None:
                 session.messages.pop()  # a reply that wasn't for us: leave no trace
                 if not may_stay_silent:
@@ -1795,6 +1820,7 @@ class ClaudeChat(commands.Cog):
             f"**Web search:** {'On' if g['web_search'] else 'Off'}\n"
             f"**@mention asks the guide:** {'On' if g['guide_mentions'] else 'Off'}\n"
             f"**Guide runs commands for people:** {'On' if g['guide_actions'] else 'Off'}\n"
+            f"**Guide hands other questions to the AI chat:** {'On' if g['guide_handoff'] else 'Off'}\n"
             f"**Daily limit:** {g['daily_limit'] or 'Unlimited'} messages per user\n"
             f"**Persona:** {persona}"
         ), inline=False)
@@ -1955,6 +1981,21 @@ class ClaudeChat(commands.Cog):
         await self.config.guild(ctx.guild).guide_actions.set(enabled)
         await ctx.send("✅ The guide can now run commands for people." if enabled
                        else "✅ The guide now only explains commands.")
+
+    @claude.command(name="guidehandoff", aliases=["butlerhandoff"])
+    @checks.admin_or_permissions(manage_guild=True)
+    async def claude_guidehandoff(self, ctx: commands.Context, enabled: bool):
+        """
+        Pass questions that aren't about the bot from the butler to the AI chat.
+
+        When on, asking `[p]butler` (or @mentioning the bot) something like "who won the game last night?" gets an
+        answer from the AI chat, as if it had been asked with `[p]ai`. It uses the channel's shared AI conversation,
+        counts toward the daily AI limit, and only happens where the asker may use `[p]ai`. When off, the butler
+        just suggests `[p]ai`.
+        """
+        await self.config.guild(ctx.guild).guide_handoff.set(enabled)
+        await ctx.send("✅ The butler now passes other questions to the AI chat." if enabled
+                       else "✅ The butler now only suggests the AI chat for other questions.")
 
     @claude.command(name="guidemodel", aliases=["butlermodel"])
     @checks.is_owner()

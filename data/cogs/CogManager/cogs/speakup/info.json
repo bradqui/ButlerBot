@@ -1,0 +1,15 @@
+{
+    "name": "SpeakUp",
+    "short": "The bot chimes in when it can help, and sets reminders.",
+    "description": "Reacts to times in chat (click to see them in everyone's timezone and schedule a session), posts cards for Steam store links (price, sale, who owns it, add or wishlist buttons), offers short summaries of article and video links, suggests the right command when one is mistyped, and sets reminders. Quiet it per channel, per person or per feature.",
+    "end_user_data_statement": "This cog stores whether you've opted out of the bot's automatic replies, and the reminders you set (your user ID, channel, text and time) until they're delivered.",
+    "install_msg": "Thanks for installing SpeakUp! See `[p]speakup` for what it does and how to quiet it, and `[p]remindme` for reminders. Link summaries and smarter command suggestions need the Claude cog; session scheduling and Steam card buttons need GameManager.",
+    "author": ["Quillshot"],
+    "required_cogs": {},
+    "requirements": [],
+    "tags": ["utility", "reminders", "steam", "timezones"],
+    "min_bot_version": "3.5.0",
+    "hidden": false,
+    "disabled": false,
+    "type": "COG"
+}

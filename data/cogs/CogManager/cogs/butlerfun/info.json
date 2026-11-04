@@ -1,0 +1,15 @@
+{
+    "name": "ButlerFun",
+    "short": "AI extras: catch-up summaries, rulings, text adventures, trivia writing and guess the game.",
+    "description": "Built on the Claude cog: /catchup summarizes a channel since you last spoke (only you see it), judge settles an argument in ButlerBot's voice, adventure runs a group text adventure in a thread, maketrivia writes a list for Red's trivia game, and guessgame has Gemini paint a game from the server's library for everyone to guess.",
+    "end_user_data_statement": "This cog stores each member's guess-the-game win count and which threads are running adventures. Messages read for catch-ups, rulings and adventures are sent to Anthropic's API and not stored by this cog.",
+    "install_msg": "Thanks for installing ButlerFun! It needs the Claude cog; guessgame also needs Gemini and GameManager. Enable the /catchup slash command with `[p]slash enable catchup` and `[p]slash sync`.",
+    "author": ["Quillshot"],
+    "required_cogs": {},
+    "requirements": [],
+    "tags": ["ai", "fun", "games", "trivia"],
+    "min_bot_version": "3.5.0",
+    "hidden": false,
+    "disabled": false,
+    "type": "COG"
+}

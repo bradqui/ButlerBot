@@ -207,9 +207,11 @@ TITLE_TOOL = {
 }
 
 NO_MENTIONS = discord.AllowedMentions(everyone=False, users=False, roles=False, replied_user=False)
-MENTION_RULE = ("Discord mentions look like <@123> (a person), <@&123> (a role) or <#123> (a channel). A note in "
-                "parentheses says who each one in a message is, so use their names. To mention someone yourself, "
-                "write their <@id> exactly; it shows their name highlighted without pinging them.")
+MENTION_RULE = ("Discord mentions look like <@123> (a person), <@&123> (a role) or <#123> (a channel). Each message "
+                "has a \"Who's who\" note saying who the speaker and every mention in it are. When you talk about "
+                "someone from the conversation, mention them by writing their <@id> exactly, the first time you "
+                "name them in a reply; it shows their name highlighted without pinging them. Don't mention the "
+                "person you're replying to (your reply already goes to them), and never make up an ID.")
 EMPTY_USAGE = {"requests": 0, "input": 0, "output": 0, "cache_read": 0, "cache_write": 0, "searches": 0, "cost": 0.0}
 
 
@@ -553,14 +555,21 @@ class ClaudeChat(commands.Cog):
             return None, f"couldn't download `{att.filename}`"
         return None, f"`{att.filename}` isn't a file type I can read"
 
-    def _mention_note(self, message: discord.Message, ref: Optional[discord.Message] = None) -> Optional[str]:
-        """Say who each raw <@id>, <@&id> and <#id> in the message (and the one it replies to) refers to."""
-        seen, parts = set(), []
+    def _mention_note(self, message: discord.Message, ref: Optional[discord.Message] = None) -> str:
+        """Who's who: the speaker, the replied-to author, and each <@id>, <@&id> and <#id> in both messages.
+        Claude needs the IDs to mention people itself."""
+        seen, parts = {("u", message.author.id)}, [f"<@{message.author.id}> is {message.author.display_name} (speaking)"]
+
+        def person(m: discord.abc.User):
+            if ("u", m.id) not in seen:
+                seen.add(("u", m.id))
+                parts.append(f"<@{m.id}> is you" if m.id == self.bot.user.id else f"<@{m.id}> is {m.display_name}")
+
+        if ref is not None:
+            person(ref.author)
         for msg in filter(None, (message, ref)):
             for m in msg.mentions:
-                if ("u", m.id) not in seen:
-                    seen.add(("u", m.id))
-                    parts.append(f"<@{m.id}> is you" if m.id == self.bot.user.id else f"<@{m.id}> is {m.display_name}")
+                person(m)
             for r in msg.role_mentions:
                 if ("r", r.id) not in seen:
                     seen.add(("r", r.id))
@@ -569,7 +578,7 @@ class ClaudeChat(commands.Cog):
                 if ("c", c.id) not in seen:
                     seen.add(("c", c.id))
                     parts.append(f"<#{c.id}> is the channel #{c.name}")
-        return f"(Mentions: {'; '.join(parts)})" if parts else None
+        return f"(Who's who: {'; '.join(parts)})"
 
     @staticmethod
     def _readable(text: str, message: discord.Message) -> str:
@@ -600,9 +609,7 @@ class ClaudeChat(commands.Cog):
                 else:
                     context_lines.append(f"(Replying to a message from {ref.author.display_name})")
                 attachments.extend(ref.attachments)
-        mentions = self._mention_note(message, ref)
-        if mentions:
-            context_lines.append(mentions)
+        context_lines.append(self._mention_note(message, ref))
 
         blocks, notes = [], []
         for att in attachments[:MAX_ATTACHMENTS]:

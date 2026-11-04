@@ -4,7 +4,7 @@
     "short": "Chat with Anthropic's Claude in channels, threads, and private conversations.",
     "description": "Claude-powered AI chat: shared channel conversations (!ai), private conversations (!myai), AI threads, reply-to-continue, image/PDF/text file reading, web search with sources, usage tracking, and daily limits. Image generation requests are handed to the Gemini cog when it is loaded.",
     "install_msg": "Claude cog installed.\n\n1. Get an API key at https://console.anthropic.com/settings/keys\n2. Run `[p]set api anthropic api_key,<your key>`\n3. Try `[p]ai hello!`\n\nSee `[p]help claude` for settings.",
-    "requirements": ["anthropic"],
+    "requirements": ["anthropic", "Pillow"],
     "tags": ["ai", "claude", "anthropic", "chatbot"],
     "min_bot_version": "3.5.0",
     "end_user_data_statement": "Messages you send to the AI (and any files you attach) are sent to Anthropic to generate replies. Conversation history is kept in memory only and is cleared on reload or after inactivity. The cog stores your user ID with your model preference, usage totals, and daily message count."

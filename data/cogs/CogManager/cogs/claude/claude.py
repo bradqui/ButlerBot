@@ -1,5 +1,6 @@
 import asyncio
 import base64
+import io
 import contextlib
 import logging
 import os
@@ -65,7 +66,10 @@ TEXT_EXTENSIONS = {
     ".cfg", ".toml", ".html", ".css", ".xml", ".sql", ".sh", ".lua", ".java", ".c", ".cpp",
     ".h", ".cs", ".go", ".rs",
 }
-MAX_IMAGE_BYTES = 5 * 1024 * 1024
+MAX_IMAGE_BYTES = 3_750_000          # raw bytes; base64 makes it ~5 MB, the API's limit per image
+MAX_IMAGE_DOWNLOAD = 25 * 1024 * 1024  # bigger uploads aren't worth downloading to shrink
+IMAGE_MAX_SIDE = 1568                 # Claude scales larger images down to this anyway
+IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp"}
 MAX_PDF_BYTES = 20 * 1024 * 1024
 MAX_TEXT_BYTES = 100 * 1024
 MAX_ATTACHMENTS = 5
@@ -218,6 +222,8 @@ LINK_READERS = [
     ("claude-sonnet-5-5", {"type": "web_fetch_20260209", "name": "web_fetch", "max_uses": 2,
                            "max_content_tokens": 12000}),
     ("claude-sonnet-5-5", {"type": "web_fetch_20260209", "name": "web_fetch", "max_uses": 2}),
+    # Last resort: no page fetch, but a web search usually finds the page and what it says.
+    ("claude-haiku-5-5", {"type": "web_search_20250305", "name": "web_search", "max_uses": 3}),
 ]
 LINK_UNAVAILABLE = "UNAVAILABLE"
 
@@ -302,6 +308,49 @@ class ActionConfirmView(discord.ui.View):
                 await self.message.edit(content=f"{self.message.content}\n-# Timed out. Nothing was run.", view=None)
             except discord.HTTPException:
                 pass
+
+
+def sniff_image_type(data: bytes) -> Optional[str]:
+    """The real image format from the file's first bytes. Discord's content type can be wrong (a PNG labeled webp)."""
+    if data.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if data.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg"
+    if data[:6] in (b"GIF87a", b"GIF89a"):
+        return "image/gif"
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "image/webp"
+    return None
+
+
+def prepare_image(data: bytes) -> Optional[Tuple[bytes, str]]:
+    """
+    (bytes, media type) ready for the API, or None if it isn't a supported image. Images that are too big in bytes
+    or pixels are re-encoded as JPEG with the long side at most IMAGE_MAX_SIDE (Pillow, if installed).
+    """
+    media_type = sniff_image_type(data)
+    if media_type is None:
+        return None
+    try:
+        from PIL import Image
+    except ImportError:
+        return (data, media_type) if len(data) <= MAX_IMAGE_BYTES else None
+    try:
+        with Image.open(io.BytesIO(data)) as img:
+            if len(data) <= MAX_IMAGE_BYTES and max(img.size) <= IMAGE_MAX_SIDE:
+                return data, media_type
+            img.seek(0)   # first frame of an animation
+            rgba = img.convert("RGBA")
+        flat = Image.new("RGB", rgba.size, (255, 255, 255))
+        flat.paste(rgba, mask=rgba.getchannel("A"))
+        flat.thumbnail((IMAGE_MAX_SIDE, IMAGE_MAX_SIDE))
+        out = io.BytesIO()
+        flat.save(out, "JPEG", quality=85, optimize=True)
+        shrunk = out.getvalue()
+        return (shrunk, "image/jpeg") if len(shrunk) <= MAX_IMAGE_BYTES else None
+    except Exception:
+        log.warning("Couldn't shrink an image", exc_info=True)
+        return (data, media_type) if len(data) <= MAX_IMAGE_BYTES else None
 
 
 class ClaudeChat(commands.Cog):
@@ -565,11 +614,15 @@ class ClaudeChat(commands.Cog):
         ctype = (att.content_type or "").split(";")[0].strip().lower()
         ext = os.path.splitext(att.filename)[1].lower()
         try:
-            if ctype in IMAGE_TYPES:
-                if att.size > MAX_IMAGE_BYTES:
-                    return None, f"`{att.filename}` is too large (images up to 5 MB)"
-                data = base64.standard_b64encode(await att.read()).decode("utf-8")
-                return {"type": "image", "source": {"type": "base64", "media_type": ctype, "data": data}}, None
+            if ctype in IMAGE_TYPES or ext in IMAGE_EXTENSIONS:
+                if att.size > MAX_IMAGE_DOWNLOAD:
+                    return None, f"`{att.filename}` is too large (images up to 25 MB)"
+                prepared = await asyncio.to_thread(prepare_image, await att.read())
+                if prepared is None:
+                    return None, f"`{att.filename}` isn't an image I can read, or is too large to shrink"
+                raw, media_type = prepared
+                data = base64.standard_b64encode(raw).decode("utf-8")
+                return {"type": "image", "source": {"type": "base64", "media_type": media_type, "data": data}}, None
             if ctype == "application/pdf" or ext == ".pdf":
                 if att.size > MAX_PDF_BYTES:
                     return None, f"`{att.filename}` is too large (PDFs up to 20 MB)"
@@ -1337,7 +1390,7 @@ class ClaudeChat(commands.Cog):
         if client is None:
             return None
         prompt = (
-            f"Fetch this page and summarize it for a Discord chat: {url}\n\n"
+            f"Read this page (fetch it, or search for it if you can't) and summarize it for a Discord chat: {url}\n\n"
             "Reply with at most three short bullet points (\"- \"), plain and factual, under 80 words in total. For "
             "a video, summarize what its title and description say it's about. No introduction and no closing line. "
             f"If the page can't be fetched or has no readable content, reply with exactly {LINK_UNAVAILABLE}."
@@ -1347,14 +1400,18 @@ class ClaudeChat(commands.Cog):
             try:
                 text = await self._read_link(client, model, fetch, prompt, member)
             except anthropic.BadRequestError as e:
-                log.info("Link summary with %s/%s was rejected (%s); trying the next option.",
-                         model, fetch["type"], e.message)
+                log.warning("Link summary with %s/%s was rejected (%s); trying the next option.",
+                            model, fetch["type"], e.message)
                 continue
             except anthropic.APIError as e:
                 log.warning("Link summary failed: %s", e)
                 return None
             self._link_reader = index
-            return None if not text or LINK_UNAVAILABLE in text else text[:900]
+            if not text or LINK_UNAVAILABLE in text:
+                log.info("Link summary: %s couldn't read %s", model, url)
+                return None
+            return text[:900]
+        log.warning("Link summary: every reader option was rejected for %s", url)
         return None
 
     async def _read_link(self, client: anthropic.AsyncAnthropic, model: str, fetch: dict, prompt: str,

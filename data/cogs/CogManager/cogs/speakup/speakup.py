@@ -442,15 +442,19 @@ class SpeakUp(commands.Cog):
 
     @commands.Cog.listener()
     async def on_raw_reaction_add(self, payload: discord.RawReactionActionEvent):
-        entry = self._tracked.get(payload.message_id)
-        if entry is None or entry.get("done") or payload.user_id == self.bot.user.id:
-            return
-        if str(payload.emoji) != (TIME_EMOJI if entry["kind"] == "time" else LINK_EMOJI):
+        if payload.user_id == self.bot.user.id or str(payload.emoji) not in (TIME_EMOJI, LINK_EMOJI):
             return
         guild = self.bot.get_guild(payload.guild_id or 0)
         member = payload.member or (guild.get_member(payload.user_id) if guild else None)
         channel = guild.get_channel_or_thread(payload.channel_id) if guild else None
         if member is None or member.bot or channel is None:
+            return
+        entry = self._tracked.get(payload.message_id)
+        if entry is None:
+            entry = await self._rebuild_offer(channel, payload.message_id, str(payload.emoji))
+        if entry is None or entry.get("done"):
+            return
+        if str(payload.emoji) != (TIME_EMOJI if entry["kind"] == "time" else LINK_EMOJI):
             return
         if time.time() - entry["at"] > TRACK_SECONDS:
             self._tracked.pop(payload.message_id, None)
@@ -464,7 +468,48 @@ class SpeakUp(commands.Cog):
                 if not await self._answer_link(channel, message, entry, member):
                     entry["done"] = False   # let someone else try (e.g. after a rate limit)
         except discord.HTTPException as e:
-            log.debug("Couldn't answer a reaction in %s: %s", channel, e)
+            log.warning("Couldn't answer a reaction in %s: %s", channel, e)
+        except Exception:
+            # Anything else would otherwise fail silently: the click just does nothing.
+            log.exception("Answering a %s reaction failed", entry["kind"])
+            entry["done"] = False
+            try:
+                await channel.send("❌ Something went wrong there. The error was logged; try clicking again.",
+                                   reference=message.to_reference(fail_if_not_exists=False), mention_author=False,
+                                   delete_after=30)
+            except discord.HTTPException:
+                pass
+
+    async def _rebuild_offer(self, channel, message_id: int, emoji: str) -> Optional[dict]:
+        """
+        Offers live in memory, so a reload or restart forgets them. When someone clicks one we don't know, re-read
+        the message: if our own reaction is on it, work out the offer again from its text.
+        """
+        try:
+            message = await channel.fetch_message(message_id)
+        except discord.HTTPException:
+            return None
+        age = (datetime.now(timezone.utc) - message.created_at).total_seconds()
+        if age > TRACK_SECONDS or not any(str(r.emoji) == emoji and r.me for r in message.reactions):
+            return None
+        if emoji == LINK_EMOJI:
+            links = summary_links(message.content)
+            if not links:
+                return None
+            data = {"kind": "link", "url": links[0], "author": message.author.id}
+        else:
+            member = message.guild.get_member(message.author.id) if message.guild else None
+            if member is None:
+                return None
+            tz, tz_name, personal = await self._tz(member)
+            found = find_time(message.content, tz, message.created_at)   # as of when it was said
+            if found is None:
+                return None
+            data = {"kind": "time", "ts": int(found[0].timestamp()), "phrase": found[1], "tz": tz_name,
+                    "personal": personal, "author": message.author.id}
+        self._track(message, data)
+        self._tracked[message.id]["at"] = message.created_at.timestamp()
+        return self._tracked[message.id]
 
     # ---------- times ----------
 
@@ -513,8 +558,12 @@ class SpeakUp(commands.Cog):
             summary = await claude.summarize_link(entry["url"], clicker)
         reference = message.to_reference(fail_if_not_exists=False)
         if not summary:
-            await channel.send("😶 I couldn't read that page.", reference=reference, mention_author=False,
-                               delete_after=20)
+            view = discord.ui.View(timeout=None)
+            view.add_item(DismissButton(clicker.id))
+            await channel.send("😶 I couldn't read that page. It may block bots, need a login, or be mostly video. "
+                               f"Try `{await self._prefix(channel.guild)}ai` with what you want to know about it.",
+                               view=view, reference=reference,
+                               mention_author=False)
             return True
         view = discord.ui.View(timeout=None)
         view.add_item(DismissButton(clicker.id))

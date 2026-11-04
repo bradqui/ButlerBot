@@ -133,6 +133,7 @@ GUIDE_MAX_HISTORY = 10      # messages kept per guide conversation
 GUIDE_IDLE_MINUTES = 15
 GUIDE_HELP_CHARS = 600      # help text kept per command in the catalog
 GUIDE_SILENT = "[silent]"   # the guide's answer when a reply to the bot wasn't meant for it
+GUIDE_NO_COMMAND = "[no-command]"   # the guide's flag when no command does what was asked (logged for admins)
 PRIVILEGE_NAMES = {
     commands.PrivilegeLevel.MOD: "mod",
     commands.PrivilegeLevel.ADMIN: "admin",
@@ -146,7 +147,7 @@ MAX_LOOKUP_ROUNDS = 3         # rounds of read-only lookups (other cogs' guide t
 MAX_ACTION_COMMANDS = 5
 ACTION_STEP_TIMEOUT = 20      # seconds to wait for one command before starting the next
 ACTION_CONFIRM_TIMEOUT = 120
-ACTION_BLOCKED_COMMANDS = {"guide", "ai", "myai", "aithread"}
+ACTION_BLOCKED_COMMANDS = {"butler", "ai", "myai", "aithread"}
 GUIDE_ACTION_TOOL = {
     "name": "run_commands",
     "description": (
@@ -205,6 +206,19 @@ TITLE_TOOL = {
         "additionalProperties": False,
     },
 }
+
+# Link summaries (SpeakUp): Anthropic's web fetch reads the page, so the bot never requests user-posted URLs itself.
+# Tried in order until one is accepted, like TITLE_SEARCHERS.
+LINK_READERS = [
+    ("claude-haiku-5-5", {"type": "web_fetch_20260209", "name": "web_fetch", "max_uses": 2,
+                          "max_content_tokens": 12000}),
+    ("claude-haiku-5-5", {"type": "web_fetch_20250910", "name": "web_fetch", "max_uses": 2,
+                          "max_content_tokens": 12000}),
+    ("claude-sonnet-5-5", {"type": "web_fetch_20260209", "name": "web_fetch", "max_uses": 2,
+                           "max_content_tokens": 12000}),
+    ("claude-sonnet-5-5", {"type": "web_fetch_20260209", "name": "web_fetch", "max_uses": 2}),
+]
+LINK_UNAVAILABLE = "UNAVAILABLE"
 
 NO_MENTIONS = discord.AllowedMentions(everyone=False, users=False, roles=False, replied_user=False)
 MENTION_RULE = ("Discord mentions look like <@123> (a person), <@&123> (a role) or <#123> (a channel). Each message "
@@ -297,7 +311,7 @@ class ClaudeChat(commands.Cog):
     conversation that follows you around, and `[p]aithread` starts a dedicated thread.
     Reply to any of my answers to keep that conversation going.
 
-    `[p]guide` answers questions about the bot itself, like "how do I start a game vote?"
+    `[p]butler` answers questions about the bot itself, like "how do I start a game vote?"
     """
 
     def __init__(self, bot: Red):
@@ -335,6 +349,7 @@ class ClaudeChat(commands.Cog):
         self._tasks: set = set()
         self._reply_cooldown = commands.CooldownMapping.from_cooldown(1, 4, commands.BucketType.user)
         self._title_searcher = 0  # index into TITLE_SEARCHERS of the first option that worked
+        self._link_reader = 0     # same for LINK_READERS
 
     async def cog_load(self):
         self._threads = set(await self.config.registered_threads())
@@ -513,7 +528,7 @@ class ClaudeChat(commands.Cog):
                          "libraries, who owns a game, and active sessions and votes). Use them instead of guessing "
                          "or asking people to check for themselves; \"me\" means the person talking to you.")
         lines.append(f"- You don't know this bot's commands. If someone asks how to use the bot or its commands, "
-                     f"point them to `{await self._prefix(guild)}guide <question>`.")
+                     f"point them to `{await self._prefix(guild)}butler <question>`.")
         lines.append(f"Today's date is {today} (UTC).")
         return "\n".join(lines)
 
@@ -1039,7 +1054,8 @@ class ClaudeChat(commands.Cog):
                 "commands instead of running them.",
                 "- Commands run as the asker, with the asker's own permissions, as if they typed them.",
                 "- Use only commands from the reference, without the prefix, with every argument filled in. Never run "
-                "a command without arguments when that opens an interactive menu; fill in the arguments.",
+                "a command without arguments when that opens an interactive menu; fill in the arguments. The exception is "
+                "a command that exists to walk someone through a menu, like games newprofile.",
                 "- Prefer commands the asker can run. If something needs a permission they clearly don't have, say "
                 "who can do it instead of calling the tool. Server roles can grant extra access, and the bot checks "
                 "permissions again before running anything.",
@@ -1051,7 +1067,7 @@ class ClaudeChat(commands.Cog):
                 "- Commands that need mod, admin, or game admin rights wait for the asker to press Run.",
                 "- Only ban, kick, mute, warn, or delete messages when the asker explicitly asks for exactly that. "
                 "If a request is ambiguous, ask a short question instead of guessing.",
-                "- Never run guide or AI chat commands (guide, ai, myai, aithread).",
+                "- Never run the butler (bot guide) or AI chat commands (butler, guide, ai, myai, aithread).",
             ]
         else:
             action_rules = ["- You can't run commands for people; tell them what to type."]
@@ -1068,7 +1084,8 @@ class ClaudeChat(commands.Cog):
             "",
             "How to answer:",
             f"- Base every answer on the command reference below (prefix `{prefix}`). Never invent commands, "
-            "subcommands, arguments, or features that aren't in it. If nothing fits, say so plainly.",
+            "subcommands, arguments, or features that aren't in it. If nothing fits, say so plainly and end your "
+            f"answer with {GUIDE_NO_COMMAND} on its own line (it's removed before posting).",
             "- Give the exact command to type in `inline code`, with a short example using realistic values when it "
             "helps. In usages, <angle brackets> are required and [square brackets] are optional; people don't type "
             "the brackets.",
@@ -1088,20 +1105,35 @@ class ClaudeChat(commands.Cog):
             *(["- Use the lookup tools to check facts (someone's games, who owns a game, running sessions and votes) "
                "instead of guessing. The asker doesn't see lookups, so answer in your own words."] if lookups else []),
             *action_rules,
+            *await self._handbook_lines(),
             "",
             "# Command reference",
             "",
             catalog,
         ])
 
+    async def _handbook_lines(self) -> List[str]:
+        """The online handbook's pages, if the Handbook cog is loaded, so answers can link the right one."""
+        handbook = self.bot.get_cog("Handbook")
+        if handbook is None or not hasattr(handbook, "guide_links"):
+            return []
+        try:
+            links = await handbook.guide_links()
+        except Exception:
+            log.debug("Couldn't read handbook links", exc_info=True)
+            return []
+        return ["", "Handbook pages (online guides, by task). When one covers the question, end your answer with "
+                    "\"More: <its URL>\" on its own line:",
+                *(f"- {title}: {url} ({about})" for title, url, about in links)]
+
     def _guide_intro(self, prefix: str, actions: bool) -> str:
         lines = [
             "📖 Ask me how to do anything with this bot, in plain English. For example:",
-            f"- `{prefix}guide how do I find a game everyone owns?`",
-            f"- `{prefix}guide how do I start a vote on what to play?`",
+            f"- `{prefix}butler how do I find a game everyone owns?`",
+            f"- `{prefix}butler how do I start a vote on what to play?`",
         ]
         if actions:
-            lines.append(f"- `{prefix}guide add Rocket League to my games and mark it installed`")
+            lines.append(f"- `{prefix}butler add Rocket League to my games and mark it installed`")
             lines.append("I can run commands for you too. Anything that needs extra permissions waits for you to press Run.")
         lines.append("Reply to my answers to follow up.")
         return "\n".join(lines)
@@ -1233,6 +1265,143 @@ class ClaudeChat(commands.Cog):
                 appid = block.input.get("steam_appid")
                 return {"title": title[:100], "steam_appid": appid if isinstance(appid, int) and appid > 0 else None}
         return None
+
+    # ---------- public API: one-off Claude calls for other cogs (ButlerFun) ----------
+
+    async def complete(self, member: discord.Member, channel, *, system: str, messages: List[dict],
+                       fast: bool = False, max_tokens: int = 1500, persona: bool = True,
+                       count_toward_limit: bool = True) -> Tuple[Optional[str], Optional[str]]:
+        """
+        For other cogs: one Claude call. Returns (text, None), or (None, a message to show the user).
+
+        `fast` uses the guide model (Haiku); otherwise the channel's model. With `persona`, the server persona leads
+        the system prompt. Usage counts toward `member`; with `count_toward_limit` the call also counts against
+        (and respects) the server's daily AI limit. Long `messages` lists benefit from top-level prompt caching.
+        """
+        guild = member.guild
+        prefix = await self._prefix(guild)
+        client = await self._get_client()
+        if client is None:
+            return None, f"⚠️ No Anthropic API key is set. The bot owner can add one with `{prefix}set api anthropic api_key,<key>`."
+        if count_toward_limit:
+            limit = await self._limit_reached(member)
+            if limit:
+                return None, f"⏳ You've used your {limit} AI messages for today. The limit resets at midnight UTC."
+        if fast:
+            model = await self.config.guide_model()
+        else:
+            model = await self._model_for(f"CHANNEL_{channel.id}", member, channel)
+        model = model if model in MODELS else DEFAULT_MODEL
+        if persona:
+            system = (f'You are {guild.me.display_name}, a bot in the Discord server "{guild.name}".\n'
+                      f"Your personality (set by the server's admins):\n{await self._persona(guild)}\n\n{system}")
+        try:
+            response = await client.messages.create(
+                model=model, max_tokens=max_tokens, system=system, messages=messages,
+                output_config={"effort": await self.config.effort()},
+                extra_body={"cache_control": {"type": "ephemeral"}})
+        except Exception as e:
+            return None, self._describe_error(e, prefix)[0]
+        await self._record_usage(member, self._usage_from(response, model))
+        if count_toward_limit:
+            await self._count_request(member)
+        text = "".join(b.text for b in response.content if b.type == "text").strip()
+        if response.stop_reason == "refusal" or not text:
+            return None, "🚫 I can't help with that one."
+        return text, None
+
+    # ---------- public API: link summaries and command suggestions (SpeakUp) ----------
+
+    async def summarize_link(self, url: str, member: discord.Member) -> Optional[str]:
+        """
+        For other cogs (SpeakUp): a short summary of the page at `url`, fetched by Anthropic's web fetch tool (so the
+        bot never requests the URL itself). Returns None if there's no key, the page couldn't be read, or every
+        option failed. Usage counts toward `member`.
+        """
+        client = await self._get_client()
+        if client is None:
+            return None
+        prompt = (
+            f"Fetch this page and summarize it for a Discord chat: {url}\n\n"
+            "Reply with at most three short bullet points (\"- \"), plain and factual, under 80 words in total. For "
+            "a video, summarize what its title and description say it's about. No introduction and no closing line. "
+            f"If the page can't be fetched or has no readable content, reply with exactly {LINK_UNAVAILABLE}."
+        )
+        for index in range(self._link_reader, len(LINK_READERS)):
+            model, fetch = LINK_READERS[index]
+            try:
+                text = await self._read_link(client, model, fetch, prompt, member)
+            except anthropic.BadRequestError as e:
+                log.info("Link summary with %s/%s was rejected (%s); trying the next option.",
+                         model, fetch["type"], e.message)
+                continue
+            except anthropic.APIError as e:
+                log.warning("Link summary failed: %s", e)
+                return None
+            self._link_reader = index
+            return None if not text or LINK_UNAVAILABLE in text else text[:900]
+        return None
+
+    async def _read_link(self, client: anthropic.AsyncAnthropic, model: str, fetch: dict, prompt: str,
+                         member: discord.Member) -> str:
+        messages = [{"role": "user", "content": prompt}]
+        totals = dict(EMPTY_USAGE)
+        response = None
+        for _ in range(MAX_PAUSE_CONTINUATIONS + 1):
+            response = await client.messages.create(model=model, max_tokens=1000, output_config={"effort": "low"},
+                                                    tools=[fetch], messages=messages)
+            for k, v in self._usage_from(response, model).items():
+                totals[k] += v
+            if response.stop_reason != "pause_turn":
+                break
+            messages = messages + [{"role": "assistant", "content": response.content}]
+        totals["requests"] = 1
+        await self._record_usage(member, totals)
+        # Only the text after the last fetch is the summary ("Let me fetch that…" comes before it).
+        blocks = list(response.content)
+        last_tool = max((i for i, b in enumerate(blocks) if b.type not in ("text",)), default=-1)
+        return "".join(b.text for b in blocks[last_tool + 1:] if b.type == "text").strip()
+
+    async def suggest_command(self, message: discord.Message, typed: str) -> Optional[str]:
+        """
+        For other cogs (SpeakUp): the command someone most likely meant when they typed one that doesn't exist,
+        written as they should type it, or None. Uses the guide's model, prompt and tools (with tool_choice none),
+        so the large command reference is read from the guide's prompt cache.
+        """
+        client = await self._get_client()
+        if client is None or message.guild is None:
+            return None
+        guild, member = message.guild, message.author
+        prefix = await self._prefix(guild)
+        actions = await self.config.guild(guild).guide_actions()
+        level = await self._permission_level(member)
+        lookups = self._lookup_tools()
+        model = await self.config.guide_model()
+        if model not in MODELS:
+            model = DEFAULT_GUIDE_MODEL
+        system = await self._guide_system_prompt(guild, prefix, include_owner=level.startswith("bot owner"),
+                                                 actions=actions, lookups=bool(lookups))
+        tools = [tool for tool, _ in lookups.values()] + ([GUIDE_ACTION_TOOL] if actions else [])
+        kwargs = {"tools": tools, "tool_choice": {"type": "none"}} if tools else {}
+        prompt = (f"{member.display_name} ({level}) typed `{typed[:300]}`, which isn't a command. If one command in the "
+                  "reference clearly matches what they meant, reply with only that command, written exactly as they "
+                  f"should type it (with the {prefix} prefix and their arguments, corrected if needed). If you aren't "
+                  "sure, reply with only: none")
+        try:
+            response = await client.messages.create(
+                model=model, max_tokens=150, output_config={"effort": "low"},
+                system=[{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}],
+                messages=[{"role": "user", "content": prompt}], **kwargs)
+        except anthropic.APIError as e:
+            log.info("Command suggestion failed: %s", e)
+            return None
+        totals = self._usage_from(response, model)
+        await self._record_usage(member, totals)
+        text = "".join(b.text for b in response.content if b.type == "text").strip().strip("`").strip()
+        if not text.startswith(prefix) or "\n" in text or len(text) > 300:
+            return None
+        command = self.bot.get_command(text[len(prefix):].split(" ")[0])
+        return text if command is not None and not command.hidden else None
 
     # ---------- read-only lookups offered by other cogs ----------
 
@@ -1370,6 +1539,14 @@ class ClaudeChat(commands.Cog):
                 return
 
             text = "".join(b.text for b in response.content if b.type == "text").strip()
+            if GUIDE_NO_COMMAND in text:
+                text = text.replace(GUIDE_NO_COMMAND, "").strip()
+                stats = self.bot.get_cog("ActivityStats")
+                if stats is not None and hasattr(stats, "record_unmet"):
+                    try:
+                        await stats.record_unmet(guild, message.author, prompt)
+                    except Exception:
+                        log.exception("Couldn't record an unanswered guide question")
             action = self._action_call(response) if actions else None
             if text == GUIDE_SILENT and action is None:
                 session.messages.pop()  # a reply that wasn't for us: leave no trace
@@ -1509,22 +1686,22 @@ class ClaudeChat(commands.Cog):
 
         await self._respond(ctx.message, prompt, f"THREAD_{thread.id}", channel=thread)
 
-    @commands.command(name="guide")
+    @commands.command(name="butler", aliases=["guide"])
     @commands.guild_only()
     @commands.cooldown(1, 4, commands.BucketType.user)
-    async def guide(self, ctx: commands.Context, *, request: str = ""):
+    async def butler(self, ctx: commands.Context, *, request: str = ""):
         """
         Ask how to use this bot, or ask it to do something, in plain English.
 
-        The guide knows every command enabled in this server. Ask "how do I…" and it tells you
+        The butler knows every command enabled in this server. Ask "how do I…" and it tells you
         what to type; ask it to do something and it runs the commands for you, with your own
         permissions. Anything that needs mod, admin, or game admin rights waits for you to press Run.
         Reply to its answers to follow up. You can also just @mention me.
 
         **Examples:**
-        - `[p]guide how do I start a vote on what to play?`
-        - `[p]guide add Rocket League to my games and mark it installed`
-        - `[p]guide what can mods do with the word filter?`
+        - `[p]butler how do I start a vote on what to play?`
+        - `[p]butler add Rocket League to my games and mark it installed`
+        - `[p]butler set up my gaming profile`
         """
         await self._guide_respond(ctx.message, request)
 
@@ -1572,7 +1749,7 @@ class ClaudeChat(commands.Cog):
 
         # Respect the same permission rules (Permissions cog, cog checks) as the commands.
         if key.startswith("GUIDE_"):
-            command = self.guide
+            command = self.butler
         else:
             command = self.myai if key.startswith("USER_") else self.ai
         ctx = await self.bot.get_context(message)
@@ -1625,7 +1802,7 @@ class ClaudeChat(commands.Cog):
             f"**Effort:** {await self.config.effort()}\n"
             f"**Memory:** last {await self.config.max_history()} messages, "
             f"resets after {await self.config.idle_minutes()} idle minutes\n"
-            f"**Bot guide (`{ctx.clean_prefix}guide`):** {self._model_label(await self.config.guide_model())}"
+            f"**Butler (`{ctx.clean_prefix}butler`):** {self._model_label(await self.config.guide_model())}"
         ), inline=False)
         await ctx.send(embed=embed)
 
@@ -1753,7 +1930,7 @@ class ClaudeChat(commands.Cog):
         await self.config.guild(ctx.guild).web_search.set(enabled)
         await ctx.send(f"✅ Web search {'enabled' if enabled else 'disabled'}.")
 
-    @claude.command(name="guidementions")
+    @claude.command(name="guidementions", aliases=["butlermentions"])
     @checks.admin_or_permissions(manage_guild=True)
     async def claude_guidementions(self, ctx: commands.Context, enabled: bool):
         """
@@ -1764,9 +1941,9 @@ class ClaudeChat(commands.Cog):
         """
         await self.config.guild(ctx.guild).guide_mentions.set(enabled)
         await ctx.send(f"✅ @mentioning me {'now asks' if enabled else 'no longer asks'} the bot guide. "
-                       f"`{ctx.clean_prefix}guide` always works.")
+                       f"`{ctx.clean_prefix}butler` always works.")
 
-    @claude.command(name="guideactions")
+    @claude.command(name="guideactions", aliases=["butleractions"])
     @checks.admin_or_permissions(manage_guild=True)
     async def claude_guideactions(self, ctx: commands.Context, enabled: bool):
         """
@@ -1779,10 +1956,10 @@ class ClaudeChat(commands.Cog):
         await ctx.send("✅ The guide can now run commands for people." if enabled
                        else "✅ The guide now only explains commands.")
 
-    @claude.command(name="guidemodel")
+    @claude.command(name="guidemodel", aliases=["butlermodel"])
     @checks.is_owner()
     async def claude_guidemodel(self, ctx: commands.Context, model: str):
-        """Set the model the bot guide (`[p]guide`) uses. Haiku is cheap and plenty for command help."""
+        """Set the model the butler (`[p]butler`, the bot guide) uses. Haiku is cheap and plenty for command help."""
         resolved = self._resolve_model(model)
         if resolved is None:
             return await ctx.send(f"❌ Unknown model. See `{ctx.clean_prefix}claude models`.")

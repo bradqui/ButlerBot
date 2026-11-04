@@ -142,8 +142,8 @@ class GeminiChat(commands.Cog):
             await self._send(reply_target, channel, f"⚠️ **Image generation failed:** {reason}")
             return None
 
-        caption = prompt if len(prompt) <= 80 else prompt[:80] + "…"
-        return await self._send(reply_target, channel, f"🎨 **{model_name}:** {caption}", files=files)
+        # Just the image: echoing the prompt back is noise, and it would give away guess-the-game answers.
+        return await self._send(reply_target, channel, None, files=files)
 
     # ==========================================
     #                 COMMANDS

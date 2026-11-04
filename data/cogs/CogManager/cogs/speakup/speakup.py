@@ -58,7 +58,11 @@ STEAM_APP_RE = re.compile(r"https?://store\.steampowered\.com/app/(\d+)", re.I)
 URL_RE = re.compile(r"https?://[^\s<>()\"']+", re.I)
 SKIP_LINK_HOSTS = ("discord.com", "discord.gg", "discordapp.com", "discordapp.net", "tenor.com", "giphy.com",
                    "imgur.com", "steampowered.com", "steamcommunity.com", "twitch.tv", "clips.twitch.tv",
-                   "spotify.com", "medal.tv", "streamable.com", "reddit.com/media", "x.com", "twitter.com")
+                   "spotify.com", "medal.tv", "streamable.com", "reddit.com/media", "x.com", "twitter.com",
+                   "twimg.com", "klipy.com", "gfycat.com", "imgflip.com", "i.redd.it", "v.redd.it", "gyazo.com",
+                   "prnt.sc", "lightshot.com", "pinimg.com", "fxtwitter.com", "vxtwitter.com")
+EMBED_WAIT = 3                   # seconds to let Discord attach link previews before deciding what a link is
+MEDIA_EMBED_TYPES = ("image", "gifv")   # previews Discord shows as a picture or GIF: nothing to summarize
 MEDIA_EXTENSIONS = (".png", ".jpg", ".jpeg", ".gif", ".webp", ".mp4", ".webm", ".mov", ".mp3", ".wav", ".ogg",
                     ".zip", ".exe", ".pdf")
 STEAM_DETAILS_URL = "https://store.steampowered.com/api/appdetails"
@@ -436,9 +440,32 @@ class SpeakUp(commands.Cog):
             return False
         if not message.channel.permissions_for(message.guild.me).add_reactions:
             return False
+        links = await self._article_links(message, links)
+        if not links:
+            return False
         await message.add_reaction(LINK_EMOJI)
         self._track(message, {"kind": "link", "url": links[0], "author": message.author.id})
         return True
+
+    async def _article_links(self, message: discord.Message, links: List[str]) -> List[str]:
+        """
+        Drop links Discord previews as a picture or GIF. Previews usually arrive a moment after the message, so
+        if there are none yet, wait briefly and look again.
+        """
+        embeds = message.embeds
+        if not embeds:
+            await asyncio.sleep(EMBED_WAIT)
+            try:
+                embeds = (await message.channel.fetch_message(message.id)).embeds
+            except (discord.HTTPException, AttributeError):
+                embeds = []
+        media = [e for e in embeds if e.type in MEDIA_EMBED_TYPES]
+        if not media:
+            return links
+        if len(media) == len(embeds) and len(embeds) >= len(links):
+            return []   # every link turned out to be a picture or GIF
+        media_urls = {(e.url or "").rstrip("/") for e in media}
+        return [url for url in links if url.rstrip("/") not in media_urls]
 
     @commands.Cog.listener()
     async def on_raw_reaction_add(self, payload: discord.RawReactionActionEvent):

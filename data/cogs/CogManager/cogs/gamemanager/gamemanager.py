@@ -73,8 +73,28 @@ LIBRARY_ACTIONS = {
 }
 MEDALS = ["🥇", "🥈", "🥉"]
 
+RECURRING_POST_HOURS = 24       # a recurring session is posted this long before it starts
+MAX_RECURRING = 10              # recurring schedules per server
+EVENT_LENGTH_HOURS = 3          # Discord events need an end time when they aren't in a voice channel
+SALE_CHECK_HOURS = 6            # how often wishlisted games' Steam prices are checked
+FREE_GAMES_KEEP = 50            # Epic free-game IDs remembered so each is announced once
+
+COMMON_TIMEZONES = [
+    ("US Eastern (New York)", "America/New_York"), ("US Central (Chicago)", "America/Chicago"),
+    ("US Mountain (Denver)", "America/Denver"), ("Arizona (Phoenix)", "America/Phoenix"),
+    ("US Pacific (Los Angeles)", "America/Los_Angeles"), ("Alaska (Anchorage)", "America/Anchorage"),
+    ("Hawaii (Honolulu)", "Pacific/Honolulu"), ("UK (London)", "Europe/London"),
+    ("Central Europe (Paris, Berlin)", "Europe/Paris"), ("Eastern Europe (Helsinki)", "Europe/Helsinki"),
+    ("Australia East (Sydney)", "Australia/Sydney"), ("UTC", "UTC"),
+]
+
 # Checking new game names: library near-match -> Steam exact name -> AI web search (Claude cog).
 STEAM_SEARCH_URL = "https://store.steampowered.com/api/storesearch/"
+STEAM_DETAILS_URL = "https://store.steampowered.com/api/appdetails"
+STEAM_APP_URL = "https://store.steampowered.com/app/{}"
+EPIC_FREE_URL = ("https://store-site-backend-static-ipv4.ak.epicgames.com/freeGamesPromotions"
+                 "?locale=en-US&country=US&allowCountries=US")
+EPIC_STORE_URL = "https://store.epicgames.com/en-US/"
 MAX_CHECKED_NAMES = 10          # bigger bulk adds skip the Steam and AI lookups
 MAX_AI_TITLE_LOOKUPS = 5        # AI web searches per command (about 1¢ each)
 
@@ -218,20 +238,98 @@ def clean_title(name: str) -> str:
     return re.sub(r"\s+", " ", re.sub(r"[™®©]", "", name)).strip()[:100]
 
 
-async def steam_exact_title(name: str) -> Optional[Tuple[str, int]]:
-    """(title, app id) if Steam's store search has a game with exactly this name, ignoring case and symbols."""
+async def _get_json(url: str, params: Optional[dict] = None, timeout: float = 8):
+    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=timeout)) as session:
+        async with session.get(url, params=params) as resp:
+            return await resp.json(content_type=None)
+
+
+async def steam_search(term: str) -> List[Tuple[str, int]]:
+    """(title, app id) for the games Steam's store search finds, best match first."""
     try:
-        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=8)) as session:
-            async with session.get(STEAM_SEARCH_URL, params={"term": name, "l": "english", "cc": "US"}) as resp:
-                data = await resp.json(content_type=None)
+        data = await _get_json(STEAM_SEARCH_URL, {"term": term, "l": "english", "cc": "US"})
     except Exception as e:
-        log.debug("Steam search failed for %r: %s", name, e)
-        return None
+        log.debug("Steam search failed for %r: %s", term, e)
+        return []
+    found = []
     for item in (data or {}).get("items", []):
         title = clean_title(item.get("name") or "")
-        if item.get("type") == "app" and title and normalize(title) == normalize(name):
-            return title, item.get("id")
-    return None
+        if item.get("type") == "app" and title and item.get("id"):
+            found.append((title, int(item["id"])))
+    return found
+
+
+async def steam_exact_title(name: str) -> Optional[Tuple[str, int]]:
+    """(title, app id) if Steam's store search has a game with exactly this name, ignoring case and symbols."""
+    return next(((t, a) for t, a in await steam_search(name) if normalize(t) == normalize(name)), None)
+
+
+async def steam_prices(appids: List[int]) -> Dict[int, Optional[dict]]:
+    """
+    Current US Steam prices: app id -> {"final", "initial" (cents), "discount" (%), "final_text", "initial_text"},
+    or None for free or unlisted games. Apps Steam didn't answer for are left out.
+    """
+    prices: Dict[int, Optional[dict]] = {}
+    for i in range(0, len(appids), 50):
+        chunk = appids[i:i + 50]
+        try:
+            data = await _get_json(STEAM_DETAILS_URL, {"appids": ",".join(map(str, chunk)), "cc": "us",
+                                                       "filters": "price_overview"}, timeout=15)
+        except Exception as e:
+            log.debug("Steam price check failed: %s", e)
+            continue
+        for appid in chunk:
+            entry = (data or {}).get(str(appid)) or {}
+            if not entry.get("success"):
+                continue
+            overview = entry.get("data") or {}
+            overview = overview.get("price_overview") if isinstance(overview, dict) else None
+            prices[appid] = None if not overview else {
+                "final": overview.get("final", 0), "initial": overview.get("initial", 0),
+                "discount": overview.get("discount_percent", 0),
+                "final_text": overview.get("final_formatted", ""), "initial_text": overview.get("initial_formatted", ""),
+            }
+    return prices
+
+
+async def epic_free_games() -> List[dict]:
+    """Games free to keep on the Epic Games Store right now: [{"id", "title", "url", "ends"}]. Unofficial feed."""
+    try:
+        data = await _get_json(EPIC_FREE_URL, timeout=15)
+        elements = data["data"]["Catalog"]["searchStore"]["elements"]
+    except Exception as e:
+        log.debug("Epic free games check failed: %s", e)
+        return []
+    now = utcnow()
+    free = []
+    for item in elements or []:
+        try:
+            if (item.get("price") or {}).get("totalPrice", {}).get("discountPrice") != 0:
+                continue
+            offers = [o for group in ((item.get("promotions") or {}).get("promotionalOffers") or [])
+                      for o in group.get("promotionalOffers", [])]
+            current = [o for o in offers if o.get("discountSetting", {}).get("discountPercentage") == 0
+                       and parse_iso(o.get("startDate")) and parse_iso(o["startDate"]) <= now
+                       < (parse_iso(o.get("endDate")) or now + timedelta(days=1))]
+            if not current:
+                continue
+            slug = (item.get("productSlug") or next(
+                (m.get("pageSlug") for m in (item.get("catalogNs") or {}).get("mappings") or [] if m.get("pageSlug")),
+                None) or next((m.get("pageSlug") for m in item.get("offerMappings") or [] if m.get("pageSlug")), None))
+            free.append({"id": item.get("id") or item.get("title"), "title": item.get("title", "A free game"),
+                         "url": f"{EPIC_STORE_URL}p/{slug.split('/')[0]}" if slug else f"{EPIC_STORE_URL}free-games",
+                         "ends": current[0].get("endDate")})
+        except Exception:
+            log.debug("Skipped an Epic store entry", exc_info=True)
+    return free
+
+
+def price_text(price: Optional[dict]) -> str:
+    if not price:
+        return "free or not for sale"
+    if price["discount"]:
+        return f"**{price['discount']}% off**: {price['final_text']} (was {price['initial_text']})"
+    return price["final_text"]
 
 
 def describe_unresolved(name: str, candidates: List[dict]) -> str:
@@ -385,6 +483,53 @@ def split_when(text: str, tz: tzinfo, now: datetime) -> Tuple[Optional[datetime]
         if when is not None:
             return when, " ".join(tokens[n:])
     return None, text.strip()
+
+
+DAY_NAMES = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+
+
+def next_weekly(weekday: int, clock: Tuple[int, int], tz: tzinfo, now: datetime) -> datetime:
+    """The next time it's `weekday` at `clock` in `tz`, after now (UTC)."""
+    local = now.astimezone(tz)
+    day = local.date() + timedelta(days=(weekday - local.weekday()) % 7)
+    when = datetime(day.year, day.month, day.day, *clock, tzinfo=tz)
+    if when <= local:
+        day += timedelta(days=7)
+        when = datetime(day.year, day.month, day.day, *clock, tzinfo=tz)
+    return when.astimezone(timezone.utc)
+
+
+def parse_recurring(text: str, tz: tzinfo, now: datetime) -> Optional[dict]:
+    """'every friday 9pm Raid night', 'every other fri 21:00', 'weekly sat 8:30 pm' -> schedule fields, or None."""
+    tokens = text.split()
+    if not tokens or tokens[0].lower() not in ("every", "weekly"):
+        return None
+    rest, interval = tokens[1:], 7
+    if rest and rest[0].lower() in ("other", "second"):
+        rest, interval = rest[1:], 14
+    day = rest[0].lower().rstrip(",") if rest else ""
+    if day not in WEEKDAYS:
+        return None
+    for n in (2, 1):
+        clock = _parse_clock("".join(rest[1:1 + n])) if len(rest) >= 1 + n else None
+        if clock is not None:
+            return {"weekday": WEEKDAYS[day], "hour": clock[0], "minute": clock[1], "interval": interval,
+                    "title": " ".join(rest[1 + n:]), "first": next_weekly(WEEKDAYS[day], clock, tz, now)}
+    return None
+
+
+def advance_occurrence(start: datetime, schedule: dict) -> datetime:
+    """The occurrence after `start`, keeping the local time across daylight saving changes."""
+    tz = load_zone(schedule["tz"])
+    day = start.astimezone(tz).date() + timedelta(days=schedule["interval"])
+    return datetime(day.year, day.month, day.day, schedule["hour"], schedule["minute"],
+                    tzinfo=tz).astimezone(timezone.utc)
+
+
+def repeat_label(schedule: dict) -> str:
+    clock = datetime(2000, 1, 1, schedule["hour"], schedule["minute"]).strftime("%I:%M %p").lstrip("0")
+    every = "Every other" if schedule["interval"] == 14 else "Every"
+    return f"{every} {DAY_NAMES[schedule['weekday']]} at {clock.replace(':00', '')} ({schedule['tz']})"
 
 
 def rank_score(users: dict, voter_ids: List[str], game_id: str) -> float:
@@ -618,7 +763,8 @@ class GamePickerView(OwnerOnlyView):
     """
 
     def __init__(self, user: discord.abc.User, games: List[dict], selected: Set[str], title: str, hint: str,
-                 on_save: Callable[[discord.Interaction, Set[str], Set[str]], Awaitable[None]]):
+                 on_save: Callable[[discord.Interaction, Set[str], Set[str]], Awaitable[None]],
+                 on_cancel: Optional[Callable[[discord.Interaction], Awaitable[None]]] = None):
         super().__init__(user.id, timeout=600)
         self.user_name = user.display_name
         self.games = sorted(games, key=lambda g: g["name"].lower())
@@ -627,6 +773,7 @@ class GamePickerView(OwnerOnlyView):
         self.title = title
         self.hint = hint
         self.on_save = on_save
+        self.on_cancel = on_cancel
         self.filter = ""
         self.page = 0
         self.rebuild()
@@ -735,6 +882,8 @@ class GamePickerView(OwnerOnlyView):
 
     async def _cancel(self, interaction):
         self.stop()
+        if self.on_cancel is not None:
+            return await self.on_cancel(interaction)
         await interaction.response.edit_message(embed=discord.Embed(title="Cancelled. Nothing was changed.",
                                                                     color=discord.Color.light_grey()), view=None)
 
@@ -762,6 +911,275 @@ class UnknownGamesView(OwnerOnlyView):
                                                  ephemeral=ephemeral)
         if embed is not None:
             await interaction.followup.send(embed=embed, ephemeral=ephemeral)
+
+
+class SteamPickView(OwnerOnlyView):
+    """Choose which Steam game was meant when the name isn't an exact match."""
+
+    def __init__(self, user_id: int, options: List[Tuple[str, int]]):
+        super().__init__(user_id, timeout=180)
+        self.choice: Optional[Tuple[str, int]] = None
+        select = discord.ui.Select(placeholder="Choose the game…", options=[
+            discord.SelectOption(label=title[:100], value=str(appid), description=f"Steam app {appid}")
+            for title, appid in options[:25]])
+
+        async def on_select(interaction: discord.Interaction):
+            appid = int(select.values[0])
+            self.choice = next((t, a) for t, a in options if a == appid)
+            self.stop()
+            await interaction.response.edit_message(content=f"✅ **{self.choice[0]}**", view=None)
+
+        select.callback = on_select
+        cancel = discord.ui.Button(label="None of these", style=discord.ButtonStyle.secondary)
+
+        async def on_cancel(interaction: discord.Interaction):
+            self.stop()
+            await interaction.response.edit_message(content="Cancelled.", view=None)
+
+        cancel.callback = on_cancel
+        self.add_item(select)
+        self.add_item(cancel)
+
+
+class TextModal(discord.ui.Modal):
+    """A one-field form whose answer goes to a callback."""
+
+    def __init__(self, title: str, label: str, placeholder: str,
+                 on_submit: Callable[[discord.Interaction, str], Awaitable[None]], paragraph: bool = True):
+        super().__init__(title=title)
+        self.field = discord.ui.TextInput(label=label, placeholder=placeholder, max_length=1000,
+                                          style=discord.TextStyle.paragraph if paragraph else discord.TextStyle.short)
+        self.add_item(self.field)
+        self._callback = on_submit
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await self._callback(interaction, self.field.value)
+
+
+PROFILE_STEPS = ("timezone", "owned", "installed", "favorites", "wishlist")
+PROFILE_TITLES = {"timezone": "Your timezone", "owned": "Games you own", "installed": "Games you have installed",
+                  "favorites": "Your favorites", "wishlist": "Games you want"}
+
+
+class ProfileWizard(OwnerOnlyView):
+    """
+    `[p]games newprofile`: timezone, library, installed games, top 3 and wishlist, one skippable step at a time.
+
+    Every screen is a fresh view on the same message (the previous one is stopped), and pickers temporarily take
+    over the message and hand back to the wizard when they're saved or cancelled. `state` carries everything
+    between screens: cog, guild, member, ephemeral, step and the note about the last change.
+    """
+
+    def __init__(self, state: dict):
+        super().__init__(state["member"].id, timeout=900)
+        self.state = state
+        self.cog: "GameManager" = state["cog"]
+        self.message = state.get("message")
+
+    @staticmethod
+    async def display(state: dict, interaction: Optional[discord.Interaction] = None):
+        view = ProfileWizard(state)
+        embed = await view.build()
+        if interaction is None:
+            return embed, view
+        if interaction.response.is_done():
+            await interaction.edit_original_response(embed=embed, view=view)
+        else:
+            await interaction.response.edit_message(embed=embed, view=view)
+
+    async def move(self, interaction: discord.Interaction, step: int, note: Optional[str] = None):
+        self.stop()
+        self.state.update(step=step, note=note)
+        await ProfileWizard.display(self.state, interaction)
+
+    def _button(self, label: str, style, row: int, callback, emoji=None, disabled: bool = False):
+        button = discord.ui.Button(label=label, style=style, row=row, emoji=emoji, disabled=disabled)
+        button.callback = callback
+        self.add_item(button)
+
+    async def build(self) -> discord.Embed:
+        state, cog = self.state, self.cog
+        guild, member, step = state["guild"], state["member"], state["step"]
+        self.clear_items()
+        games = await cog.config.guild(guild).games()
+        data = (await cog.config.guild(guild).users()).get(str(member.id), {})
+        owned = [g for g in dict.fromkeys(data.get("installed", []) + data.get("owned", [])) if g in games]
+        if step >= len(PROFILE_STEPS):
+            return await self._summary(games, data, owned)
+        name = PROFILE_STEPS[step]
+        lines = []
+        if name == "timezone":
+            _, tz_name, personal = await cog.timezone_for(member)
+            lines += ["Game session times are read and shown in your timezone.",
+                      f"Right now it's **{tz_name}**{'' if personal else ' (the server default)'}.",
+                      "Choose yours below, or press **Next** to keep it."]
+            select = discord.ui.Select(placeholder="Choose your timezone…", row=0, options=[
+                discord.SelectOption(label=label, value=zone, default=personal and zone == tz_name)
+                for label, zone in COMMON_TIMEZONES])
+            select.callback = lambda i: self._set_timezone(i, select.values[0])
+            self.add_item(select)
+            self._button("Other timezone…", discord.ButtonStyle.secondary, 1, self._other_timezone, emoji="🌐")
+        elif name == "owned":
+            lines += [f"You have **{len(owned)}** game{'s' if len(owned) != 1 else ''} in your library.",
+                      "Tick them from the server's list, or type their names. Games the server doesn't have yet can "
+                      "be requested (or added) from there."]
+            self._button("Pick from the server's games", discord.ButtonStyle.primary, 1, self._picker("owned"),
+                         emoji="🎮", disabled=not games)
+            self._button("Type game names", discord.ButtonStyle.secondary, 1, self._type_owned, emoji="⌨️")
+        elif name == "installed":
+            installed = [g for g in data.get("installed", []) if g in games]
+            if owned:
+                lines += [f"**{len(installed)}** of your {len(owned)} games are marked installed.",
+                          "Mark the ones on your computer right now, so `lfg` pings and votes know what you can play."]
+                self._button("Pick installed games", discord.ButtonStyle.primary, 1, self._picker("installed"),
+                             emoji="💾")
+            else:
+                lines.append("Your library is empty, so there's nothing to mark installed yet. Press **Next**.")
+        elif name == "favorites":
+            ranks = data.get("ranks", {})
+            if owned:
+                lines += ["Choose your top 3. When a vote ties, the game the players rank higher wins.",
+                          "-# Only your first 25 games are listed. Rank others with "
+                          f"{await cog.cmd(guild, 'games rank <number> <game>')}." if len(owned) > 25 else None]
+                for rank in (1, 2, 3):
+                    current = next((g for g, r in ranks.items() if r == rank), None)
+                    select = discord.ui.Select(placeholder=f"Your #{rank}…", row=rank - 1, options=[
+                        discord.SelectOption(label=games[g]["name"][:100], value=g, default=g == current)
+                        for g in owned[:25]])
+                    select.callback = self._rank_callback(select, rank)
+                    self.add_item(select)
+            else:
+                lines.append("Add some games to your library first, then rank them. Press **Next**.")
+        elif name == "wishlist":
+            wanted = await cog.wanted_by(guild, member)
+            channel_id = await cog.config.guild(guild).sale_channel()
+            lines += ["Games you want but don't own yet. When one goes on sale on Steam, you'll get a ping.",
+                      f"**On your wishlist ({len(wanted)}):** " + (", ".join(e["name"] for e in wanted[:20]) or "nothing yet")]
+            if not channel_id:
+                lines.append("-# Sale alerts aren't turned on in this server yet, but your wishlist is saved.")
+            self._button("Add games you want", discord.ButtonStyle.primary, 1, self._type_wanted, emoji="⭐")
+        if state.get("note"):
+            lines += ["", state["note"]]
+        self._button("Back", discord.ButtonStyle.secondary, 4, lambda i: self.move(i, step - 1), disabled=step == 0)
+        last = step == len(PROFILE_STEPS) - 1
+        self._button("Finish" if last else "Next", discord.ButtonStyle.success, 4, lambda i: self.move(i, step + 1),
+                     emoji="✅" if last else "➡️")
+        self._button("Stop", discord.ButtonStyle.danger, 4, self._stop)
+        embed = discord.Embed(title=f"🧭 Profile setup · {step + 1} of {len(PROFILE_STEPS)}: {PROFILE_TITLES[name]}",
+                              description="\n".join(l for l in lines if l is not None)[:4000],
+                              color=discord.Color.blurple())
+        embed.set_footer(text=f"Every step is optional · Only {member.display_name} can use this")
+        return embed
+
+    async def _summary(self, games: dict, data: dict, owned: List[str]) -> discord.Embed:
+        guild, member = self.state["guild"], self.state["member"]
+        _, tz_name, _ = await self.cog.timezone_for(member)
+        ranks = sorted(((r, g) for g, r in data.get("ranks", {}).items() if g in games and r <= 3))
+        installed = [g for g in data.get("installed", []) if g in games]
+        wanted = await self.cog.wanted_by(guild, member)
+        cmd = self.cog.cmd
+        lines = [f"🕘 **Timezone:** {tz_name}",
+                 f"🎮 **Library:** {len(owned)} games, {len(installed)} installed",
+                 "🏅 **Favorites:** " + (", ".join(f"#{r} {games[g]['name']}" for r, g in ranks) or "none"),
+                 f"⭐ **Wishlist:** {len(wanted)} games", "",
+                 f"Change things any time with {await cmd(guild, 'games own')}, {await cmd(guild, 'games install')}, "
+                 f"{await cmd(guild, 'games rank')} or {await cmd(guild, 'games want')}, or run "
+                 f"{await cmd(guild, 'games newprofile')} again."]
+        return discord.Embed(title="✅ Your profile is set up", description="\n".join(lines),
+                             color=discord.Color.green())
+
+    # ---------- step actions ----------
+
+    async def _stop(self, interaction: discord.Interaction):
+        self.stop()
+        await interaction.response.edit_message(
+            embed=discord.Embed(title="Profile setup stopped", description="Everything you saved is kept.",
+                                color=discord.Color.light_grey()), view=None)
+
+    async def _set_timezone(self, interaction: discord.Interaction, zone: str):
+        await self.cog.config.user(self.state["member"]).timezone.set(zone)
+        await self.move(interaction, self.state["step"] + 1, f"✅ Timezone set to **{zone}**.")
+
+    async def _other_timezone(self, interaction: discord.Interaction):
+        async def submit(modal_interaction: discord.Interaction, text: str):
+            zone = find_timezone(text)
+            if zone is None:
+                return await self.move(modal_interaction, self.state["step"],
+                                       f"❓ I don't know the timezone **{text}**. Try `America/Chicago`, `Chicago` or "
+                                       "`CST`.")
+            await self._set_timezone(modal_interaction, zone)
+
+        await interaction.response.send_modal(TextModal("Your timezone", "Timezone",
+                                                        "America/Chicago, Chicago, CST…", submit, paragraph=False))
+
+    def _picker(self, kind: str):
+        async def open_picker(interaction: discord.Interaction):
+            state, cog = self.state, self.cog
+            guild, member = state["guild"], state["member"]
+            games = await cog.config.guild(guild).games()
+            data = (await cog.config.guild(guild).users()).get(str(member.id), {})
+            if kind == "owned":
+                choices, selected = list(games.values()), set(data.get("owned", [])) | set(data.get("installed", []))
+                actions = ("own", "unown")
+                title, hint = "🎮 Your library", "Tick every game you own."
+            else:
+                owned = set(data.get("owned", [])) | set(data.get("installed", []))
+                choices, selected = [games[g] for g in owned if g in games], set(data.get("installed", []))
+                actions = ("install", "uninstall")
+                title, hint = "💾 Your installed games", "Tick the games you have installed right now."
+
+            async def on_save(save_interaction: discord.Interaction, before: Set[str], after: Set[str]):
+                async with cog.config.guild(guild).users() as users:
+                    entry = user_entry(users, member.id)
+                    for gid in after - before:
+                        apply_change(entry, gid, actions[0])
+                    for gid in before - after:
+                        apply_change(entry, gid, actions[1])
+                changes = f"+{len(after - before)} / −{len(before - after)}"
+                await self.move(save_interaction, state["step"] + 1, f"✅ Saved ({changes}).")
+
+            async def on_cancel(cancel_interaction: discord.Interaction):
+                await self.move(cancel_interaction, state["step"])
+
+            self.stop()
+            picker = GamePickerView(member, choices, selected & {g["id"] for g in choices}, title, hint, on_save,
+                                    on_cancel)
+            picker.message = self.message
+            await interaction.response.edit_message(embed=picker.embed(), view=picker)
+
+        return open_picker
+
+    async def _type_owned(self, interaction: discord.Interaction):
+        async def submit(modal_interaction: discord.Interaction, text: str):
+            await modal_interaction.response.defer()
+            note = await self.cog.add_typed_games(modal_interaction, self.state["member"], text,
+                                                  ephemeral=self.state["ephemeral"])
+            await self.move(modal_interaction, self.state["step"], note)
+
+        await interaction.response.send_modal(TextModal("Games you own", "Game names (one per line or commas)",
+                                                        "Deadlock\nHelldivers 2\nRocket League", submit))
+
+    def _rank_callback(self, select: discord.ui.Select, rank: int):
+        async def callback(interaction: discord.Interaction):
+            gid = select.values[0]
+            guild, member = self.state["guild"], self.state["member"]
+            async with self.cog.config.guild(guild).users() as users:
+                ranks = user_entry(users, member.id)["ranks"]
+                for other in [g for g, r in ranks.items() if r == rank]:
+                    ranks.pop(other)
+                ranks[gid] = rank
+            name = (await self.cog.config.guild(guild).games()).get(gid, {}).get("name", "that game")
+            await self.move(interaction, self.state["step"], f"🏅 **{name}** is your #{rank}.")
+        return callback
+
+    async def _type_wanted(self, interaction: discord.Interaction):
+        async def submit(modal_interaction: discord.Interaction, text: str):
+            await modal_interaction.response.defer()
+            note = await self.cog.want_typed_games(self.state["guild"], self.state["member"], text)
+            await self.move(modal_interaction, self.state["step"], note)
+
+        await interaction.response.send_modal(TextModal("Games you want", "Game names (one per line or commas)",
+                                                        "Elden Ring\nBaldur's Gate 3", submit))
 
 
 # ==========================================
@@ -793,6 +1211,13 @@ class GameManager(commands.Cog):
             admin_role=None,
             member_add=False,   # members may add new games to the library without a request
             timezone=None,      # default timezone for session times
+            recurring={},       # weekly schedules that post sessions ahead of time
+            events=True,        # also list scheduled sessions in the server's Discord events
+            event_channel=None, # voice channel for those events (else they're "external" events)
+            wishlist={},        # Steam app ID -> {appid, name, users, price, alerted}
+            sale_channel=None,  # where wishlist sale alerts go (None = off)
+            free_games=False,   # also announce free Epic Games Store games in the sale channel
+            free_games_posted=[],
         )
         self.config.register_user(timezone=None)
         self.vote_tasks: Dict[str, asyncio.Task] = {}
@@ -803,10 +1228,12 @@ class GameManager(commands.Cog):
         self.bot.add_dynamic_items(SessionButton, VoteButton, RequestButton, InstallButton)
         self._resume_task = asyncio.create_task(self._resume_votes())
         self.session_loop.start()
+        self.sale_loop.start()
 
     async def cog_unload(self):
         self.bot.remove_dynamic_items(SessionButton, VoteButton, RequestButton, InstallButton)
         self.session_loop.cancel()
+        self.sale_loop.cancel()
         if self._resume_task is not None:
             self._resume_task.cancel()
         for task in self.vote_tasks.values():
@@ -817,6 +1244,10 @@ class GameManager(commands.Cog):
         for guild_id in await self.config.all_guilds():
             async with self.config.guild_from_id(guild_id).users() as users:
                 users.pop(str(user_id), None)
+            async with self.config.guild_from_id(guild_id).wishlist() as wishlist:
+                for entry in wishlist.values():
+                    if str(user_id) in entry["users"]:
+                        entry["users"].remove(str(user_id))
 
     # ==========================================
     #            PERMISSIONS & REPLIES
@@ -877,8 +1308,10 @@ class GameManager(commands.Cog):
             names = [games[g]["name"] + (f" (rank {ranks[g]})" if ranks.get(g) else "") for g in ids[:150]]
             return ", ".join(names) + (f", and {len(ids) - 150} more" if len(ids) > 150 else "") or "none"
 
+        wanted = ", ".join(e["name"] for e in await self.wanted_by(guild, member)) or "nothing"
         return (f"{member.display_name}'s library: {len(installed) + len(owned_only)} games, {len(installed)} installed.\n"
-                f"Installed: {listing(installed)}\nOwned but not installed: {listing(owned_only)}")
+                f"Installed: {listing(installed)}\nOwned but not installed: {listing(owned_only)}\n"
+                f"Wishlist (wants, doesn't own): {wanted}")
 
     async def _lookup_game(self, guild: discord.Guild, name: str) -> str:
         games = await self.config.guild(guild).games()
@@ -1543,6 +1976,293 @@ class GameManager(commands.Cog):
                                                 ephemeral=True)
 
     # ==========================================
+    #           WISHLIST & SALE ALERTS
+    # ==========================================
+
+    @staticmethod
+    def _owned_appids(games: dict, data: dict) -> Set[int]:
+        ids = set(data.get("owned", [])) | set(data.get("installed", []))
+        return {int(games[g]["steam_appid"]) for g in ids if g in games and games[g].get("steam_appid")}
+
+    async def wanted_by(self, guild: discord.Guild, member: discord.abc.User) -> List[dict]:
+        wishlist = await self.config.guild(guild).wishlist()
+        return sorted((e for e in wishlist.values() if str(member.id) in e["users"]), key=lambda e: e["name"].lower())
+
+    async def steam_game_for(self, guild: discord.Guild, name: str
+                             ) -> Tuple[Optional[Tuple[str, int]], List[Tuple[str, int]]]:
+        """(match, candidates): a library game with a Steam ID or an exact Steam name, else Steam's top results."""
+        game, _ = resolve_game(await self.config.guild(guild).games(), name)
+        if game is not None and game.get("steam_appid"):
+            return (game["name"], int(game["steam_appid"])), []
+        results = await steam_search(clean_title(name))
+        exact = next(((t, a) for t, a in results if normalize(t) == normalize(name)), None)
+        return exact, [] if exact else results[:5]
+
+    async def add_wants(self, guild: discord.Guild, member: discord.Member,
+                        picks: List[Tuple[str, int]]) -> Tuple[List[str], List[str], List[str]]:
+        """Add (title, Steam app ID) picks to someone's wishlist. Returns (added, already wanted, already owned)."""
+        games = await self.config.guild(guild).games()
+        owned = self._owned_appids(games, (await self.config.guild(guild).users()).get(str(member.id), {}))
+        added, already, have, unchecked = [], [], [], []
+        async with self.config.guild(guild).wishlist() as wishlist:
+            for title, appid in picks:
+                if appid in owned:
+                    have.append(title)
+                    continue
+                entry = wishlist.setdefault(str(appid), {"appid": appid, "name": title, "users": [], "price": None,
+                                                         "checked_at": None, "alerted": 0})
+                if str(member.id) in entry["users"]:
+                    already.append(entry["name"])
+                    continue
+                entry["users"].append(str(member.id))
+                added.append(entry["name"])
+                if entry["checked_at"] is None:
+                    unchecked.append(appid)
+        if unchecked:
+            prices = await steam_prices(unchecked)
+            async with self.config.guild(guild).wishlist() as wishlist:
+                for appid, price in prices.items():
+                    entry = wishlist.get(str(appid))
+                    if entry is not None:
+                        # A sale that's already on when the game is first added isn't news, so don't alert for it.
+                        entry.update(price=price, checked_at=utcnow().isoformat(),
+                                     alerted=(price or {}).get("discount", 0))
+        return added, already, have
+
+    async def want_games(self, target: Target, text: Optional[str], ephemeral: bool = False):
+        guild, member, _ = who(target)
+        names = parse_game_names(text or "")
+        if not names:
+            return await self.reply(target, ephemeral=ephemeral,
+                                    content=f"Name a game, like {await self.cmd(guild, 'games want Elden Ring')}.")
+        picks, missing = [], []
+        for name in names[:10]:
+            match, options = await self.steam_game_for(guild, name)
+            if match is None and options:
+                view = SteamPickView(member.id, options)
+                view.message = await self.reply(target, view=view, ephemeral=ephemeral,
+                                                content=f"🔎 Which game on Steam did you mean by **{name}**?")
+                await view.wait()
+                match = view.choice
+            if match is not None:
+                picks.append(match)
+            elif not options:
+                missing.append(name)
+        added, already, have = await self.add_wants(guild, member, picks)
+        wishlist = await self.config.guild(guild).wishlist()
+        by_name = {e["name"]: e for e in wishlist.values()}
+        lines = []
+        for name in added:
+            entry = by_name.get(name, {})
+            price = f": {price_text(entry['price'])}" if entry.get("checked_at") else ""
+            lines.append(f"⭐ Added **{name}** to your wishlist{price}")
+        if already:
+            lines.append("Already on your wishlist: " + ", ".join(already))
+        if have:
+            lines.append("You already own: " + ", ".join(have))
+        if missing:
+            lines.append("❓ Not found on Steam: " + ", ".join(missing) + ". Sale alerts only work for Steam games.")
+        if added:
+            channel_id = await self.config.guild(guild).sale_channel()
+            lines.append(f"-# You'll be pinged in <#{channel_id}> when it goes on sale." if channel_id else
+                         "-# Sale alerts aren't turned on in this server yet, but your wishlist is saved.")
+        if lines:
+            await self.reply(target, content="\n".join(lines), ephemeral=ephemeral)
+
+    async def want_typed_games(self, guild: discord.Guild, member: discord.Member, text: str) -> str:
+        """Profile setup's wishlist step: no questions asked, so a non-exact name takes Steam's top result."""
+        picks, notes, missing = [], [], []
+        for name in parse_game_names(text)[:10]:
+            match, options = await self.steam_game_for(guild, name)
+            if match is None and options:
+                match = options[0]
+                notes.append(f"`{name}` → **{match[0]}**")
+            if match is not None:
+                picks.append(match)
+            else:
+                missing.append(name)
+        added, already, have = await self.add_wants(guild, member, picks)
+        lines = [f"⭐ **Added:** {', '.join(added)}" if added else None,
+                 f"Closest Steam matches: {', '.join(notes)}. Remove a wrong one with "
+                 f"{await self.cmd(guild, 'games unwant <game>')}." if notes else None,
+                 f"Already on your wishlist: {', '.join(already)}" if already else None,
+                 f"You already own: {', '.join(have)}" if have else None,
+                 f"❓ Not found on Steam: {', '.join(missing)}" if missing else None]
+        return "\n".join(l for l in lines if l) or "Nothing added."
+
+    async def add_typed_games(self, interaction: discord.Interaction, member: discord.Member, text: str,
+                              ephemeral: bool = False) -> str:
+        """Profile setup's library step: own the named games, and add or request the ones the server lacks."""
+        guild, _, channel = who(interaction)
+        names = parse_game_names(text)
+        if not names:
+            return "Name at least one game."
+        embed, unknown = await self.change_library(guild, member, names, "own")
+        lines = [l for l in (embed.description or "").split("\n") if not l.startswith("❌")]
+        if unknown:
+            checked = await self.checked_names(interaction, member, unknown, ephemeral=ephemeral)
+            if checked is None:
+                lines.append("Skipped: " + ", ".join(unknown))
+            elif await self.can_add_games(member):
+                names, appids = checked
+                added, _ = await self.add_games(guild, member, names, appids)
+                more, _ = await self.change_library(guild, member, names, "own")
+                if added:
+                    lines.append(f"➕ **Added to the server library:** {', '.join(added)}")
+                lines.append(more.description or "")
+            else:
+                names, appids = checked
+                requested = await self.request_games(guild, channel, member, names, "own", appids=appids)
+                lines.append(requested.description or "")
+        return "\n".join(l for l in lines if l and l != "Nothing to change.")[:1500]
+
+    async def remove_want(self, target: Target, name: str, ephemeral: bool = False):
+        guild, member, _ = who(target)
+        mine = await self.wanted_by(guild, member)
+        key = normalize(name)
+        matches = ([e for e in mine if normalize(e["name"]) == key]
+                   or [e for e in mine if key and key in normalize(e["name"])])
+        if len(matches) != 1:
+            text = (f"❓ Which one? " + ", ".join(f"**{e['name']}**" for e in matches) if matches
+                    else f"**{name}** isn't on your wishlist.")
+            return await self.reply(target, content=text, ephemeral=ephemeral)
+        async with self.config.guild(guild).wishlist() as wishlist:
+            entry = wishlist.get(str(matches[0]["appid"]))
+            if entry and str(member.id) in entry["users"]:
+                entry["users"].remove(str(member.id))
+                if not entry["users"]:
+                    wishlist.pop(str(matches[0]["appid"]))
+        await self.reply(target, content=f"🗑️ Removed **{matches[0]['name']}** from your wishlist.",
+                         ephemeral=ephemeral)
+
+    async def show_wishlist(self, target: Target, member: discord.Member, ephemeral: bool = False):
+        guild = who(target)[0]
+        wanted = await self.wanted_by(guild, member)
+        if not wanted:
+            mine = member == who(target)[1]
+            return await self.reply(target, ephemeral=ephemeral, content=(
+                f"Your wishlist is empty. Add a game with {await self.cmd(guild, 'games want <game>')}." if mine
+                else f"{member.display_name}'s wishlist is empty."))
+        items = [f"- [{e['name']}]({STEAM_APP_URL.format(e['appid'])})"
+                 + (f": {price_text(e['price'])}" if e.get("checked_at") else "") for e in wanted]
+        channel_id = await self.config.guild(guild).sale_channel()
+        footer = "Sale alerts are on" if channel_id else "Sale alerts aren't turned on in this server"
+        await self.send_list(target, items, f"⭐ {member.display_name}'s wishlist", footer, ephemeral)
+
+    async def most_wanted(self, target: Target):
+        guild = who(target)[0]
+        wishlist = await self.config.guild(guild).wishlist()
+        games = await self.config.guild(guild).games()
+        users = await self.config.guild(guild).users()
+        rows = []
+        for entry in wishlist.values():
+            fans = [u for u in entry["users"] if guild.get_member(int(u))
+                    and int(entry["appid"]) not in self._owned_appids(games, users.get(u, {}))]
+            if fans:
+                rows.append((-len(fans), entry["name"].lower(), entry, fans))
+        if not rows:
+            return await self.reply(target, content=f"Nobody has a wishlist yet. Add a game with "
+                                                    f"{await self.cmd(guild, 'games want <game>')}.")
+        items = []
+        for _, _, entry, fans in sorted(rows)[:40]:
+            names = ", ".join(self._display(guild, u) for u in fans[:8]) + (" …" if len(fans) > 8 else "")
+            sale = f" · **{entry['price']['discount']}% off**" if (entry.get("price") or {}).get("discount") else ""
+            items.append(f"**[{entry['name']}]({STEAM_APP_URL.format(entry['appid'])})**: "
+                         f"{len(fans)} ({names}){sale}")
+        await self.send_list(target, items, "⭐ Most-wanted games", "Number of people who want each game")
+
+    async def check_sales(self, guild: discord.Guild) -> int:
+        """Refresh wishlist prices and post one alert for games that went on sale (or got cheaper). Returns # alerted."""
+        conf = self.config.guild(guild)
+        wishlist = await conf.wishlist()
+        if not wishlist:
+            return 0
+        prices = await steam_prices([int(a) for a in wishlist])
+        alerts = []
+        async with conf.wishlist() as wishlist:
+            for appid, price in prices.items():
+                entry = wishlist.get(str(appid))
+                if entry is None:
+                    continue
+                discount = (price or {}).get("discount", 0)
+                if discount > entry.get("alerted", 0):
+                    alerts.append({**entry, "price": price})
+                entry.update(price=price, checked_at=utcnow().isoformat(), alerted=discount)
+        channel = guild.get_channel_or_thread(await conf.sale_channel() or 0)
+        if not alerts or channel is None:
+            return 0
+        games, users = await conf.games(), await conf.users()
+        lines, pinged = [], []
+        for entry in sorted(alerts, key=lambda e: -e["price"]["discount"]):
+            fans = [u for u in entry["users"] if guild.get_member(int(u))
+                    and int(entry["appid"]) not in self._owned_appids(games, users.get(u, {}))]
+            if not fans:
+                continue
+            pinged += [u for u in fans if u not in pinged]
+            lines.append(f"**[{entry['name']}]({STEAM_APP_URL.format(entry['appid'])})**: {price_text(entry['price'])}"
+                         f"\n-# Wanted by {', '.join(f'<@{u}>' for u in fans)}")
+        if not lines:
+            return 0
+        embed = discord.Embed(title="💸 On sale on Steam", description="\n".join(lines)[:4000],
+                              color=discord.Color.gold())
+        embed.set_footer(text="From your wishlists · games want / unwant")
+        try:
+            await channel.send(" ".join(f"<@{u}>" for u in pinged)[:2000], embed=embed, allowed_mentions=PING)
+        except discord.HTTPException as e:
+            log.info("Couldn't post sale alerts in %s: %s", guild, e)
+            return 0
+        return len(lines)
+
+    async def check_free_games(self, guild: discord.Guild, free: List[dict]) -> int:
+        conf = self.config.guild(guild)
+        posted = await conf.free_games_posted()
+        new = [g for g in free if g["id"] not in posted]
+        channel = guild.get_channel_or_thread(await conf.sale_channel() or 0)
+        if not new or channel is None:
+            return 0
+        lines = []
+        for game in new:
+            ends = parse_iso(game.get("ends"))
+            lines.append(f"**[{game['title']}]({game['url']})**" + (f": free until {stamp(ends, 'f')}" if ends else ""))
+        embed = discord.Embed(title="🆓 Free to keep on the Epic Games Store", description="\n".join(lines),
+                              color=discord.Color.dark_grey())
+        try:
+            await channel.send(embed=embed)
+        except discord.HTTPException as e:
+            log.info("Couldn't post free games in %s: %s", guild, e)
+            return 0
+        await conf.free_games_posted.set((posted + [g["id"] for g in new])[-FREE_GAMES_KEEP:])
+        return len(new)
+
+    @tasks.loop(hours=SALE_CHECK_HOURS)
+    async def sale_loop(self):
+        free = None
+        for guild_id, data in (await self.config.all_guilds()).items():
+            guild = self.bot.get_guild(guild_id)
+            if guild is None:
+                continue
+            try:
+                if data.get("wishlist"):
+                    await self.check_sales(guild)
+                if data.get("free_games") and data.get("sale_channel"):
+                    free = free if free is not None else await epic_free_games()
+                    await self.check_free_games(guild, free)
+            except Exception:
+                log.exception("Sale check failed in %s", guild)
+
+    @sale_loop.before_loop
+    async def _before_sale_loop(self):
+        await self.bot.wait_until_red_ready()
+
+    # ---------- profile setup ----------
+
+    async def start_profile(self, target: Target, ephemeral: bool = False):
+        guild, member, _ = who(target)
+        state = {"cog": self, "guild": guild, "member": member, "ephemeral": ephemeral, "step": 0, "note": None}
+        embed, view = await ProfileWizard.display(state)
+        state["message"] = view.message = await self.reply(target, embed=embed, view=view, ephemeral=ephemeral)
+
+    # ==========================================
     #                 SESSIONS
     # ==========================================
 
@@ -1551,7 +2271,11 @@ class GameManager(commands.Cog):
         lines = []
         if starts:
             lines.append(f"🕘 **Starts** {stamp(starts)} ({stamp(starts, 'R')})")
+        if session.get("repeat"):
+            lines.append(f"🔁 {session['repeat']}")
         lines.append(f"👑 **Host:** <@{session['host_id']}>")
+        if session.get("event_id") and not ended:
+            lines.append("📅 Also in the server's **Events**: pressing **Interested** there joins too.")
         if session.get("winner"):
             lines.append(f"🏆 **Playing:** {session['winner']}")
         if ended:
@@ -1585,28 +2309,15 @@ class GameManager(commands.Cog):
         guild, member, channel = who(target)
         tz, tz_name, personal = await self.timezone_for(member)
         now = utcnow()
+        if (text or "").strip().lower().split(" ")[0] in ("every", "weekly"):
+            return await self.create_recurring(target, text)
         starts_at, title = split_when(text or "", tz, now)
         if starts_at is not None and starts_at < now - timedelta(minutes=1):
             return await self.reply(target, content="⚠️ That time has already passed. Try a later time.", ephemeral=True)
         if starts_at is not None and starts_at > now + timedelta(days=60):
             return await self.reply(target, content="⚠️ Sessions can be scheduled up to 60 days ahead.", ephemeral=True)
         title = (title.strip() or f"{member.display_name}'s game session")[:200]
-        sid = generate_id()
-        session = {
-            "id": sid, "title": title, "host_id": str(member.id), "participants": [str(member.id)],
-            "channel_id": channel.id, "message_id": None, "created_at": now.isoformat(),
-            "starts_at": starts_at.isoformat() if starts_at else None,
-            # Skip the 15-minute heads-up when the session starts sooner than that anyway.
-            "reminded": bool(starts_at and starts_at - now <= timedelta(minutes=REMINDER_MINUTES)),
-            "started": False, "vote_id": None, "winner": None,
-        }
-        async with self.config.guild(guild).play_sessions() as sessions:
-            sessions[sid] = session
-        message = await channel.send(embed=self.session_embed(session), view=session_view(sid),
-                                     allowed_mentions=NO_PING)
-        async with self.config.guild(guild).play_sessions() as sessions:
-            if sid in sessions:
-                sessions[sid]["message_id"] = message.id
+        await self.post_session(guild, channel, member, title, starts_at)
         note = None
         if starts_at and not personal:
             note = (f"🕘 I read that time as **{tz_name}**. If that's wrong, set your timezone with "
@@ -1615,6 +2326,166 @@ class GameManager(commands.Cog):
             await self.reply(target, content=note or "✅ Session posted.", ephemeral=True)
         elif note:
             await self.reply(target, content=note)
+
+    async def post_session(self, guild: discord.Guild, channel, host: discord.Member, title: str,
+                           starts_at: Optional[datetime], schedule: Optional[dict] = None) -> dict:
+        """Post a session message (and its Discord event when it has a start time). Returns the session."""
+        now = utcnow()
+        sid = generate_id()
+        session = {
+            "id": sid, "title": title, "host_id": str(host.id), "participants": [str(host.id)],
+            "channel_id": channel.id, "message_id": None, "created_at": now.isoformat(),
+            "starts_at": starts_at.isoformat() if starts_at else None,
+            # Skip the 15-minute heads-up when the session starts sooner than that anyway.
+            "reminded": bool(starts_at and starts_at - now <= timedelta(minutes=REMINDER_MINUTES)),
+            "started": False, "vote_id": None, "winner": None, "event_id": None,
+            "recurring_id": schedule["id"] if schedule else None,
+            "repeat": repeat_label(schedule) if schedule else None,
+        }
+        async with self.config.guild(guild).play_sessions() as sessions:
+            sessions[sid] = session
+        message = await channel.send(embed=self.session_embed(session), view=session_view(sid),
+                                     allowed_mentions=NO_PING)
+        session["message_id"] = message.id
+        session["event_id"] = await self.create_event(guild, session, host)
+        async with self.config.guild(guild).play_sessions() as sessions:
+            if sid in sessions:
+                sessions[sid].update(message_id=message.id, event_id=session["event_id"])
+        if session["event_id"]:
+            await self.refresh_session_message(guild, session)
+        return session
+
+    # ---------- Discord events ----------
+
+    async def create_event(self, guild: discord.Guild, session: dict, host: discord.Member) -> Optional[int]:
+        """List a scheduled session in the server's Events, so Discord shows it and reminds interested people."""
+        starts = parse_iso(session.get("starts_at"))
+        conf = self.config.guild(guild)
+        if starts is None or starts <= utcnow() + timedelta(minutes=1) or not await conf.events():
+            return None
+        if not guild.me.guild_permissions.manage_events:
+            return None
+        link = self.session_link(guild, session)
+        kwargs = {
+            "name": session["title"][:100], "start_time": starts, "privacy_level": discord.PrivacyLevel.guild_only,
+            "description": (f"Hosted by {host.display_name}. Press Interested to join the session"
+                            + (f": {link}" if link else ".") + (f"\n{session['repeat']}." if session.get("repeat") else ""))[:1000],
+        }
+        voice = guild.get_channel(await conf.event_channel() or 0)
+        if isinstance(voice, (discord.VoiceChannel, discord.StageChannel)):
+            kwargs["channel"] = voice
+        else:
+            channel = guild.get_channel_or_thread(session["channel_id"])
+            kwargs.update(entity_type=discord.EntityType.external, end_time=starts + timedelta(hours=EVENT_LENGTH_HOURS),
+                          location=f"#{channel.name}" if channel else "Discord")
+        try:
+            return (await guild.create_scheduled_event(**kwargs)).id
+        except discord.HTTPException as e:
+            log.info("Couldn't create a Discord event for session %s: %s", session["id"], e)
+            return None
+
+    async def update_event(self, guild: discord.Guild, session: dict, action: str):
+        """`start` the session's Discord event, or `finish` it (end it if running, cancel it if not)."""
+        if not session.get("event_id"):
+            return
+        event = guild.get_scheduled_event(session["event_id"])
+        try:
+            event = event or await guild.fetch_scheduled_event(session["event_id"])
+            if action == "start" and event.status == discord.EventStatus.scheduled:
+                await event.start()
+            elif action == "finish" and event.status == discord.EventStatus.active:
+                await event.end()
+            elif action == "finish" and event.status == discord.EventStatus.scheduled:
+                await event.cancel()
+        except discord.HTTPException as e:
+            log.debug("Couldn't %s the event for session %s: %s", action, session["id"], e)
+
+    def _session_for_event(self, sessions: dict, event_id: int) -> Optional[str]:
+        return next((sid for sid, s in sessions.items() if s.get("event_id") == event_id), None)
+
+    @commands.Cog.listener()
+    async def on_scheduled_event_user_add(self, event: discord.ScheduledEvent, user: discord.User):
+        """Pressing Interested on a session's Discord event joins the session."""
+        await self._event_interest(event, user, joined=True)
+
+    @commands.Cog.listener()
+    async def on_scheduled_event_user_remove(self, event: discord.ScheduledEvent, user: discord.User):
+        await self._event_interest(event, user, joined=False)
+
+    async def _event_interest(self, event: discord.ScheduledEvent, user: discord.User, joined: bool):
+        guild = event.guild
+        if guild is None or user.bot:
+            return
+        uid = str(user.id)
+        async with self.config.guild(guild).play_sessions() as sessions:
+            sid = self._session_for_event(sessions, event.id)
+            if sid is None:
+                return
+            players = sessions[sid]["participants"]
+            if joined and uid not in players:
+                players.append(uid)
+            elif not joined and uid in players and uid != sessions[sid]["host_id"]:
+                players.remove(uid)
+            else:
+                return
+            session = dict(sessions[sid])
+        await self.refresh_session_message(guild, session)
+
+    # ---------- recurring sessions ----------
+
+    async def create_recurring(self, target: Target, text: str):
+        guild, member, channel = who(target)
+        tz, tz_name, personal = await self.timezone_for(member)
+        parsed = parse_recurring(text, tz, utcnow())
+        if parsed is None:
+            return await self.reply(target, ephemeral=True, content=(
+                "❓ For a repeating session, give a day and a time: "
+                f"{await self.cmd(guild, 'games session every friday 9pm Raid night')} or "
+                f"{await self.cmd(guild, 'games session every other sunday 8:30pm')}."))
+        schedules = await self.config.guild(guild).recurring()
+        if len(schedules) >= MAX_RECURRING:
+            return await self.reply(target, ephemeral=True, content=(
+                f"⚠️ This server already has {MAX_RECURRING} repeating sessions. Stop one first with "
+                f"{await self.cmd(guild, 'games recurring stop <id>')}."))
+        rid = generate_id()
+        schedule = {"id": rid, "title": (parsed["title"].strip() or f"{member.display_name}'s game night")[:200],
+                    "host_id": str(member.id), "channel_id": channel.id, "weekday": parsed["weekday"],
+                    "hour": parsed["hour"], "minute": parsed["minute"], "interval": parsed["interval"],
+                    "tz": tz_name, "next_start": parsed["first"].isoformat(), "created_at": utcnow().isoformat()}
+        async with self.config.guild(guild).recurring() as recurring:
+            recurring[rid] = schedule
+        posted = await self._tick_recurring(guild, rid, schedule, utcnow())
+        lines = [f"🔁 **{schedule['title']}**: {repeat_label(schedule)}.",
+                 f"Each one is posted here {RECURRING_POST_HOURS} hours before it starts, with the usual reminders."
+                 + (" The first one is posted above." if posted else
+                    f" The first is {stamp(parsed['first'])}."),
+                 f"-# Skip one with {await self.cmd(guild, f'games recurring skip {rid}')} or stop them with "
+                 f"{await self.cmd(guild, f'games recurring stop {rid}')}."]
+        if not personal:
+            lines.append(f"-# I used **{tz_name}**. If that's wrong, set yours with "
+                         f"{await self.cmd(guild, 'games timezone <zone>')}, stop this and set it up again.")
+        await self.reply(target, content="\n".join(lines), ephemeral=isinstance(target, discord.Interaction))
+
+    async def _tick_recurring(self, guild: discord.Guild, rid: str, schedule: dict, now: datetime) -> bool:
+        """Post the next occurrence once it's within RECURRING_POST_HOURS. Returns True if one was posted."""
+        start = parse_iso(schedule["next_start"])
+        if start is None or now < start - timedelta(hours=RECURRING_POST_HOURS):
+            return False
+        posted = False
+        channel = guild.get_channel_or_thread(schedule["channel_id"])
+        host = guild.get_member(int(schedule["host_id"]))
+        if start > now and channel is not None and host is not None:
+            try:
+                await self.post_session(guild, channel, host, schedule["title"], start, schedule)
+                posted = True
+            except discord.HTTPException as e:
+                log.info("Couldn't post recurring session %s: %s", rid, e)
+        while start <= now + timedelta(hours=RECURRING_POST_HOURS):  # also skips any missed during downtime
+            start = advance_occurrence(start, schedule)
+        async with self.config.guild(guild).recurring() as recurring:
+            if rid in recurring:
+                recurring[rid]["next_start"] = start.isoformat()
+        return posted
 
     async def latest_session(self, guild: discord.Guild, channel_id: int, host_id: Optional[str] = None) -> Optional[dict]:
         sessions = await self.config.guild(guild).play_sessions()
@@ -1631,6 +2502,8 @@ class GameManager(commands.Cog):
             await self.cancel_vote(guild, session["vote_id"])
         session["vote_id"] = None
         await self.refresh_session_message(guild, session, ended=True)
+        await self.update_event(guild, session, "finish")
+        self.bot.dispatch("gm_session_ended", guild, session)  # ActivityStats records attendance
         return session
 
     async def on_session_button(self, interaction: discord.Interaction, action: str, sid: str):
@@ -1690,6 +2563,7 @@ class GameManager(commands.Cog):
         elif not session.get("started") and now >= starts:
             if now - starts < timedelta(minutes=30):  # don't announce stale starts after downtime
                 await self.announce(guild, session, f"🎮 **{session['title']}** is starting now!")
+            await self.update_event(guild, session, "start")
             updates.update(reminded=True, started=True)
         if updates:
             async with self.config.guild(guild).play_sessions() as sessions:
@@ -1720,6 +2594,11 @@ class GameManager(commands.Cog):
                     await self._tick_session(guild, sid, session, now)
                 except Exception:
                     log.exception("Session check failed for %s", sid)
+            for rid, schedule in list(data.get("recurring", {}).items()):
+                try:
+                    await self._tick_recurring(guild, rid, schedule, now)
+                except Exception:
+                    log.exception("Recurring session check failed for %s", rid)
 
     @session_loop.before_loop
     async def _before_session_loop(self):
@@ -2013,6 +2892,9 @@ class GameManager(commands.Cog):
     @commands.guild_only()
     async def games(self, ctx: commands.Context):
         """Your game library, play sessions, and votes on what to play."""
+        speakup = self.bot.get_cog("SpeakUp")
+        if speakup is not None and await speakup.handles_mistakes(ctx):
+            return  # a mistyped subcommand: SpeakUp suggests the right one instead of the whole help page
         await ctx.send_help(ctx.command)
 
     @games.command(name="list")
@@ -2195,12 +3077,16 @@ class GameManager(commands.Cog):
         a reminder 15 minutes before and a ping at the start. Times are read in your timezone
         (set it with `[p]games timezone`).
 
+        Scheduled sessions also show up in the server's Discord events. Start with `every` to repeat weekly
+        (or `every other` for every two weeks); each one is posted a day ahead.
+
         **Examples:**
         - `[p]games session` (starts now)
         - `[p]games session Raid night`
         - `[p]games session friday 9pm Raid night`
         - `[p]games session in 2h Rocket League`
         - `[p]games session tomorrow 8:30pm`
+        - `[p]games session every friday 9pm Raid night`
         """
         await self.create_session(ctx, time_and_title)
 
@@ -2339,6 +3225,106 @@ class GameManager(commands.Cog):
         now = utcnow().astimezone(load_zone(found)).strftime("%I:%M %p").lstrip("0")
         await self.reply(target, content=f"✅ Your timezone is **{found}** (it's {now} there now).", ephemeral=True)
 
+    @games.command(name="newprofile", aliases=["setup", "profilesetup"])
+    async def games_newprofile(self, ctx: commands.Context):
+        """
+        Set up your gaming profile step by step.
+
+        Walks you through your timezone, the games you own and have installed, your top 3 favorites, and a
+        wishlist of games you want (you get a ping when they go on sale). Every step can be skipped, and you
+        can run it again any time.
+        """
+        await self.start_profile(ctx)
+
+    @games.command(name="want", aliases=["wishlistadd"])
+    async def games_want(self, ctx: commands.Context, *, game_names: str):
+        """
+        Add games you want but don't own to your wishlist. Separate several with commas.
+
+        When a wishlisted game goes on sale on Steam, you get a ping (if sale alerts are on in this server).
+        The game doesn't need to be in the server library.
+
+        **Example:** `[p]games want Elden Ring, Baldur's Gate 3`
+        """
+        await self.want_games(ctx, game_names)
+
+    @games.command(name="unwant", aliases=["wishlistremove"])
+    async def games_unwant(self, ctx: commands.Context, *, game_name: str):
+        """Remove a game from your wishlist."""
+        await self.remove_want(ctx, game_name)
+
+    @games.command(name="wishlist")
+    async def games_wishlist(self, ctx: commands.Context, *, member: str = None):
+        """Show your wishlist with current Steam prices, or someone else's."""
+        target = ctx.author
+        if member:
+            found, candidates = self.find_member(ctx.guild, member)
+            if found is None:
+                hint = (" Did you mean " + ", ".join(m.display_name for m in candidates) + "?") if candidates else ""
+                return await ctx.send(f"❌ Couldn't find a member called **{member}**.{hint}")
+            target = found
+        await self.show_wishlist(ctx, target)
+
+    @games.command(name="wanted", aliases=["mostwanted"])
+    async def games_wanted(self, ctx: commands.Context):
+        """The server's most-wanted games: who wants each one, and which are on sale."""
+        await self.most_wanted(ctx)
+
+    @games.group(name="recurring", aliases=["repeating"], invoke_without_command=True)
+    async def games_recurring(self, ctx: commands.Context):
+        """
+        Repeating game sessions.
+
+        Start one with `[p]games session every friday 9pm Raid night` (or `every other friday`). Each session is
+        posted a day before it starts. This lists them; `skip` and `stop` manage them.
+        """
+        schedules = await self.config.guild(ctx.guild).recurring()
+        if not schedules:
+            return await ctx.send(f"No repeating sessions. Start one with "
+                                  f"`{ctx.clean_prefix}games session every friday 9pm Raid night`.")
+        items = []
+        for s in sorted(schedules.values(), key=lambda s: s["next_start"]):
+            nxt = parse_iso(s["next_start"])
+            items.append(f"- **{s['title']}** · {repeat_label(s)} · next {stamp(nxt, 'R')} · host <@{s['host_id']}> "
+                         f"· <#{s['channel_id']}> · `{s['id']}`")
+        await self.send_list(ctx, items, "🔁 Repeating sessions",
+                             f"Manage with {ctx.clean_prefix}games recurring skip/stop <id>")
+
+    async def _schedule_for(self, ctx: commands.Context, schedule_id: str) -> Optional[dict]:
+        schedule = (await self.config.guild(ctx.guild).recurring()).get(schedule_id)
+        if schedule is None:
+            await ctx.send(f"❌ No repeating session with ID `{schedule_id}`. See `{ctx.clean_prefix}games recurring`.")
+            return None
+        if not await self.can_manage(ctx.author, schedule["host_id"]):
+            await ctx.send("❌ Only the host or a game admin can change that.")
+            return None
+        return schedule
+
+    @games_recurring.command(name="stop", aliases=["delete", "remove"])
+    async def recurring_stop(self, ctx: commands.Context, schedule_id: str):
+        """Stop a repeating session (host or game admin). Sessions already posted stay up."""
+        schedule = await self._schedule_for(ctx, schedule_id)
+        if schedule is None:
+            return
+        async with self.config.guild(ctx.guild).recurring() as recurring:
+            recurring.pop(schedule_id, None)
+        await ctx.send(f"🛑 **{schedule['title']}** won't repeat any more.")
+
+    @games_recurring.command(name="skip")
+    async def recurring_skip(self, ctx: commands.Context, schedule_id: str):
+        """Skip the next occurrence of a repeating session (host or game admin)."""
+        schedule = await self._schedule_for(ctx, schedule_id)
+        if schedule is None:
+            return
+        skipped = parse_iso(schedule["next_start"])
+        following = advance_occurrence(skipped, schedule)
+        async with self.config.guild(ctx.guild).recurring() as recurring:
+            if schedule_id in recurring:
+                recurring[schedule_id]["next_start"] = following.isoformat()
+        await ctx.send(f"⏭️ Skipping **{schedule['title']}** on {stamp(skipped, 'D')}. The next one is "
+                       f"{stamp(following, 'F')}.\n-# If that one was already posted, end it with "
+                       f"`{ctx.clean_prefix}games endsession <id>`.")
+
     # ---------- admin ----------
 
     @games.group(name="admin", invoke_without_command=True)
@@ -2359,7 +3345,51 @@ class GameManager(commands.Cog):
         embed.add_field(name="Library", value=f"{len(conf['games'])} games · {len(conf['users'])} players")
         embed.add_field(name="Pending", value=f"{len(conf['game_requests'])} requests · "
                                               f"{len(conf['play_sessions'])} sessions · {len(conf['votes'])} votes")
+        event_channel = ctx.guild.get_channel(conf["event_channel"] or 0)
+        embed.add_field(name="Discord events", value=("Off" if not conf["events"] else
+                                                      f"On · {event_channel.mention if event_channel else 'no voice channel'}"))
+        embed.add_field(name="Sale alerts", value=f"<#{conf['sale_channel']}>" if conf["sale_channel"] else "Off")
+        embed.add_field(name="Free Epic games", value="On" if conf["free_games"] else "Off")
+        embed.add_field(name="Repeating sessions", value=str(len(conf["recurring"])))
+        if conf["events"] and not ctx.guild.me.guild_permissions.manage_events:
+            embed.set_footer(text="⚠️ I need the Manage Events permission to post sessions as Discord events.")
         await ctx.send(embed=embed)
+
+    @games_admin.command(name="events")
+    async def admin_events(self, ctx: commands.Context, enabled: bool):
+        """List scheduled sessions in the server's Discord events (on by default; needs Manage Events)."""
+        await self.config.guild(ctx.guild).events.set(enabled)
+        note = ("" if not enabled or ctx.guild.me.guild_permissions.manage_events
+                else "\n⚠️ I need the **Manage Events** permission for this to work.")
+        await ctx.send(f"✅ Scheduled sessions {'will' if enabled else 'won’t'} appear in Discord events.{note}")
+
+    @games_admin.command(name="eventchannel")
+    async def admin_eventchannel(self, ctx: commands.Context, channel: discord.VoiceChannel = None):
+        """Set the voice channel session events point to. Run with no channel to list them without one."""
+        await self.config.guild(ctx.guild).event_channel.set(channel.id if channel else None)
+        await ctx.send(f"✅ Session events will be in {channel.mention}." if channel
+                       else "✅ Session events won't point to a voice channel.")
+
+    @games_admin.command(name="sales")
+    async def admin_sales(self, ctx: commands.Context, channel: Optional[discord.TextChannel] = None):
+        """
+        Turn on wishlist sale alerts in a channel, or run with no channel to turn them off.
+
+        Steam prices are checked every few hours. When a wishlisted game goes on sale (or gets cheaper), the
+        people who want it are pinged once.
+        """
+        if channel is not None and not channel.permissions_for(ctx.guild.me).send_messages:
+            return await ctx.send(f"❌ I can't send messages in {channel.mention}.")
+        await self.config.guild(ctx.guild).sale_channel.set(channel.id if channel else None)
+        await ctx.send(f"✅ Sale alerts will be posted in {channel.mention}." if channel else "✅ Sale alerts are off.")
+
+    @games_admin.command(name="freegames")
+    async def admin_freegames(self, ctx: commands.Context, enabled: bool):
+        """Also announce games that are free to keep on the Epic Games Store (in the sale alerts channel)."""
+        if enabled and not await self.config.guild(ctx.guild).sale_channel():
+            return await ctx.send(f"⚠️ Pick a channel first: `{ctx.clean_prefix}games admin sales #channel`")
+        await self.config.guild(ctx.guild).free_games.set(enabled)
+        await ctx.send(f"✅ Free Epic games announcements are {'on' if enabled else 'off'}.")
 
     @games_admin.command(name="setrole")
     @checks.admin_or_permissions(administrator=True)
@@ -2594,9 +3624,12 @@ class GameManager(commands.Cog):
 
     @slash.command(name="session", description="Start a game session people can join")
     @app_commands.describe(title="What you're playing or the session's name",
-                           when="Optional start time, e.g. 9pm, friday 9pm, in 2h, tomorrow 8:30pm")
+                           when="Optional start time, e.g. 9pm, friday 9pm, in 2h, tomorrow 8:30pm",
+                           weekly="Repeat every week (needs a day and time, like friday 9pm)")
     async def slash_session(self, interaction: discord.Interaction, title: Optional[str] = None,
-                            when: Optional[str] = None):
+                            when: Optional[str] = None, weekly: bool = False):
+        if weekly:
+            return await self.create_recurring(interaction, f"every {when or ''} {title or ''}")
         if when:
             guild, member, _ = who(interaction)
             tz, _, _ = await self.timezone_for(member)
@@ -2632,6 +3665,20 @@ class GameManager(commands.Cog):
             names, appids = checked
             await self.reply(interaction, embed=await self.request_games(guild, channel, member, names, appids=appids),
                              ephemeral=True)
+
+    @slash.command(name="newprofile", description="Set up your gaming profile step by step")
+    async def slash_newprofile(self, interaction: discord.Interaction):
+        await self.start_profile(interaction, ephemeral=True)
+
+    @slash.command(name="want", description="Add a game you want to your wishlist (pings you when it's on sale)")
+    @app_commands.describe(game="Any game on Steam. Separate several with commas.")
+    async def slash_want(self, interaction: discord.Interaction, game: str):
+        await interaction.response.defer(ephemeral=True, thinking=True)  # Steam lookups can take a few seconds
+        await self.want_games(interaction, game, ephemeral=True)
+
+    @slash.command(name="wishlist", description="Show your wishlist with current Steam prices")
+    async def slash_wishlist(self, interaction: discord.Interaction, member: Optional[discord.Member] = None):
+        await self.show_wishlist(interaction, member or interaction.user, ephemeral=member is None)
 
     @slash.command(name="timezone", description="Set the timezone your session times are read in")
     @app_commands.describe(zone="e.g. America/Chicago, Chicago, or CST. Leave empty to see yours.")

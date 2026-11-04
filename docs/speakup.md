@@ -1,0 +1,57 @@
+---
+title: Reminders and auto-replies
+nav_order: 8
+permalink: /speakup/
+---
+
+# Reminders and auto-replies
+
+## Reminders
+
+```
+!remindme 2h check the oven
+!remindme 30m stretch
+!remindme tomorrow 8am call the dentist
+!remindme friday 6pm buy Helldivers
+```
+
+**Times:**
+- Relative: `10m`, `2h`, `1d 3h`, `2 weeks`.
+- Clock times, in your timezone: `9pm`, `tomorrow 8am`, `friday 6pm`, `11/14 7pm`.
+
+**Delivery:** ButlerBot pings you in the same channel, or by DM if the channel is gone.
+
+| Command | What it does |
+|---|---|
+| `!reminders` | List yours. |
+| `!reminders cancel <id>` | Cancel one. |
+| `!reminders clear` | Cancel all of yours. |
+
+You can also ask: `!butler remind me friday at 6 to buy Helldivers`.
+
+## When ButlerBot chimes in on its own
+
+ButlerBot sometimes offers help without being asked. Its replies never ping anyone, and each comes with a **Dismiss** button.
+
+| You post… | ButlerBot… |
+|---|---|
+| A time while making plans ("anyone up for 9?", "friday 8pm?") | Adds a 🕘 reaction. Click it to see the time in everyone's own timezone, with a **Schedule a session** button. |
+| A Steam store link | Replies with a small card: price, any sale, who here owns it, and **I own this** / **I want this** buttons. |
+| An article or video link | Adds a 📄 reaction. Click it for a three-line summary. |
+| A command that doesn't exist | Suggests the one you probably meant, with a **Run it** button. |
+
+**Reactions are offers:** nothing happens unless someone clicks.
+
+**Limits:**
+- 🕘 at most once every few minutes per channel.
+- Steam cards once per game per channel every few hours.
+- 10 summaries per person per hour.
+
+## Turning it off
+
+| Command | Effect | Who |
+|---|---|---|
+| `!speakup` | Shows what's on here. | Everyone |
+| `!speakup me off` / `on` | No reactions, cards or suggestions on **your** messages. | Everyone |
+| `!speakup off [#channel]` / `on` | Quiet in a channel. Commands and reminders still work. | Mods |
+| `!speakup feature <times\|steam\|links\|mistakes> <on\|off>` | Switch one feature off server-wide. | Admins |

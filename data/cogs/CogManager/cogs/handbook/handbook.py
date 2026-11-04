@@ -1,0 +1,493 @@
+"""
+Handbook cog for Red-DiscordBot.
+
+Replaces Red's `[p]help` with short, linked cards and points people at the online handbook (Markdown pages in the
+repo's docs/ folder, published with GitHub Pages):
+
+- `[p]help`: a card listing the handbook's topics, with links.
+- `[p]help <command>` / `[p]help <category>`: one compact card (usage, who can use it, what it does, subcommands)
+  with links to the matching handbook page and its entry in the command reference.
+- `[p]handbook [topic]`: links to the handbook.
+- `[p]handbook export` (bot owner): the full command reference, generated from the running bot, as Markdown files
+  to commit under docs/reference/.
+
+Only one cog can replace the help command: unload customhelp before loading this.
+"""
+
+import difflib
+import io
+import logging
+import re
+import zipfile
+from datetime import datetime, timezone
+from typing import Dict, List, Optional, Tuple, Union
+
+import discord
+from redbot.core import Config, checks, commands
+from redbot.core.bot import Red
+from discord.ext.commands.bot import BotBase
+from redbot.core.commands.help import HelpFormatterABC
+
+log = logging.getLogger("red.handbook")
+
+DEFAULT_URL = "https://bradqui.github.io/ButlerBot/"
+PRIVILEGE_NAMES = {
+    commands.PrivilegeLevel.MOD: "mod",
+    commands.PrivilegeLevel.ADMIN: "admin",
+    commands.PrivilegeLevel.GUILD_OWNER: "server owner",
+    commands.PrivilegeLevel.BOT_OWNER: "bot owner",
+}
+
+# Handbook topics: (path under the site, emoji, title, one-line description, who it's for).
+# Keep these in step with docs/: each path is a page's permalink.
+TOPICS = [
+    ("start/", "👋", "Getting started", "New here? Start with this.", "everyone"),
+    ("butler/", "🤵", "Asking ButlerBot", "Ask in plain English, or have it run commands for you.", "everyone"),
+    ("ai/", "🤖", "AI chat and images", "Chat with Claude, make images, start AI threads.", "everyone"),
+    ("games/library/", "🎮", "Your games", "Your library, profile setup, favorites and wishlist.", "everyone"),
+    ("games/nights/", "🎲", "Game nights", "Sessions, weekly game nights, votes and finding players.", "everyone"),
+    ("fun/", "🎉", "Fun and games", "Trivia, guess the game, adventures, catch-ups and more.", "everyone"),
+    ("stats/", "📊", "Server stats", "Who's active, busy times, voice and your own numbers.", "everyone"),
+    ("speakup/", "🗣️", "Reminders and auto-replies", "Reminders, and what the bot does on its own.", "everyone"),
+    ("voice/", "🔊", "Voice rooms", "Make your own temporary voice channel.", "everyone"),
+    ("translate/", "🌐", "Translation", "Translate messages between languages.", "everyone"),
+    ("moderation/", "🛡️", "Moderation", "Warnings, mutes, kicks, bans and cleanup.", "mods"),
+    ("filters/", "🚫", "Filters and spam", "Word filters and spam protection.", "mods"),
+    ("admin/", "⚙️", "Server setup", "Permissions, custom commands, welcome flow and cog settings.", "admins"),
+    ("reference/", "📚", "Command reference", "Every command, generated from the bot.", "everyone"),
+]
+# Which handbook page covers a cog (by qualified name, lowercased). GameManager is split by command below.
+COG_TOPICS = {
+    "claudechat": "ai/", "geminichat": "ai/", "gamemanager": "games/library/", "butlerfun": "fun/",
+    "trivia": "fun/", "general": "fun/", "chatchart": "stats/", "activitystats": "stats/", "speakup": "speakup/",
+    "autoroom": "voice/", "easytranslate": "translate/", "mod": "moderation/", "mutes": "moderation/",
+    "warnings": "moderation/", "modlog": "moderation/", "cleanup": "moderation/", "clearchannel": "moderation/",
+    "filter": "filters/", "censord": "filters/", "antispam": "filters/", "permissions": "admin/", "alias": "admin/",
+    "customcommands": "admin/", "buttongreeter": "admin/", "admin": "admin/",
+}
+GAME_NIGHT_COMMANDS = {"session", "sessions", "endsession", "sessionvote", "results", "endvote", "recurring", "lfg",
+                       "shared", "installed", "top"}
+
+
+# ==========================================
+#                 HELPERS
+# ==========================================
+
+def requirement(command: commands.Command) -> Tuple[str, bool]:
+    """
+    (who can run it, whether it's bot-owner only), from the command's checks or the nearest parent's or cog's.
+    Custom check functions can describe themselves with a `requirement` attribute (e.g. "game admin").
+    Same rules as the Claude cog's bot guide.
+    """
+    chain = [command, *command.parents]
+    if command.cog is not None:
+        chain.append(command.cog)
+    requires = [r for r in (getattr(obj, "requires", None) for obj in chain) if r is not None]
+    if any(r.privilege_level is commands.PrivilegeLevel.BOT_OWNER for r in requires):
+        return "bot owner only", True
+    for obj in chain:
+        r = getattr(obj, "requires", None)
+        if r is not None:
+            level = PRIVILEGE_NAMES.get(r.privilege_level)
+            perms = [name.replace("_", " ") for name, value in (r.user_perms or discord.Permissions.none()) if value]
+            if level and perms:
+                return f"{level}s, or anyone with the {', '.join(perms)} permission", False
+            if level:
+                return f"{level}s only", False
+            if perms:
+                return f"anyone with the {', '.join(perms)} permission", False
+        for check in getattr(obj, "checks", None) or []:
+            label = getattr(check, "requirement", None)
+            if label:
+                return f"{label}s only", False
+    return "everyone", False
+
+
+def anchor(command: commands.Command) -> str:
+    return command.qualified_name.replace(" ", "-").lower()
+
+
+def fill(text: Optional[str], prefix: str, bot_name: str) -> str:
+    return (text or "").replace("[p]", prefix).replace("[botname]", bot_name).strip()
+
+
+def usage(command: commands.Command, prefix: str) -> str:
+    return f"{prefix}{command.qualified_name} {command.signature}".strip()
+
+
+def visible_commands(cog_or_group) -> List[commands.Command]:
+    """Top-level commands of a cog, or the subcommands of a group, without hidden ones."""
+    if isinstance(cog_or_group, commands.Cog):
+        cmds = cog_or_group.get_commands()
+    else:
+        cmds = getattr(cog_or_group, "commands", [])
+    return sorted((c for c in cmds if not c.hidden), key=lambda c: c.name)
+
+
+# ==========================================
+#              HELP FORMATTER
+# ==========================================
+
+class HandbookHelp(HelpFormatterABC):
+    """`[p]help` as short cards with handbook links."""
+
+    def __init__(self, cog: "Handbook"):
+        self.cog = cog
+
+    async def send_help(self, ctx: commands.Context, help_for=None, *, from_help_command: bool = False):
+        try:
+            await self._send_help(ctx, help_for)
+        except discord.HTTPException as e:
+            log.warning("Couldn't send help: %s", e)
+        except Exception:
+            log.exception("Help failed for %r", help_for)
+            await ctx.send("❌ Something went wrong showing help. The error was logged.")
+
+    async def _send_help(self, ctx: commands.Context, help_for):
+        bot = ctx.bot
+        if help_for is None or help_for is bot or isinstance(help_for, BotBase):
+            return await self.cog.send_home(ctx)
+        if isinstance(help_for, str):
+            text = help_for.strip()
+            if not text:
+                return await self.cog.send_home(ctx)
+            command = bot.get_command(text)
+            if command is not None and (not command.hidden or await bot.is_owner(ctx.author)):
+                return await self.cog.send_command_card(ctx, command)
+            cog = next((c for name, c in bot.cogs.items() if name.lower() == text.lower()), None)
+            if cog is not None:
+                return await self.cog.send_cog_card(ctx, cog)
+            return await self.cog.send_not_found(ctx, text)
+        if isinstance(help_for, commands.Command):
+            return await self.cog.send_command_card(ctx, help_for)
+        if isinstance(help_for, commands.Cog):
+            return await self.cog.send_cog_card(ctx, help_for)
+        return await self.cog.send_home(ctx)
+
+
+# ==========================================
+#                   COG
+# ==========================================
+
+class Handbook(commands.Cog):
+    """The online handbook, short help cards, and the generated command reference."""
+
+    def __init__(self, bot: Red):
+        self.bot = bot
+        self.config = Config.get_conf(self, identifier=3357204816, force_registration=True)
+        self.config.register_global(url=DEFAULT_URL)
+        self.formatter_active = False
+
+    async def cog_load(self):
+        try:
+            self.bot.set_help_formatter(HandbookHelp(self))
+            self.formatter_active = True
+        except RuntimeError:
+            log.warning("Another cog (probably customhelp) already replaced the help command. Unload it and reload "
+                        "handbook to use the handbook's help cards.")
+
+    async def cog_unload(self):
+        if self.formatter_active:
+            self.bot.reset_help_formatter()
+
+    async def red_delete_data_for_user(self, **kwargs):
+        return  # no user data
+
+    # ---------- links ----------
+
+    async def base_url(self) -> str:
+        url = await self.config.url()
+        return url if url.endswith("/") else url + "/"
+
+    async def topic_url(self, path: str) -> str:
+        return await self.base_url() + path
+
+    def topic_for(self, command: Optional[commands.Command], cog: Optional[commands.Cog]) -> Optional[str]:
+        cog = cog or (command.cog if command else None)
+        if cog is None:
+            return None
+        name = cog.qualified_name.lower()
+        if name == "gamemanager" and command is not None:
+            parts = command.qualified_name.split()
+            return "games/nights/" if len(parts) > 1 and parts[1] in GAME_NIGHT_COMMANDS else "games/library/"
+        return COG_TOPICS.get(name)
+
+    async def reference_url(self, cog: Optional[commands.Cog], command: Optional[commands.Command] = None) -> str:
+        slug = (cog.qualified_name.lower() if cog else "other")
+        return await self.base_url() + f"reference/{slug}/" + (f"#{anchor(command)}" if command else "")
+
+    async def guide_links(self) -> List[Tuple[str, str, str]]:
+        """(title, url, description) for every topic, for the Claude cog's bot guide."""
+        return [(title, await self.topic_url(path), about) for path, _, title, about, _ in TOPICS]
+
+    def _links_view(self, links: List[Tuple[str, str]]) -> discord.ui.View:
+        view = discord.ui.View()
+        for label, url in links[:25]:
+            view.add_item(discord.ui.Button(label=label[:80], url=url))
+        return view
+
+    async def _prefix(self, ctx: commands.Context) -> str:
+        return ctx.clean_prefix
+
+    # ---------- cards ----------
+
+    async def _is_staff(self, ctx: commands.Context) -> bool:
+        if ctx.guild is None:
+            return await self.bot.is_owner(ctx.author)
+        return (await self.bot.is_owner(ctx.author) or ctx.author.guild_permissions.manage_messages
+                or await self.bot.is_mod(ctx.author) or await self.bot.is_admin(ctx.author))
+
+    async def home_embed(self, ctx: commands.Context) -> discord.Embed:
+        p = ctx.clean_prefix
+        staff = await self._is_staff(ctx)
+        lines = [f"Everything I can do, explained by task. Pick a topic, or try `{p}help <command>` for one command."
+                 f"\nNot sure what to type? Ask me: `{p}butler how do I…`", ""]
+        for path, emoji, title, about, audience in TOPICS:
+            if audience == "everyone":
+                lines.append(f"{emoji} [{title}]({await self.topic_url(path)}): {about}")
+        if staff:
+            lines += ["", "**For mods and admins**"]
+            for path, emoji, title, about, audience in TOPICS:
+                if audience != "everyone":
+                    lines.append(f"{emoji} [{title}]({await self.topic_url(path)}): {about}")
+        name = ctx.me.display_name if ctx.guild else self.bot.user.name
+        return discord.Embed(title=f"📖 {name} handbook", description="\n".join(lines), color=discord.Color.blurple())
+
+    async def send_home(self, ctx: commands.Context):
+        await ctx.send(embed=await self.home_embed(ctx),
+                       view=self._links_view([("Open the handbook", await self.base_url())]))
+
+    async def send_command_card(self, ctx: commands.Context, command: commands.Command):
+        prefix, bot_name = ctx.clean_prefix, (ctx.me.display_name if ctx.guild else self.bot.user.name)
+        who, owner_only = requirement(command)
+        text = fill(command.help, prefix, bot_name)
+        if len(text) > 1500:
+            text = text[:1500].rsplit("\n", 1)[0] + "\n…"
+        embed = discord.Embed(title=f"{prefix}{command.qualified_name}", description=text or "No description.",
+                              color=discord.Color.blurple())
+        embed.add_field(name="Usage", value=f"`{usage(command, prefix)}`", inline=False)
+        if command.aliases:
+            embed.add_field(name="Also works as", value=", ".join(f"`{prefix}{(command.full_parent_name + ' ' + a).strip()}`"
+                                                                  for a in command.aliases))
+        embed.add_field(name="Who can use it", value=who.capitalize())
+        if isinstance(command, commands.Group):
+            subs = visible_commands(command)
+            if subs:
+                lines = [f"`{s.name}`: {fill(s.short_doc, prefix, bot_name)[:90]}" for s in subs[:25]]
+                if len(subs) > 25:
+                    lines.append(f"…and {len(subs) - 25} more")
+                value = "\n".join(lines)
+                embed.add_field(name=f"Subcommands ({prefix}{command.qualified_name} <subcommand>)",
+                                value=value[:1024], inline=False)
+        embed.set_footer(text=f"{prefix}help <command> for any command · {prefix}butler to ask in plain English")
+        links = []
+        topic = self.topic_for(command, None)
+        if topic:
+            title = next(t for path, _, t, _, _ in TOPICS if path == topic)
+            links.append((f"Guide: {title}", await self.topic_url(topic)))
+        if not owner_only:
+            links.append(("Command reference", await self.reference_url(command.cog, command)))
+        await ctx.send(embed=embed, view=self._links_view(links) if links else None)
+
+    async def send_cog_card(self, ctx: commands.Context, cog: commands.Cog):
+        prefix, bot_name = ctx.clean_prefix, (ctx.me.display_name if ctx.guild else self.bot.user.name)
+        about = fill(getattr(cog, "help", None) or cog.description, prefix, bot_name)
+        lines = [about[:600], ""] if about else []
+        for command in visible_commands(cog):
+            who, owner_only = requirement(command)
+            if owner_only and not await self.bot.is_owner(ctx.author):
+                continue
+            note = "" if who == "everyone" else f" *({who})*"
+            lines.append(f"`{prefix}{command.qualified_name}`: {fill(command.short_doc, prefix, bot_name)[:100]}{note}")
+        embed = discord.Embed(title=f"📂 {cog.qualified_name}", description="\n".join(lines)[:4000] or "No commands.",
+                              color=discord.Color.blurple())
+        embed.set_footer(text=f"{prefix}help <command> for details")
+        links = []
+        topic = self.topic_for(None, cog)
+        if topic:
+            title = next(t for path, _, t, _, _ in TOPICS if path == topic)
+            links.append((f"Guide: {title}", await self.topic_url(topic)))
+        links.append(("Command reference", await self.reference_url(cog)))
+        await ctx.send(embed=embed, view=self._links_view(links))
+
+    async def send_not_found(self, ctx: commands.Context, text: str):
+        names = [c.qualified_name for c in self.bot.walk_commands() if not c.hidden] + list(self.bot.cogs)
+        close = difflib.get_close_matches(text.lower(), [n.lower() for n in names], n=3, cutoff=0.6)
+        hint = (" Did you mean " + ", ".join(f"`{ctx.clean_prefix}help {c}`" for c in close) + "?") if close else ""
+        await ctx.send(f"❓ There's no command or category called `{text[:80]}`.{hint}\n"
+                       f"Or ask me in plain English: `{ctx.clean_prefix}butler {text[:60]}`",
+                       allowed_mentions=discord.AllowedMentions.none())
+
+    # ==========================================
+    #                 COMMANDS
+    # ==========================================
+
+    @commands.group(name="handbook", aliases=["docs", "manual"], invoke_without_command=True)
+    async def handbook(self, ctx: commands.Context, *, topic: str = None):
+        """
+        Links to the online handbook: every feature, explained by task.
+
+        Name a topic for a direct link, like `[p]handbook game nights` or `[p]handbook voice`.
+        """
+        if not topic:
+            return await self.send_home(ctx)
+        wanted = topic.lower().strip()
+        scored = []
+        for path, emoji, title, about, _ in TOPICS:
+            haystack = f"{title} {path} {about}".lower()
+            score = 1.0 if wanted in haystack else difflib.SequenceMatcher(None, wanted, title.lower()).ratio()
+            scored.append((score, path, emoji, title))
+        score, path, emoji, title = max(scored)
+        if score < 0.5:
+            return await ctx.send(f"❓ No handbook topic matches **{topic[:60]}**. `{ctx.clean_prefix}handbook` lists "
+                                  "them all.", allowed_mentions=discord.AllowedMentions.none())
+        url = await self.topic_url(path)
+        await ctx.send(f"{emoji} **{title}**: <{url}>", view=self._links_view([(title, url)]))
+
+    @handbook.command(name="seturl")
+    @checks.is_owner()
+    async def handbook_seturl(self, ctx: commands.Context, url: str):
+        """Set where the handbook is published (bot owner)."""
+        if not re.match(r"https?://", url):
+            return await ctx.send("❌ That doesn't look like a web address.")
+        await self.config.url.set(url if url.endswith("/") else url + "/")
+        await ctx.send(f"✅ Handbook links now point to <{await self.base_url()}>.")
+
+    @handbook.command(name="status")
+    @checks.is_owner()
+    async def handbook_status(self, ctx: commands.Context):
+        """Whether the handbook's help cards are active (bot owner)."""
+        if self.formatter_active:
+            return await ctx.send(f"✅ `{ctx.clean_prefix}help` shows the handbook's cards. Links go to "
+                                  f"<{await self.base_url()}>.")
+        await ctx.send(f"⚠️ Another cog replaced the help command first. Run `{ctx.clean_prefix}unload customhelp`, "
+                       f"then `{ctx.clean_prefix}reload handbook`.")
+
+    @handbook.command(name="export")
+    @checks.is_owner()
+    @commands.guild_only()
+    async def handbook_export(self, ctx: commands.Context):
+        """
+        Generate the command reference from the running bot, as Markdown files for docs/reference/ (bot owner).
+
+        Covers every cog and command enabled in this server, except bot-owner-only ones, plus this server's custom
+        commands and aliases. Re-run it after adding or updating cogs.
+        """
+        async with ctx.channel.typing():
+            files = await self.build_reference(ctx.guild, ctx.clean_prefix)
+            buffer = io.BytesIO()
+            with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
+                for path, text in files.items():
+                    archive.writestr(path, text)
+            buffer.seek(0)
+        await ctx.send(f"📚 Generated **{len(files)}** reference pages. Unzip them into the repo's `docs/` folder "
+                       "(they go in `docs/reference/`), commit and push.",
+                       file=discord.File(buffer, filename="handbook-reference.zip"))
+
+    # ==========================================
+    #           GENERATED REFERENCE
+    # ==========================================
+
+    async def build_reference(self, guild: discord.Guild, prefix: str) -> Dict[str, str]:
+        """{path: markdown} for docs/reference/: an index, one page per cog, and custom commands and aliases."""
+        bot_name = guild.me.display_name
+        generated = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        pages: Dict[str, str] = {}
+        index_rows = []
+        cogs = sorted(self.bot.cogs.values(), key=lambda c: c.qualified_name.lower())
+        for order, cog in enumerate(cogs, 1):
+            if await self.bot.cog_disabled_in_guild(cog, guild):
+                continue
+            entries = []
+            for command in sorted(cog.walk_commands(), key=lambda c: c.qualified_name):
+                if command.hidden or any(p.hidden for p in command.parents) or not command.enabled:
+                    continue
+                who, owner_only = requirement(command)
+                if owner_only:
+                    continue
+                entries.append(self._reference_entry(command, who, prefix, bot_name))
+            if not entries:
+                continue
+            slug = cog.qualified_name.lower()
+            about = fill(getattr(cog, "help", None) or cog.description, prefix, bot_name)
+            topic = self.topic_for(None, cog)
+            guide = (f"\n\nFor a task-by-task guide, see [{next(t for p, _, t, _, _ in TOPICS if p == topic)}]"
+                     f"({{{{ '/{topic}' | relative_url }}}}).") if topic else ""
+            pages[f"reference/{slug}.md"] = "\n".join([
+                "---", f"title: {cog.qualified_name}", "parent: Command reference", f"nav_order: {order}",
+                f"permalink: /reference/{slug}/", "---", "",
+                f"# {cog.qualified_name}", "", about + guide, "",
+                "{% raw %}", *entries, "{% endraw %}", "",
+            ])
+            first_line = (about.splitlines() or [""])[0]
+            index_rows.append(f"| [{cog.qualified_name}]({{{{ '/reference/{slug}/' | relative_url }}}}) | "
+                              f"{first_line.replace('|', '/')[:150]} | {len(entries)} |")
+        custom = await self._custom_commands_page(guild, prefix)
+        if custom:
+            pages["reference/custom-commands.md"] = custom
+            index_rows.append("| [Server custom commands and aliases]({{ '/reference/custom-commands/' | relative_url }})"
+                              " | Commands made by this server's admins | |")
+        pages["reference/index.md"] = "\n".join([
+            "---", "title: Command reference", "nav_order: 90", "has_children: true", "permalink: /reference/", "---",
+            "", "# Command reference", "",
+            f"Every command {bot_name} has, generated from the running bot on {generated}. Commands only the bot "
+            "owner can use are left out. For explanations by task, start from the [home page]({{ '/' | relative_url }}).",
+            "", f"In Discord, `{prefix}help <command>` shows the same details for one command.", "",
+            "| Category | What it's for | Commands |", "|---|---|---|", *index_rows, "",
+        ])
+        return pages
+
+    def _reference_entry(self, command: commands.Command, who: str, prefix: str, bot_name: str) -> str:
+        lines = [f'<a id="{anchor(command)}"></a>', f"### {prefix}{command.qualified_name}", "",
+                 f"`{usage(command, prefix)}`", ""]
+        meta = [f"**Who:** {who}"]
+        if command.aliases:
+            meta.append("**Also:** " + ", ".join(f"`{prefix}{(command.full_parent_name + ' ' + a).strip()}`"
+                                                 for a in command.aliases))
+        lines += [" · ".join(meta), ""]
+        body = fill(command.help, prefix, bot_name)
+        if body:
+            lines += [body, ""]
+        return "\n".join(lines)
+
+    async def _custom_commands_page(self, guild: discord.Guild, prefix: str) -> Optional[str]:
+        lines = []
+        cc = self.bot.get_cog("CustomCommands")
+        if cc is not None:
+            try:
+                stored = await cc.config.guild(guild).commands()
+            except Exception:
+                stored = {}
+            rows = []
+            for name, data in sorted((stored or {}).items()):
+                if not data:
+                    continue
+                response = data.get("response") if isinstance(data, dict) else data
+                if isinstance(response, list):
+                    preview = f"one of {len(response)} random replies"
+                else:
+                    preview = str(response or "").replace("\n", " ").replace("|", "/")
+                    preview = preview[:120] + ("…" if len(preview) > 120 else "")
+                rows.append(f"| `{prefix}{name}` | {preview} |")
+            if rows:
+                lines += ["## Custom commands", "", "Made by this server's admins with the CustomCommands cog.", "",
+                          "| Command | Reply |", "|---|---|", *rows, ""]
+        alias = self.bot.get_cog("Alias")
+        if alias is not None:
+            entries = []
+            for getter in ("guild", "global"):
+                try:
+                    conf = alias.config.guild(guild) if getter == "guild" else alias.config
+                    entries += [(getter, e) for e in await conf.entries()]
+                except Exception:
+                    continue
+            rows = [f"| `{prefix}{e.get('name')}` | `{prefix}{e.get('command')}` |" for _, e in
+                    sorted(entries, key=lambda x: str(x[1].get("name"))) if isinstance(e, dict) and e.get("name")]
+            if rows:
+                lines += ["## Aliases", "", "Shortcuts for longer commands, made with the Alias cog.", "",
+                          "| Type this | It runs |", "|---|---|", *rows, ""]
+        if not lines:
+            return None
+        return "\n".join(["---", "title: Custom commands", "parent: Command reference", "nav_order: 999",
+                          "permalink: /reference/custom-commands/", "---", "", "# Custom commands and aliases", "",
+                          "{% raw %}", *lines, "{% endraw %}", ""])

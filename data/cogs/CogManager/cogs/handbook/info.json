@@ -1,0 +1,15 @@
+{
+    "name": "Handbook",
+    "short": "Short help cards and links to the online handbook; replaces [p]help.",
+    "description": "Replaces Red's help with short cards: [p]help lists the handbook's topics with links, and [p]help <command> shows usage, who can use it, subcommands and links. [p]handbook links to topics, and the bot owner's [p]handbook export generates the command reference from the running bot as Markdown for the docs.",
+    "end_user_data_statement": "This cog stores no user data.",
+    "install_msg": "Thanks for installing Handbook! It replaces the help command, so unload any other help cog first (for example [p]unload customhelp), then reload this. Set the site with [p]handbook seturl <url>.",
+    "author": ["Quillshot"],
+    "required_cogs": {},
+    "requirements": [],
+    "tags": ["help", "docs", "handbook"],
+    "min_bot_version": "3.5.0",
+    "hidden": false,
+    "disabled": false,
+    "type": "COG"
+}

@@ -1,0 +1,32 @@
+title: ButlerBot Handbook
+description: Everything ButlerBot can do in our Discord server, explained by task.
+url: "https://bradqui.github.io"
+baseurl: "/ButlerBot"
+
+remote_theme: just-the-docs/just-the-docs@v0.10.0
+plugins:
+  - jekyll-remote-theme
+  - jekyll-seo-tag
+
+color_scheme: dark
+search_enabled: true
+heading_anchors: true
+back_to_top: true
+back_to_top_text: "Back to top"
+
+aux_links:
+  "ButlerBot on GitHub": "https://github.com/bradqui/ButlerBot"
+aux_links_new_tab: true
+
+footer_content: "ButlerBot runs on <a href=\"https://github.com/Cog-Creators/Red-DiscordBot\">Red-DiscordBot</a>. The handbook and custom cogs are MIT licensed."
+
+callouts:
+  tip:
+    title: Tip
+    color: green
+  note:
+    title: Note
+    color: blue
+  staff:
+    title: Mods and admins
+    color: purple

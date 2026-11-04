@@ -213,11 +213,14 @@ def speakup_cog(interaction: discord.Interaction) -> Optional["SpeakUp"]:
 #     PERSISTENT BUTTONS (survive restarts)
 # ==========================================
 
-class DismissButton(discord.ui.DynamicItem[discord.ui.Button], template=r"sp:x:(?P<uid>\d+)"):
-    """Deletes the bot's message. Usable by the person it was for, or anyone who can manage messages."""
+class RemoveButton(discord.ui.DynamicItem[discord.ui.Button], template=r"sp:x:(?P<uid>\d+)"):
+    """
+    Deletes the bot's message for everyone, after a private "are you sure?". Usable by the person it was for, or
+    anyone who can manage messages. (Labeled Remove, not Dismiss: Discord's "Dismiss" only hides things for you.)
+    """
 
     def __init__(self, uid: int):
-        super().__init__(discord.ui.Button(label="Dismiss", style=discord.ButtonStyle.secondary,
+        super().__init__(discord.ui.Button(label="Remove", emoji="🗑️", style=discord.ButtonStyle.secondary,
                                            custom_id=f"sp:x:{uid}"))
         self.uid = uid
 
@@ -229,13 +232,35 @@ class DismissButton(discord.ui.DynamicItem[discord.ui.Button], template=r"sp:x:(
         perms = interaction.channel.permissions_for(interaction.user)
         if interaction.user.id != self.uid and not perms.manage_messages:
             return await interaction.response.send_message(
-                f"Only <@{self.uid}> or a moderator can dismiss this.", ephemeral=True,
+                f"Only <@{self.uid}> or a moderator can remove this.", ephemeral=True,
                 allowed_mentions=discord.AllowedMentions.none())
-        await interaction.response.defer()
+        await interaction.response.send_message("Remove this message for everyone?", view=ConfirmRemoveView(
+            interaction.message), ephemeral=True)
+
+
+class ConfirmRemoveView(discord.ui.View):
+    """The private confirmation behind a Remove button."""
+
+    def __init__(self, target: discord.Message):
+        super().__init__(timeout=60)
+        self.target = target
+
+    @discord.ui.button(label="Remove for everyone", emoji="🗑️", style=discord.ButtonStyle.danger)
+    async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.stop()
         try:
-            await interaction.message.delete()
+            await self.target.delete()
+            text = "🗑️ Removed."
+        except discord.NotFound:
+            text = "It's already gone."
         except discord.HTTPException:
-            pass
+            text = "❌ I couldn't remove it."
+        await interaction.response.edit_message(content=text, view=None)
+
+    @discord.ui.button(label="Keep it", style=discord.ButtonStyle.secondary)
+    async def keep(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.stop()
+        await interaction.response.edit_message(content="Kept.", view=None)
 
 
 class ScheduleButton(discord.ui.DynamicItem[discord.ui.Button], template=r"sp:sched:(?P<ts>\d+)"):
@@ -297,7 +322,7 @@ class RunSuggestionView(discord.ui.View):
         run = discord.ui.Button(label="Run it", emoji="▶️", style=discord.ButtonStyle.success)
         run.callback = self._run
         self.add_item(run)
-        self.add_item(DismissButton(message.author.id))
+        self.add_item(RemoveButton(message.author.id))
 
     async def _run(self, interaction: discord.Interaction):
         if interaction.user.id != self.original.author.id:
@@ -340,12 +365,12 @@ class SpeakUp(commands.Cog):
         self.summarize_menu = app_commands.ContextMenu(name="Summarize link", callback=self.summarize_from_menu)
 
     async def cog_load(self):
-        self.bot.add_dynamic_items(DismissButton, ScheduleButton, SteamButton)
+        self.bot.add_dynamic_items(RemoveButton, ScheduleButton, SteamButton)
         self.bot.tree.add_command(self.summarize_menu)
         self.reminder_loop.start()
 
     async def cog_unload(self):
-        self.bot.remove_dynamic_items(DismissButton, ScheduleButton, SteamButton)
+        self.bot.remove_dynamic_items(RemoveButton, ScheduleButton, SteamButton)
         self.bot.tree.remove_command(self.summarize_menu.name, type=self.summarize_menu.type)
         self.reminder_loop.cancel()
 
@@ -555,7 +580,7 @@ class SpeakUp(commands.Cog):
         view = discord.ui.View(timeout=None)
         if self.bot.get_cog("GameManager") is not None and ts > time.time():
             view.add_item(ScheduleButton(ts))
-        view.add_item(DismissButton(clicker.id))
+        view.add_item(RemoveButton(clicker.id))
         await channel.send("\n".join(lines), view=view, reference=message.to_reference(fail_if_not_exists=False),
                            mention_author=False, allowed_mentions=discord.AllowedMentions.none())
 
@@ -635,14 +660,14 @@ class SpeakUp(commands.Cog):
         reference = message.to_reference(fail_if_not_exists=False)
         if not summary:
             view = discord.ui.View(timeout=None)
-            view.add_item(DismissButton(clicker.id))
+            view.add_item(RemoveButton(clicker.id))
             await channel.send("😶 I couldn't read that page. It may block bots, need a login, or be mostly video. "
                                f"Try `{await self._prefix(channel.guild)}ai` with what you want to know about it.",
                                view=view, reference=reference,
                                mention_author=False)
             return True
         view = discord.ui.View(timeout=None)
-        view.add_item(DismissButton(clicker.id))
+        view.add_item(RemoveButton(clicker.id))
         await channel.send(f"{LINK_EMOJI} **Summary** of <{entry['url']}>\n{summary}\n-# Asked by {clicker.mention}",
                            view=view, reference=reference, mention_author=False,
                            allowed_mentions=discord.AllowedMentions.none(), suppress_embeds=True)
@@ -666,7 +691,7 @@ class SpeakUp(commands.Cog):
             if self.bot.get_cog("GameManager") is not None:
                 view.add_item(SteamButton("own", appid))
                 view.add_item(SteamButton("want", appid))
-            view.add_item(DismissButton(message.author.id))
+            view.add_item(RemoveButton(message.author.id))
             await message.channel.send(embed=embed, view=view, reference=message.to_reference(fail_if_not_exists=False),
                                        mention_author=False, allowed_mentions=discord.AllowedMentions.none())
 

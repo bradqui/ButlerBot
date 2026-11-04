@@ -31,7 +31,7 @@ You can also ask: `!butler remind me friday at 6 to buy Helldivers`.
 
 ## When ButlerBot chimes in on its own
 
-ButlerBot sometimes offers help without being asked. Its replies never ping anyone, and each comes with a **Dismiss** button.
+ButlerBot sometimes offers help without being asked. Its replies never ping anyone, and each has a 🗑️ **Remove** button. Remove deletes the reply **for everyone**, after a quick confirmation only you see. It works for the person the reply was for, and for mods.
 
 | You post… | ButlerBot… |
 |---|---|

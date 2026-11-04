@@ -66,7 +66,7 @@ Replies can include placeholders like `{author.mention}`, `{channel}` or `{0}` f
 !alias list
 ```
 
-The server's current custom commands and aliases are listed in the [command reference]({{ '/reference/custom-commands/' | relative_url }}).
+When the server has some, the [command reference]({{ '/reference/' | relative_url }}) lists them on a Custom commands page.
 
 ## Self-assignable roles
 

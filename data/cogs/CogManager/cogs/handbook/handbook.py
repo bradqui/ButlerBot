@@ -68,6 +68,11 @@ COG_TOPICS = {
 }
 GAME_NIGHT_COMMANDS = {"session", "sessions", "endsession", "sessionvote", "results", "endvote", "recurring", "lfg",
                        "shared", "installed", "top"}
+# Right-click options have no help text of their own: (description, handbook topic) for the reference.
+CONTEXT_MENU_HELP = {
+    "Summarize link": ("A three-line summary of the article or video linked in the message.", "speakup/"),
+    "Translate": ("Translates the message into your language.", "translate/"),
+}
 
 
 # ==========================================
@@ -468,9 +473,26 @@ class Handbook(commands.Cog):
             f"Every command {bot_name} has, generated from the running bot on {generated}. Commands only the bot "
             "owner can use are left out. For explanations by task, start from the [home page]({{ '/' | relative_url }}).",
             "", f"In Discord, `{prefix}help <command>` shows the same details for one command.", "",
+            *self._context_menu_section(),
+            "## Commands", "",
             "| Category | What it's for | Commands |", "|---|---|---|", *index_rows, "",
         ])
         return pages
+
+    def _context_menu_section(self) -> List[str]:
+        """Right-click (Apps) options registered with the bot, for the reference index."""
+        menus = sorted({c.name for kind in (discord.AppCommandType.message, discord.AppCommandType.user)
+                        for c in self.bot.tree.get_commands(type=kind)})
+        if not menus:
+            return []
+        rows = []
+        for name in menus:
+            about, topic = CONTEXT_MENU_HELP.get(name, ("", None))
+            link = f" See [{next(t for p, _, t, _, _ in TOPICS if p == topic)}]({{{{ '/{topic}' | relative_url }}}})." \
+                if topic else ""
+            rows.append(f"| **{name}** | {about}{link} |")
+        return ["## Right-click options", "", "Right-click a message (long-press on mobile) → **Apps**. Only you see "
+                "the result.", "", "| Option | What it does |", "|---|---|", *rows, ""]
 
     def _reference_entry(self, command: commands.Command, who: str, prefix: str, bot_name: str) -> str:
         lines = [f'<a id="{anchor(command)}"></a>', f"### {prefix}{command.qualified_name}", "",

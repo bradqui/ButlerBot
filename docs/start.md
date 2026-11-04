@@ -47,6 +47,7 @@ Every step is optional. You can also just tell ButlerBot: "@ButlerBot set up my 
 - **AI chat:** `!ai <message>` talks to Claude in the channel. See [AI chat and images]({{ '/ai/' | relative_url }}).
 - **Game nights:** people post sessions you can join with a button. See [Game nights]({{ '/games/nights/' | relative_url }}).
 - **Reminders:** `!remindme 2h check the oven`.
+- **Right-click tools:** right-click a message → **Apps** for **Summarize link** (a private summary of an article or video) and **Translate**. Both show results only to you.
 - **Privacy:**
   - ButlerBot counts activity for [Server stats]({{ '/stats/' | relative_url }}). It counts hourly totals and never stores message text. `!stats ignoreme` opts you out.
   - `!speakup me off` stops the bot reacting to your messages on its own.

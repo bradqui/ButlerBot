@@ -30,6 +30,12 @@ ButlerBot chats using Anthropic's Claude and draws pictures with Google's Gemini
 - `!myai reset` wipes your private conversation.
 - `!ai reset` wipes the channel's (mods).
 
+## Summarizing links
+
+ButlerBot can read an article or video page and sum it up in three lines:
+- **Privately:** right-click the message with the link → **Apps** → **Summarize link**. Only you see it.
+- **For the channel:** click the 📄 under the link.
+
 ## Making images
 
 Just ask in an AI chat, starting with "draw" or "image of":

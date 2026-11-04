@@ -74,6 +74,14 @@ ButlerBot reads the recent messages (20 by default, up to 60) and delivers a rul
 
 You get a short summary of everything since you last spoke in the channel, and only you see it. The text version `!catchup` sends it to your DMs instead.
 
+## Summarize a link
+
+Someone posted a long article or video?
+- **Just for you:** right-click the message (long-press on mobile) → **Apps** → **Summarize link**. You get a three-line summary that only you can see.
+- **For everyone:** click the 📄 that ButlerBot adds under the link, and the summary is posted in the channel.
+
+Pictures and GIFs aren't summarized. See [Reminders and auto-replies]({{ '/speakup/' | relative_url }}).
+
 ## Quick fun
 
 | Command | What it does |

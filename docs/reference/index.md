@@ -11,6 +11,17 @@ Every command ButlerBot has, generated from the running bot on 2026-11-04. Comma
 
 In Discord, `!help <command>` shows the same details for one command.
 
+## Right-click options
+
+Right-click a message (long-press on mobile) → **Apps**. Only you see the result.
+
+| Option | What it does |
+|---|---|
+| **Summarize link** | A three-line summary of the article or video linked in the message. See [Reminders and auto-replies]({{ '/speakup/' | relative_url }}). |
+| **Translate** | Translates the message into your language. See [Translation]({{ '/translate/' | relative_url }}). |
+
+## Commands
+
 | Category | What it's for | Commands |
 |---|---|---|
 | [ActivityStats]({{ '/reference/activitystats/' | relative_url }}) | Server activity stats: channels, leaderboards, busy times, voice and games, plus admin reports. | 31 |

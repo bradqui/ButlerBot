@@ -207,6 +207,9 @@ TITLE_TOOL = {
 }
 
 NO_MENTIONS = discord.AllowedMentions(everyone=False, users=False, roles=False, replied_user=False)
+MENTION_RULE = ("Discord mentions look like <@123> (a person), <@&123> (a role) or <#123> (a channel). A note in "
+                "parentheses says who each one in a message is, so use their names. To mention someone yourself, "
+                "write their <@id> exactly; it shows their name highlighted without pinging them.")
 EMPTY_USAGE = {"requests": 0, "input": 0, "output": 0, "cache_read": 0, "cache_write": 0, "searches": 0, "cost": 0.0}
 
 
@@ -491,6 +494,7 @@ class ClaudeChat(commands.Cog):
             "- Each user message starts with the speaker's display name and a colon. In shared conversations "
             "several people may be talking, so keep track of who said what and use names when it helps. "
             "Don't start your own replies with a name.",
+            f"- {MENTION_RULE}",
             "- Never ping @everyone or @here.",
         ]
         if images:
@@ -549,6 +553,35 @@ class ClaudeChat(commands.Cog):
             return None, f"couldn't download `{att.filename}`"
         return None, f"`{att.filename}` isn't a file type I can read"
 
+    def _mention_note(self, message: discord.Message, ref: Optional[discord.Message] = None) -> Optional[str]:
+        """Say who each raw <@id>, <@&id> and <#id> in the message (and the one it replies to) refers to."""
+        seen, parts = set(), []
+        for msg in filter(None, (message, ref)):
+            for m in msg.mentions:
+                if ("u", m.id) not in seen:
+                    seen.add(("u", m.id))
+                    parts.append(f"<@{m.id}> is you" if m.id == self.bot.user.id else f"<@{m.id}> is {m.display_name}")
+            for r in msg.role_mentions:
+                if ("r", r.id) not in seen:
+                    seen.add(("r", r.id))
+                    parts.append(f"<@&{r.id}> is the role @{r.name}")
+            for c in msg.channel_mentions:
+                if ("c", c.id) not in seen:
+                    seen.add(("c", c.id))
+                    parts.append(f"<#{c.id}> is the channel #{c.name}")
+        return f"(Mentions: {'; '.join(parts)})" if parts else None
+
+    @staticmethod
+    def _readable(text: str, message: discord.Message) -> str:
+        """`text` with the message's user, role and channel mentions replaced by plain names."""
+        for m in message.mentions:
+            text = re.sub(rf"<@!?{m.id}>", f"@{m.display_name}", text)
+        for r in message.role_mentions:
+            text = text.replace(f"<@&{r.id}>", f"@{r.name}")
+        for c in message.channel_mentions:
+            text = text.replace(f"<#{c.id}>", f"#{c.name}")
+        return text
+
     async def _build_user_turn(self, message: discord.Message, prompt: str, key: str, session: Session,
                                speaker: Optional[str] = None) -> Tuple[List[dict], List[str]]:
         context_lines = []
@@ -567,6 +600,9 @@ class ClaudeChat(commands.Cog):
                 else:
                     context_lines.append(f"(Replying to a message from {ref.author.display_name})")
                 attachments.extend(ref.attachments)
+        mentions = self._mention_note(message, ref)
+        if mentions:
+            context_lines.append(mentions)
 
         blocks, notes = [], []
         for att in attachments[:MAX_ATTACHMENTS]:
@@ -596,7 +632,7 @@ class ClaudeChat(commands.Cog):
             if msg.author == self.bot.user:
                 session.messages.append({"role": "assistant", "content": msg.content})
             elif not msg.author.bot:
-                session.messages.append({"role": "user", "content": f"{msg.author.display_name}: {msg.content}"})
+                session.messages.append({"role": "user", "content": f"{msg.author.display_name}: {msg.clean_content}"})
         while session.messages and session.messages[0]["role"] != "user":
             session.messages.pop(0)
 
@@ -787,6 +823,7 @@ class ClaudeChat(commands.Cog):
         if not (is_new or is_update):
             return False
 
+        prompt = self._readable(prompt, message)  # Gemini can't resolve <@id> mentions
         async with channel.typing():
             sent = await gemini.generate_image(prompt, key, message, channel=channel, user=message.author, new=is_new)
         if sent is None:
@@ -1033,6 +1070,7 @@ class ClaudeChat(commands.Cog):
             "- Each question starts with the asker's name and, in parentheses, their permission level. Notes like "
             "\"admin only\" or \"needs manage messages permission\" say who can run a command. Lead with what the "
             "asker can do themselves. If it needs more permission, say who can do it (a mod, an admin, the bot owner).",
+            f"- {MENTION_RULE} In commands, a <@id> mention works wherever a member is expected.",
             f"- For every detail of one command, they can run `{prefix}help <command>`.",
             f"- If the question isn't about this bot (general knowledge, chit-chat, homework), say you only answer "
             f"questions about the bot and suggest `{prefix}ai <question>` instead.",

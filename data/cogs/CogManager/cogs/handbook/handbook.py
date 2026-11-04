@@ -15,6 +15,7 @@ Only one cog can replace the help command: unload customhelp before loading this
 """
 
 import difflib
+import inspect
 import io
 import logging
 import re
@@ -96,11 +97,43 @@ def requirement(command: commands.Command) -> Tuple[str, bool]:
                 return f"{level}s only", False
             if perms:
                 return f"anyone with the {', '.join(perms)} permission", False
-        for check in getattr(obj, "checks", None) or []:
+        # Plain checks live on `.checks`; Red's overridable ones (permissions_check) on `.requires.checks`.
+        all_checks = list(getattr(obj, "checks", None) or []) + list(getattr(r, "checks", None) or [] if r else [])
+        for check in all_checks:
             label = getattr(check, "requirement", None)
             if label:
                 return f"{label}s only", False
+            known = known_check(check)
+            if known is not None:
+                return known
     return "everyone", False
+
+
+def known_check(check) -> Optional[Tuple[str, bool]]:
+    """Labels for Red's own check helpers that don't show up in `requires`."""
+    name = getattr(check, "__qualname__", "")
+    if "_can_manage_channel_deco" in name:
+        try:
+            level = inspect.getclosurevars(check).nonlocals.get("privilege_level")
+        except (TypeError, ValueError):
+            level = None
+        who = PRIVILEGE_NAMES.get(level)
+        return (f"{who}s, or anyone who can manage the channel" if who else "anyone who can manage the channel"), False
+    if "_can_get_invite_url" in name:
+        return "bot owner only (unless invites are made public)", True
+    return None
+
+
+def denied_by_default(obj, guild_id: int) -> bool:
+    """True if a Permissions default rule denies this cog or command for everyone (globally or in this server)."""
+    requires = getattr(obj, "requires", None)
+    if requires is None or not hasattr(requires, "get_rule"):
+        return False
+    try:
+        rules = (requires.get_rule(requires.DEFAULT, requires.GLOBAL), requires.get_rule(requires.DEFAULT, guild_id))
+    except Exception:
+        return False
+    return any(getattr(rule, "name", "") == "ACTIVE_DENY" for rule in rules)
 
 
 def anchor(command: commands.Command) -> str:
@@ -396,12 +429,14 @@ class Handbook(commands.Cog):
         index_rows = []
         cogs = sorted(self.bot.cogs.values(), key=lambda c: c.qualified_name.lower())
         for order, cog in enumerate(cogs, 1):
-            if await self.bot.cog_disabled_in_guild(cog, guild):
+            if await self.bot.cog_disabled_in_guild(cog, guild) or denied_by_default(cog, guild.id):
                 continue
             entries = []
             for command in sorted(cog.walk_commands(), key=lambda c: c.qualified_name):
                 if command.hidden or any(p.hidden for p in command.parents) or not command.enabled:
                     continue
+                if any(denied_by_default(c, guild.id) for c in (command, *command.parents)):
+                    continue   # locked down with a Permissions rule: not something members can use
                 who, owner_only = requirement(command)
                 if owner_only:
                     continue

@@ -103,6 +103,19 @@ Quirks to know:
       - Starting needs `new`, because a title like "join the raid" would otherwise read as a subcommand.
       - The group's catch-all `words` argument (hidden with `usage=""`) means SpeakUp treats a stray word as an argument and stays quiet; the group answers with its own "add `new`" hint instead.
       - Handbook's `topic_for` maps both to the Game nights page.
+  - **Event details (2026-11-05):**
+    - **Stored data:** sessions and schedules keep `event` = `{description, minutes, voice_id, banner}`. Banners are files under `cog_data_path(self)/banners/<owner>.<ext>`, where owner is the session or schedule ID; a posted occurrence points at its schedule's file.
+      - `store_details(owner, details)` writes any new `banner_data` bytes.
+      - `drop_banner(name, owner)` deletes only the owner's own file (on `end_session` and `recurring stop`).
+    - **Building the event:** `_event_fields` builds the description (the host's text, then how to join), the place (the session's voice channel, else `event_channel`, else external with the text channel), and `end_time`: `minutes`, or `EVENT_LENGTH_HOURS` when external.
+      - `create_event` and `push_event` (which edits the event, or creates it if missing) use it.
+    - **Setting details at start:**
+      - `/games session` has description, banner (attachment), voice and length options.
+      - Text commands use `details_from_message`: an attached image is the banner, and a mentioned voice channel is taken out of the title.
+      - Bad banners are refused with `read_banner` (10 MB; PNG, JPG, GIF or WebP by magic bytes, `image_ext`).
+    - **Edit event:** scheduled sessions' cards have it (`SessionButton` action `event`). It opens `EventDetailsModal` (discord.py 2.7 `Label`, `ChannelSelect`, `FileUpload` and `CheckboxGroup`), which has 5 fields: description, length, voice, banner, and options ("Remove the banner"; "Also use for future sessions" on repeating ones).
+      - `apply_event_details` saves the form; "future" also writes the schedule's `event` and stores the banner under the schedule's ID.
+    - **Edits made in Discord:** `on_scheduled_event_update` copies a changed time (recomputing `reminded`), name and voice channel (compared with the effective default) to that one session. A cancelled event ends the session.
   - **Winner history (2026-11-05):** sessions keep `winners` (every vote's winner, in order, repeats included); `finish_vote` appends, seeding from `winner` for older sessions. The card's result block, and the ended card, add `Earlier: …` (`played_text()`, which counts a run of repeats as "(won twice)"). Later votes never leave out earlier winners: a vote to switch can keep the current game. Recurring schedules (guild `recurring`) use `post_session` too.
     - A schedule stores weekday, hour, minute, `interval` (7 or 14), the host's timezone name and `next_start`. `advance_occurrence` rebuilds the local time each time, so daylight saving changes don't shift it. Input starting with `every`/`weekly` goes to `create_recurring`.
   - **Discord events:** `create_event` makes an external event (the location is the text channel, ending after `EVENT_LENGTH_HOURS`), or a voice event if `event_channel` is set. It needs Manage Events.

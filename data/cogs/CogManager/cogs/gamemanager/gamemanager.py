@@ -27,6 +27,7 @@ import discord
 from discord.ext import tasks
 from redbot.core import Config, app_commands, checks, commands
 from redbot.core.bot import Red
+from redbot.core.data_manager import cog_data_path
 
 
 def _load_butlerui():
@@ -60,6 +61,8 @@ REMINDER_MINUTES = 15           # heads-up ping before a scheduled session
 SESSION_EXPIRE_HOURS = 12       # sessions end on their own this long after starting (or being created)
 BURIED_AFTER = 10               # messages below a session card before it counts as scrolled away (and moves down)
 HERE_COOLDOWN = 60              # seconds between `games here` moves in one channel
+MAX_BANNER_BYTES = 10 * 1024 * 1024   # Discord's limit for an event's cover image
+EVENT_MIN_MINUTES, EVENT_MAX_MINUTES = 15, 24 * 60
 LFG_COOLDOWN_SECONDS = 300
 PICKER_PAGE_SIZE = 25           # Discord's limit for one select menu
 LIST_TIMEOUT = 900              # seconds a list board can be paged before its buttons grey out
@@ -391,6 +394,35 @@ def parse_duration(text: str) -> Optional[int]:
     return int(m.group(1)) * {"s": 1, "m": 60, "h": 3600}[unit]
 
 
+def parse_length(text: str) -> Optional[int]:
+    """An event's length in minutes: '2h', '90m', '1h30m', '1.5h'. None if it can't be read."""
+    m = re.fullmatch(r"\s*(?:(\d+(?:\.\d+)?)\s*h(?:ours?|rs?)?)?\s*(?:(\d+)\s*m(?:in(?:ute)?s?)?)?\s*", text.lower())
+    if not m or not (m.group(1) or m.group(2)):
+        return None
+    return round(float(m.group(1) or 0) * 60) + int(m.group(2) or 0)
+
+
+def fmt_minutes(minutes: Optional[int]) -> str:
+    """90 -> '1h30m', 120 -> '2h', 45 -> '45m'."""
+    if not minutes:
+        return ""
+    hours, mins = divmod(int(minutes), 60)
+    return (f"{hours}h" if hours else "") + (f"{mins}m" if mins else "")
+
+
+def image_ext(data: bytes) -> Optional[str]:
+    """The file type of an image Discord takes as an event banner, from its first bytes, else None."""
+    if data.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "png"
+    if data.startswith(b"\xff\xd8\xff"):
+        return "jpg"
+    if data[:6] in (b"GIF87a", b"GIF89a"):
+        return "gif"
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "webp"
+    return None
+
+
 # ---------- session times ----------
 
 def load_zone(name: str) -> tzinfo:
@@ -681,11 +713,12 @@ def game_admin():
 # ==========================================
 
 class SessionButton(discord.ui.DynamicItem[discord.ui.Button],
-                    template=r"gm:s:(?P<action>join|leave|vote|end):(?P<sid>[a-z0-9]+)"):
+                    template=r"gm:s:(?P<action>join|leave|vote|event|end):(?P<sid>[a-z0-9]+)"):
     LOOKS = {   # one main action (Join); everything else grey
         "join": ("Join", "➕", discord.ButtonStyle.primary),
         "leave": ("Leave", "➖", discord.ButtonStyle.secondary),
         "vote": ("Start vote", "🗳️", discord.ButtonStyle.secondary),
+        "event": ("Edit event", "✏️", discord.ButtonStyle.secondary),
         "end": ("End session", "🏁", discord.ButtonStyle.secondary),
     }
 
@@ -759,8 +792,10 @@ class InstallButton(discord.ui.DynamicItem[discord.ui.Button], template=r"gm:i:(
             await cog.on_install_button(interaction, self.rid)
 
 
-def session_buttons(sid: str) -> List[discord.ui.Item]:
-    return [SessionButton(action, sid) for action in ("join", "leave", "vote", "end")]
+def session_buttons(sid: str, scheduled: bool = False) -> List[discord.ui.Item]:
+    """Join, Leave, Start vote, End session; scheduled sessions (which can have a Discord event) also Edit event."""
+    actions = ("join", "leave", "vote", "event", "end") if scheduled else ("join", "leave", "vote", "end")
+    return [SessionButton(action, sid) for action in actions]
 
 
 def vote_buttons(vote: dict) -> List[discord.ui.Item]:
@@ -1104,6 +1139,55 @@ class TextModal(discord.ui.Modal):
 
     async def on_submit(self, interaction: discord.Interaction):
         await self._callback(interaction, self.field.value)
+
+
+class EventDetailsModal(discord.ui.Modal):
+    """
+    The Edit event form: description, length, voice channel and banner for a session's Discord event, plus (when
+    there's something to choose) removing the banner and using the details for a repeating session's future ones.
+    """
+
+    def __init__(self, cog: "GameManager", session: dict, schedule: Optional[dict]):
+        super().__init__(title="Event details")
+        self.cog, self.sid = cog, session["id"]
+        details = session.get("event") or {}
+        self.description = discord.ui.TextInput(style=discord.TextStyle.paragraph, required=False, max_length=800,
+                                                default=details.get("description") or None,
+                                                placeholder="What's planned, what to bring…")
+        self.add_item(discord.ui.Label(text="Description", component=self.description))
+        self.length = discord.ui.TextInput(required=False, max_length=12, default=fmt_minutes(details.get("minutes")) or None,
+                                           placeholder="2h, 90m")
+        self.add_item(discord.ui.Label(text="Length", component=self.length,
+                                       description=f"Leave empty for {EVENT_LENGTH_HOURS} hours outside voice, open-ended in voice"))
+        voice_id = details.get("voice_id")
+        self.voice = discord.ui.ChannelSelect(
+            channel_types=[discord.ChannelType.voice, discord.ChannelType.stage_voice], min_values=0, max_values=1,
+            required=False, placeholder="No voice channel",
+            default_values=[discord.SelectDefaultValue(id=voice_id, type=discord.SelectDefaultValueType.channel)]
+            if voice_id else [])
+        self.add_item(discord.ui.Label(text="Voice channel", component=self.voice,
+                                       description="Where it happens. Empty uses the server's usual one, if set"))
+        self.banner = discord.ui.FileUpload(required=False, max_values=1)
+        self.add_item(discord.ui.Label(text="Banner image", component=self.banner,
+                                       description="PNG, JPG, GIF or WebP, up to 10 MB. Empty keeps the current one"))
+        options = []
+        if details.get("banner"):
+            options.append(discord.CheckboxGroupOption(label="Remove the banner", value="remove"))
+        if schedule is not None:
+            options.append(discord.CheckboxGroupOption(
+                label="Also use for future sessions", value="future",
+                description=ui.truncate(repeat_label(schedule), 100)))
+        self.options = None
+        if options:
+            self.options = discord.ui.CheckboxGroup(options=options, required=False, min_values=0,
+                                                    max_values=len(options))
+            self.add_item(discord.ui.Label(text="Options", component=self.options))
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await self.cog.apply_event_details(
+            interaction, self.sid, description=self.description.value or "", length=self.length.value or "",
+            voice_ids=[c.id for c in self.voice.values], banners=list(self.banner.values),
+            options=list(self.options.values) if self.options else [])
 
 
 PROFILE_STEPS = ("timezone", "owned", "installed", "favorites", "wishlist")
@@ -2587,9 +2671,10 @@ class GameManager(commands.Cog):
         zone, tz_hint = tz_note_parts(session["tz_note"]) if session.get("tz_note") and upcoming else (None, None)
         blocks = []
         if starts:   # Discord shows both stamps in each reader's own timezone
+            voice_id = (session.get("event") or {}).get("voice_id")
             blocks.append(ui.two_line(f"**{stamp(starts)}**", details(
                 stamp(starts, "R"), repeat_short(session["repeat"]) if session.get("repeat") else None,
-                f"time read as {zone}" if zone else "your local time")))
+                f"time read as {zone}" if zone else "your local time", f"in <#{voice_id}>" if voice_id else None)))
         players = [f"<@{uid}> (host)" if uid == host else f"<@{uid}>" for uid in session["participants"]]
         if len(players) > 40:
             players = players[:40] + [f"and {len(players) - 40} more"]
@@ -2640,7 +2725,7 @@ class GameManager(commands.Cog):
                 notes.append("when everyone's in, the host presses Start vote")
             footer = details(*notes) or None
         return ui.CardView(ui.card(*blocks, ui.SEPARATOR if result_block else None, result_block,
-                                   ui.SEPARATOR, session_buttons(session["id"]),
+                                   ui.SEPARATOR, session_buttons(session["id"], bool(starts)),
                                    title=title, color=ui.SUCCESS, footer=footer))
 
     def session_embed(self, session: dict, ended: bool = False) -> discord.Embed:
@@ -2689,12 +2774,21 @@ class GameManager(commands.Cog):
     def session_link(self, guild: discord.Guild, session: dict) -> str:
         return message_link(guild.id, session.get("channel_id"), session.get("message_id"))
 
-    async def create_session(self, target: Target, text: Optional[str]):
+    async def create_session(self, target: Target, text: Optional[str], details: Optional[dict] = None):
+        """
+        Start a session from text like "friday 9pm Raid night". `details` are its Discord event's (description,
+        minutes, voice_id, banner_data); from a text command, an attached image is the banner and a mentioned voice
+        channel is where it happens.
+        """
         guild, member, channel = who(target)
+        if details is None:
+            details, text = await self.details_from_message(target, text)
+            if details is None:
+                return
         tz, tz_name, personal = await self.timezone_for(member)
         now = utcnow()
         if (text or "").strip().lower().split(" ")[0] in ("every", "weekly"):
-            return await self.create_recurring(target, text)
+            return await self.create_recurring(target, text, details)
         starts_at, title = split_when(text or "", tz, now)
         if starts_at is not None and starts_at < now - timedelta(minutes=1):
             return await self.reply(target, content="⚠️ That time has already passed. Try a later time.", ephemeral=True)
@@ -2705,19 +2799,31 @@ class GameManager(commands.Cog):
         if starts_at and not personal:   # a hint in the card, instead of a message of its own
             note = (f"Time read as **{tz_name}**: the host hasn't set a timezone. If that's wrong, set one with "
                     f"{await self.cmd(guild, 'games timezone <zone>')} and start the session again.")
-        await self.post_session(guild, channel, member, title, starts_at, tz_note=note)
-        if isinstance(target, discord.Interaction):
+        session = await self.post_session(guild, channel, member, title, starts_at, tz_note=note, details=details)
+        missed = details and not starts_at
+        if missed:
+            await self.reply(target, ephemeral=True, content=ui.line(
+                ui.WARN, "The event details weren't used: only a session with a start time gets a Discord event."))
+        elif details and not session.get("event_id"):
+            await self.reply(target, ephemeral=True, content=ui.line(
+                ui.WARN, "The details are saved, but I couldn't make a Discord event.",
+                hint="Events need to be on (`games admin events`) and I need Manage Events."))
+        elif isinstance(target, discord.Interaction):
             await self.reply(target, content="✅ Session posted.", ephemeral=True)
 
     async def post_session(self, guild: discord.Guild, channel, host: discord.Member, title: str,
                            starts_at: Optional[datetime], schedule: Optional[dict] = None, *,
-                           tz_note: Optional[str] = None) -> dict:
+                           tz_note: Optional[str] = None, details: Optional[dict] = None) -> dict:
         """
         Post a session card (and its Discord event when it has a start time). Returns the session. `tz_note` is a
         hint shown in the card until the session starts (the time was read in a timezone the host didn't choose).
+        `details` are the event's (a repeating session's come from its schedule); new banner bytes in
+        "banner_data" are saved under the session's ID.
         """
         now = utcnow()
         sid = generate_id()
+        event_details = self.store_details(sid, details if details is not None
+                                           else (schedule or {}).get("event"))
         session = {
             "id": sid, "title": title, "host_id": str(host.id), "participants": [str(host.id)],
             "channel_id": channel.id, "message_id": None, "created_at": now.isoformat(),
@@ -2732,6 +2838,7 @@ class GameManager(commands.Cog):
             "pings": [],          # IDs of this session's ping lines (in its channel), deleted when it ends
             "vote_result": None,  # the last vote's result, shown in the card: {winner, tie, lines, footer}
             "winners": [],        # every vote's winner, in order (a vote can keep the current game: it's listed again)
+            "event": event_details,   # the Discord event's details: {description, minutes, voice_id, banner}
         }
         async with self.config.guild(guild).play_sessions() as sessions:
             sessions[sid] = session
@@ -2755,24 +2862,249 @@ class GameManager(commands.Cog):
             return None
         if not guild.me.guild_permissions.manage_events:
             return None
-        link = self.session_link(guild, session)
-        kwargs = {
-            "name": session["title"][:100], "start_time": starts, "privacy_level": discord.PrivacyLevel.guild_only,
-            "description": (f"Hosted by {host.display_name}. Press Interested to join the session"
-                            + (f": {link}" if link else ".") + (f"\n{session['repeat']}." if session.get("repeat") else ""))[:1000],
-        }
-        voice = guild.get_channel(await conf.event_channel() or 0)
-        if isinstance(voice, (discord.VoiceChannel, discord.StageChannel)):
-            kwargs["channel"] = voice
-        else:
-            channel = guild.get_channel_or_thread(session["channel_id"])
-            kwargs.update(entity_type=discord.EntityType.external, end_time=starts + timedelta(hours=EVENT_LENGTH_HOURS),
-                          location=f"#{channel.name}" if channel else "Discord")
+        kwargs = await self._event_fields(guild, session)
+        if kwargs.get("entity_type") == discord.EntityType.external:
+            kwargs.pop("channel", None)   # (only an edit needs channel=None to move an event out of voice)
+        if kwargs.get("end_time") is None:
+            kwargs.pop("end_time", None)   # open-ended (voice events only)
+        banner = self.banner_bytes((session.get("event") or {}).get("banner"))
+        if banner:
+            kwargs["image"] = banner
         try:
-            return (await guild.create_scheduled_event(**kwargs)).id
+            return (await guild.create_scheduled_event(name=session["title"][:100], start_time=starts,
+                                                       privacy_level=discord.PrivacyLevel.guild_only, **kwargs)).id
         except discord.HTTPException as e:
             log.info("Couldn't create a Discord event for session %s: %s", session["id"], e)
             return None
+
+    async def _event_fields(self, guild: discord.Guild, session: dict) -> dict:
+        """
+        A session's Discord event description, place and end time, from its details: the host's description
+        first, then how to join; its voice channel, else the server's event channel, else the text channel as an
+        "external" location (which Discord requires an end time for).
+        """
+        starts = parse_iso(session["starts_at"])
+        details = session.get("event") or {}
+        host = guild.get_member(int(session["host_id"]))
+        link = self.session_link(guild, session)
+        note = (f"Hosted by {host.display_name if host else 'a member'}. Press Interested to join the session"
+                + (f": {link}" if link else ".") + (f"\n{session['repeat']}." if session.get("repeat") else ""))
+        custom = (details.get("description") or "").strip()
+        description = f"{ui.truncate(custom, 1000 - len(note) - 2)}\n\n{note}" if custom else note
+        minutes = details.get("minutes")
+        end = starts + timedelta(minutes=minutes) if minutes else None
+        voice = guild.get_channel(details.get("voice_id") or await self.config.guild(guild).event_channel() or 0)
+        if isinstance(voice, (discord.VoiceChannel, discord.StageChannel)):
+            return {"description": description[:1000], "channel": voice, "end_time": end}
+        channel = guild.get_channel_or_thread(session["channel_id"])
+        return {"description": description[:1000], "entity_type": discord.EntityType.external, "channel": None,
+                "end_time": end or starts + timedelta(hours=EVENT_LENGTH_HOURS),
+                "location": f"#{channel.name}" if channel else "Discord"}
+
+    # ---------- event details ----------
+
+    def _banner_dir(self) -> Path:
+        path = cog_data_path(self) / "banners"
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+
+    def store_details(self, owner: str, details: Optional[dict]) -> dict:
+        """
+        Clean event details for saving: new banner bytes ("banner_data") are written to banners/<owner>.<ext>,
+        and the details keep the file's name. Returns {description, minutes, voice_id, banner}.
+        """
+        details = dict(details or {})
+        data = details.pop("banner_data", None)
+        if data:
+            ext = image_ext(data)
+            for old in self._banner_dir().glob(f"{owner}.*"):
+                old.unlink(missing_ok=True)
+            (self._banner_dir() / f"{owner}.{ext}").write_bytes(data)
+            details["banner"] = f"{owner}.{ext}"
+        return {key: details.get(key) for key in ("description", "minutes", "voice_id", "banner")
+                if details.get(key)}
+
+    def banner_bytes(self, name: Optional[str]) -> Optional[bytes]:
+        if not name:
+            return None
+        try:
+            return (self._banner_dir() / name).read_bytes()
+        except OSError:
+            return None
+
+    def drop_banner(self, name: Optional[str], owner: str):
+        """Delete a banner file, if it belongs to `owner` (a session can use its schedule's, which stays)."""
+        if name and name.startswith(f"{owner}."):
+            (self._banner_dir() / name).unlink(missing_ok=True)
+
+    @staticmethod
+    async def read_banner(attachment: discord.Attachment) -> Tuple[Optional[bytes], Optional[str]]:
+        """An uploaded banner's bytes, or (None, a line saying what's wrong)."""
+        if attachment.size > MAX_BANNER_BYTES:
+            return None, ui.line(ui.FAIL, "That banner is too big.", hint="Event banners can be up to 10 MB.")
+        try:
+            data = await attachment.read()
+        except discord.HTTPException:
+            return None, ui.line(ui.FAIL, "I couldn't download that banner.", hint="Try uploading it again.")
+        if image_ext(data) is None:
+            return None, ui.line(ui.FAIL, "That banner isn't an image I can use.", hint="Use a PNG, JPG, GIF or WebP.")
+        return data, None
+
+    async def details_from_message(self, target: Target, text: Optional[str]) -> Tuple[Optional[dict], Optional[str]]:
+        """
+        Event details from a text command: an attached image is the banner, and a mentioned voice channel (taken out
+        of the text) is the place. Returns (details, the text without the mention), or (None, None) after
+        explaining a bad banner.
+        """
+        if isinstance(target, discord.Interaction):
+            return {}, text
+        guild = target.guild
+        details: dict = {}
+        for match in re.finditer(r"<#(\d+)>", text or ""):
+            channel = guild.get_channel(int(match.group(1)))
+            if isinstance(channel, (discord.VoiceChannel, discord.StageChannel)):
+                details["voice_id"] = channel.id
+                text = " ".join((text or "").replace(match.group(0), " ").split())
+                break
+        message = getattr(target, "message", None)
+        image = next((a for a in (message.attachments if message is not None else [])
+                      if (a.content_type or "").startswith("image/")
+                      or a.filename.lower().endswith((".png", ".jpg", ".jpeg", ".gif", ".webp"))), None)
+        if image is not None:
+            data, problem = await self.read_banner(image)
+            if problem:
+                await self.reply(target, content=problem)
+                return None, None
+            details["banner_data"] = data
+        return details, text
+
+    async def open_event_form(self, interaction: discord.Interaction, session: dict):
+        """The Edit event button: the host (or a game admin) gets the event details form."""
+        if not parse_iso(session.get("starts_at")):
+            return await ui.respond(interaction, ui.line(ui.WARN, "Only a session with a start time has an event."))
+        schedule = None
+        if session.get("recurring_id"):
+            schedule = (await self.config.guild(interaction.guild).recurring()).get(session["recurring_id"])
+        await interaction.response.send_modal(EventDetailsModal(self, session, schedule))
+
+    async def apply_event_details(self, interaction: discord.Interaction, sid: str, *, description: str, length: str,
+                                  voice_ids: List[int], banners: List[discord.Attachment], options: List[str]):
+        """Save the Edit event form, update the Discord event (or make it), and redraw the card."""
+        guild, member = interaction.guild, interaction.user
+        session = (await self.config.guild(guild).play_sessions()).get(sid)
+        if session is None:
+            return await ui.respond(interaction, "⚠️ This session has ended.")
+        if not await self.can_manage(member, session["host_id"]):
+            return await ui.respond(interaction, "🔒 Only the host or a game admin can do that.")
+        minutes = None
+        if length.strip():
+            minutes = parse_length(length)
+            if minutes is None or not EVENT_MIN_MINUTES <= minutes <= EVENT_MAX_MINUTES:
+                return await ui.respond(interaction, ui.line(ui.ASK, f"I couldn't use **{ui.truncate(length, 20)}** "
+                                                                     "as a length.",
+                                                             hint="Try 2h, 90m or 1h30m, between 15 minutes and a day."))
+        await interaction.response.defer(ephemeral=True, thinking=True)   # banners take a moment to download
+        future = "future" in options and session.get("recurring_id")
+        owner = session["recurring_id"] if future else sid
+        old = session.get("event") or {}
+        details = {"description": description.strip() or None, "minutes": minutes,
+                   "voice_id": voice_ids[0] if voice_ids else None, "banner": old.get("banner")}
+        image_change = False
+        if banners:
+            data, problem = await self.read_banner(banners[0])
+            if problem:
+                return await interaction.followup.send(problem, ephemeral=True)
+            details["banner_data"] = data
+            image_change = True
+        elif "remove" in options:
+            self.drop_banner(old.get("banner"), sid)
+            details["banner"] = None
+            image_change = True
+        details = self.store_details(owner, details)
+        async with self.config.guild(guild).play_sessions() as sessions:
+            if sid not in sessions:
+                return await interaction.followup.send("⚠️ This session has ended.", ephemeral=True)
+            sessions[sid]["event"] = details
+            session = dict(sessions[sid])
+        if future:
+            async with self.config.guild(guild).recurring() as recurring:
+                if session["recurring_id"] in recurring:
+                    recurring[session["recurring_id"]]["event"] = dict(details)
+        problem = await self.push_event(guild, session, image_change)
+        await self.refresh_session_message(guild, (await self.config.guild(guild).play_sessions()).get(sid, session))
+        lines = [ui.line(ui.DONE, "Event details saved." + (" Future sessions use them too." if future else ""))]
+        if problem:
+            lines = [ui.line(ui.WARN, "The details are saved, but " + problem)]
+        await interaction.followup.send("\n".join(lines), ephemeral=True)
+
+    async def push_event(self, guild: discord.Guild, session: dict, image_change: bool = False) -> Optional[str]:
+        """
+        Bring a session's Discord event in line with its details, making the event if it should have one.
+        Returns what went wrong (the end of a sentence for the host), or None.
+        """
+        if not session.get("event_id"):
+            host = guild.get_member(int(session["host_id"])) or guild.me
+            event_id = await self.create_event(guild, session, host)
+            if event_id is None:
+                return ("there's no Discord event to update. Events need to be on (`games admin events`) and I "
+                        "need Manage Events.")
+            async with self.config.guild(guild).play_sessions() as sessions:
+                if session["id"] in sessions:
+                    sessions[session["id"]]["event_id"] = event_id
+            return None
+        try:
+            event = guild.get_scheduled_event(session["event_id"]) or await guild.fetch_scheduled_event(
+                session["event_id"])
+            kwargs = await self._event_fields(guild, session)
+            if image_change:
+                kwargs["image"] = self.banner_bytes((session.get("event") or {}).get("banner"))
+            await event.edit(**kwargs)
+        except discord.Forbidden:
+            return "I couldn't update the Discord event: I need Manage Events."
+        except discord.HTTPException as e:
+            log.info("Couldn't update the event for session %s: %s", session["id"], e)
+            return "Discord didn't accept the change to the event. Try again in a minute."
+        return None
+
+    @commands.Cog.listener()
+    async def on_scheduled_event_update(self, before: discord.ScheduledEvent, after: discord.ScheduledEvent):
+        """
+        Someone edited a session's event in Discord: its time, name and voice channel go to the session (that one
+        session, even if it repeats), and cancelling the event ends the session.
+        """
+        guild = after.guild
+        if guild is None:
+            return
+        cancel, changed, session = False, False, None
+        default_voice = await self.config.guild(guild).event_channel()
+        async with self.config.guild(guild).play_sessions() as sessions:
+            sid = self._session_for_event(sessions, after.id)
+            if sid is None:
+                return
+            saved = sessions[sid]
+            if after.status == discord.EventStatus.cancelled:
+                cancel = True
+            else:
+                starts = parse_iso(saved.get("starts_at"))
+                if after.start_time and (starts is None or abs((after.start_time - starts).total_seconds()) >= 60):
+                    saved["starts_at"] = after.start_time.isoformat()
+                    now = utcnow()
+                    saved["reminded"] = after.start_time - now <= timedelta(minutes=REMINDER_MINUTES)
+                    saved["started"] = saved.get("started") and after.start_time <= now
+                    changed = True
+                if after.name and after.name != saved["title"][:100]:
+                    saved["title"] = after.name[:200]
+                    changed = True
+                details = saved.setdefault("event", {})
+                expected = details.get("voice_id") or default_voice
+                if (after.channel_id or None) != (expected or None):
+                    details["voice_id"] = after.channel_id or None
+                    changed = True
+                session = dict(saved)
+        if cancel:
+            await self.end_session(guild, sid)
+        elif changed:
+            await self.refresh_session_message(guild, session)
 
     async def update_event(self, guild: discord.Guild, session: dict, action: str):
         """`start` the session's Discord event, or `finish` it (end it if running, cancel it if not)."""
@@ -2823,7 +3155,7 @@ class GameManager(commands.Cog):
 
     # ---------- recurring sessions ----------
 
-    async def create_recurring(self, target: Target, text: str):
+    async def create_recurring(self, target: Target, text: str, details: Optional[dict] = None):
         guild, member, channel = who(target)
         tz, tz_name, personal = await self.timezone_for(member)
         parsed = parse_recurring(text, tz, utcnow())
@@ -2841,7 +3173,8 @@ class GameManager(commands.Cog):
         schedule = {"id": rid, "title": (parsed["title"].strip() or f"{member.display_name}'s game night")[:200],
                     "host_id": str(member.id), "channel_id": channel.id, "weekday": parsed["weekday"],
                     "hour": parsed["hour"], "minute": parsed["minute"], "interval": parsed["interval"],
-                    "tz": tz_name, "next_start": parsed["first"].isoformat(), "created_at": utcnow().isoformat()}
+                    "tz": tz_name, "next_start": parsed["first"].isoformat(), "created_at": utcnow().isoformat(),
+                    "event": self.store_details(rid, details)}   # every occurrence's event uses these
         async with self.config.guild(guild).recurring() as recurring:
             recurring[rid] = schedule
         posted = await self._tick_recurring(guild, rid, schedule, utcnow())
@@ -2895,6 +3228,7 @@ class GameManager(commands.Cog):
         await self._delete_messages(guild, session["channel_id"], session.get("pings"))   # reminders, start, winner
         session["pings"] = []
         await self.update_event(guild, session, "finish")
+        self.drop_banner((session.get("event") or {}).get("banner"), sid)   # its own banner, not its schedule's
         self.bot.dispatch("gm_session_ended", guild, session)  # ActivityStats records attendance
         return session
 
@@ -2921,6 +3255,8 @@ class GameManager(commands.Cog):
 
         if not await self.can_manage(member, session["host_id"]):
             return await ui.respond(interaction, "🔒 Only the host or a game admin can do that.")
+        if action == "event":
+            return await self.open_event_form(interaction, session)
         if action == "vote":
             await self.start_vote(interaction, session_id=sid)
         else:
@@ -3745,7 +4081,9 @@ class GameManager(commands.Cog):
         (set it with `[p]games timezone`).
 
         Scheduled sessions also show up in the server's Discord events. Start with `every` to repeat weekly
-        (or `every other` for every two weeks); each one is posted a day ahead.
+        (or `every other` for every two weeks); each one is posted a day ahead. For the event, attach an image
+        as its banner and mention a voice channel to hold it there; the host can change these later with the
+        card's **Edit event** button.
 
         **Examples:**
         - `[p]games session` (starts now)
@@ -4012,6 +4350,7 @@ class GameManager(commands.Cog):
             return
         async with self.config.guild(ctx.guild).recurring() as recurring:
             recurring.pop(schedule_id, None)
+        self.drop_banner((schedule.get("event") or {}).get("banner"), schedule_id)
         await ctx.send(f"✅ **{schedule['title']}** won't repeat any more.", allowed_mentions=NO_PING)
 
     @games_recurring.command(name="skip")
@@ -4330,7 +4669,8 @@ class GameManager(commands.Cog):
         Start a game session people can join.
 
         Optionally start with a time (read in your timezone; everyone sees their own). Start with `every` to
-        repeat weekly. The same as `[p]games session`.
+        repeat weekly. Attach an image for the Discord event's banner, and mention a voice channel to hold it there.
+        The same as `[p]games session`.
 
         **Examples:** `[p]session new`, `[p]session new friday 9pm Raid night`, `[p]session new in 2h Rocket League`,
         `[p]session new every friday 9pm`
@@ -4439,11 +4779,36 @@ class GameManager(commands.Cog):
     @slash.command(name="session", description="Start a game session people can join")
     @app_commands.describe(title="What you're playing or the session's name",
                            when="Optional start time, e.g. 9pm, friday 9pm, in 2h, tomorrow 8:30pm",
-                           weekly="Repeat every week (needs a day and time, like friday 9pm)")
+                           weekly="Repeat every week (needs a day and time, like friday 9pm)",
+                           description="For the Discord event: what's planned, what to bring",
+                           banner="For the Discord event: a banner image (PNG, JPG, GIF or WebP)",
+                           voice="For the Discord event: the voice channel it happens in",
+                           length="For the Discord event: how long it runs, e.g. 2h or 90m")
     async def slash_session(self, interaction: discord.Interaction, title: Optional[str] = None,
-                            when: Optional[str] = None, weekly: bool = False):
+                            when: Optional[str] = None, weekly: bool = False, description: Optional[str] = None,
+                            banner: Optional[discord.Attachment] = None,
+                            voice: Optional[Union[discord.VoiceChannel, discord.StageChannel]] = None,
+                            length: Optional[str] = None):
+        details: dict = {}
+        if description:
+            details["description"] = description[:800]
+        if voice is not None:
+            details["voice_id"] = voice.id
+        if length:
+            minutes = parse_length(length)
+            if minutes is None or not EVENT_MIN_MINUTES <= minutes <= EVENT_MAX_MINUTES:
+                return await self.reply(interaction, ephemeral=True, content=ui.line(
+                    ui.ASK, f"I couldn't use **{ui.truncate(length, 20)}** as a length.",
+                    hint="Try 2h, 90m or 1h30m, between 15 minutes and a day."))
+            details["minutes"] = minutes
+        if banner is not None:
+            await interaction.response.defer(ephemeral=True, thinking=True)   # downloading the banner
+            data, problem = await self.read_banner(banner)
+            if problem:
+                return await self.reply(interaction, content=problem, ephemeral=True)
+            details["banner_data"] = data
         if weekly:
-            return await self.create_recurring(interaction, f"every {when or ''} {title or ''}")
+            return await self.create_recurring(interaction, f"every {when or ''} {title or ''}", details)
         if when:
             guild, member, _ = who(interaction)
             tz, _, _ = await self.timezone_for(member)
@@ -4451,7 +4816,7 @@ class GameManager(commands.Cog):
                 return await self.reply(interaction, content=f"❓ I couldn't read the time **{when}**. Try `9pm`, "
                                                              "`friday 9pm`, `in 2h`, or `tomorrow 8:30pm`.",
                                         ephemeral=True)
-        await self.create_session(interaction, " ".join(p for p in (when, title) if p))
+        await self.create_session(interaction, " ".join(p for p in (when, title) if p), details)
 
     @slash.command(name="vote", description="Start a vote on what to play for this channel's latest session")
     @app_commands.describe(picks="How many games each person can pick", minutes="How long the vote runs")

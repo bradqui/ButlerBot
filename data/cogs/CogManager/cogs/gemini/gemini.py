@@ -256,15 +256,10 @@ class GeminiChat(commands.Cog):
             return await ctx.send(ui.line(ui.FAIL, "I couldn't get the model list from Google. Try again in a minute."))
         if not models:
             return await ctx.send(ui.line(ui.ASK, "Google didn't list any image models."))
-        # A card holds about 4,000 characters of text, so a long list goes over several cards.
-        pages = ui.split_text(", ".join(f"`{m}`" for m in models), 3500)
+        # One model a row; a long list pages with ◀ ▶.
         shortcuts = "Shortcuts: " + ", ".join(f"{a} = {m}" for a, m in self.model_aliases.items())
-        for i, page in enumerate(pages):
-            title = "🎨 Image models" + (f" ({i + 1}/{len(pages)})" if len(pages) > 1 else "")
-            last = i == len(pages) - 1
-            container = ui.card(page, ui.SEPARATOR if last else None, title=title, color=ui.BRAND,
-                                footer=shortcuts if last else None)
-            await ui.send_card(ctx, ui.CardView(container))
+        await ui.Board("🎨 Image models", [f"`{m}`" for m in models], color=ui.BRAND,
+                       footer=ui.truncate(shortcuts, 300)).send(ctx)
 
     @gemini.command(name="settings")
     async def show_settings(self, ctx):

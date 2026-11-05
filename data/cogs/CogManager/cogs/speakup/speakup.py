@@ -1029,9 +1029,9 @@ class SpeakUp(commands.Cog):
         lines = [f"`{r['id']}` · {stamp(r['due'])} ({stamp(r['due'], 'R')}): {ui.truncate(r['text'], 100)}"
                  for r in mine]
         p = ctx.clean_prefix
-        view = ui.CardView(ui.card(ui.truncate("\n".join(lines), 3600), title="⏰ Your reminders", color=ui.BRAND,
-                                   footer=f"`{p}reminders cancel <id>` · `{p}reminders clear`"))
-        await ui.send_card(ctx, view)   # ping-free (send_card's default): reminder text can hold mentions
+        board = ui.Board("⏰ Your reminders", lines, color=ui.BRAND,
+                         footer=f"`{p}reminders cancel <id>` · `{p}reminders clear`")
+        await board.send(ctx)   # ping-free (send_card's default): reminder text can hold mentions
 
     @reminders.command(name="cancel", aliases=["delete", "remove"])
     async def reminders_cancel(self, ctx: commands.Context, reminder_id: str):

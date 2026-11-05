@@ -75,11 +75,22 @@ WEEKDAY_INPUT = {"mon": 0, "monday": 0, "tue": 1, "tues": 1, "tuesday": 1, "wed"
 MEDALS = ["🥇", "🥈", "🥉"]
 STAFF_HINT = "Staff only"       # footer on admin reports (they keep the normal colors)
 
-CHART_BG = "#313338"
-CHART_FG = "#dbdee1"
-CHART_GRID = "#4e5058"
-CHART_COLORS = ["#5865f2", "#57f287", "#fee75c", "#eb459e", "#ed4245", "#3ba55c"]
-CHART_GOOD, CHART_BAD = "#57f287", "#ed4245"   # e.g. joined / left
+# Charts have a transparent background, so one PNG has to read on Discord's light AND dark themes. Text, ticks and
+# grid are mid grey (MUTED), which has about 3.5:1 contrast on both. Line colors are the style palette's hues at a
+# middle lightness: the bright SUCCESS green and HIGHLIGHT yellow vanish on a white background, so charts use
+# Discord's deeper green and a darker gold. Every line after the first is dashed or dotted, so lines (green joins
+# vs. red leaves too) never rely on color alone.
+CHART_FG = "#80848e"            # ui.MUTED: labels, ticks, legend
+CHART_GRID = "#80848e"          # drawn faintly (CHART_GRID_ALPHA)
+CHART_GRID_ALPHA = 0.3
+CHART_COLORS = ["#5865f2", "#3ba55c", "#d4a20a", "#eb459e"]   # blurple (BRAND), green, gold, fuchsia
+CHART_STYLES = ["-", "--", ":", "-."]
+CHART_GOOD, CHART_BAD = "#3ba55c", "#ed4245"   # joined / left: green and red (DANGER)
+CHART_HEAT = "#5865f2"          # the heatmap ramps from transparent to solid blurple
+CHART_FONT = 12                 # points; the figure is small (6.4 in) so text stays legible when phones shrink it
+CHART_SMALL = 11                # legend and colorbar
+CHART_DPI = 150
+MAX_CHART_SERIES = 4            # lines in one chart, the total included
 
 MEMBER_REPORTS = ("overview", "channels", "channel", "top", "heatmap", "voice", "me", "games")
 ADMIN_REPORTS = ("active", "retention", "quiet", "joins", "dead_channels", "attendance", "commands", "unmet",
@@ -244,6 +255,21 @@ class Report:
     lines: List[str] = field(default_factory=list)
     chart: Optional[Callable[[], bytes]] = None   # draws a PNG; runs in a worker thread
     admin: bool = False
+    # Where the report's list starts: lines from here on are paged as board rows, and the lines before it (the
+    # summary) sit above the chart on every page. None means the whole report is summary.
+    rows_from: Optional[int] = None
+    alt: str = ""                                 # describes the chart for screen readers
+
+    def line_chart(self, days: List[date], series: Dict[str, List[float]], ylabel: str, what: str,
+                   colors: Optional[List[str]] = None):
+        """Attach a daily_chart (drawn later, in a worker thread) and its alt text."""
+        kwargs = {"colors": colors} if colors else {}
+        self.chart = lambda: daily_chart(days, series, ylabel, **kwargs)
+        self.alt = line_alt(days, series, what)
+
+    def start_list(self):
+        """Mark that the lines added from now on are the report's list."""
+        self.rows_from = len(self.lines)
 
 
 # ==========================================
@@ -284,23 +310,23 @@ class StatsDB:
 _chart_lock = threading.Lock()
 
 
-def _figure(width: float = 8, height: float = 3.6):
+def _figure(width: float = 6.4, height: float = 3.2):
     from matplotlib.figure import Figure   # imported lazily: only charts need it
-    fig = Figure(figsize=(width, height), dpi=110, facecolor=CHART_BG)
+    fig = Figure(figsize=(width, height), dpi=CHART_DPI)
+    fig.patch.set_alpha(0)
     ax = fig.add_subplot(111)
-    ax.set_facecolor(CHART_BG)
-    for side in ("top", "right"):
-        ax.spines[side].set_visible(False)
-    for side in ("left", "bottom"):
-        ax.spines[side].set_color(CHART_GRID)
-    ax.tick_params(colors=CHART_FG, labelsize=8)
+    ax.patch.set_alpha(0)
+    for spine in ax.spines.values():
+        spine.set_visible(False)
+    ax.tick_params(colors=CHART_FG, labelcolor=CHART_FG, labelsize=CHART_FONT, length=0, pad=6)
     return fig, ax
 
 
 def _png(fig) -> bytes:
+    """The figure as a PNG with a transparent background (Discord's theme shows through)."""
     buf = io.BytesIO()
     fig.tight_layout()
-    fig.savefig(buf, format="png", facecolor=fig.get_facecolor())
+    fig.savefig(buf, format="png", transparent=True, bbox_inches="tight", pad_inches=0.12)
     return buf.getvalue()
 
 
@@ -308,36 +334,129 @@ def daily_chart(days: List[date], series: Dict[str, List[float]], ylabel: str,
                 colors: Optional[List[str]] = None) -> bytes:
     """
     One line per series over days. The first series is drawn thickest (usually the total). `colors` overrides the
-    default palette when the colors mean something (green for joins, red for leaves).
+    default palette when the colors mean something (green for joins, red for leaves). Several lines get a legend
+    above the plot; one line needs none, since the y-axis label names it.
     """
-    from matplotlib.dates import AutoDateLocator, DateFormatter
+    from matplotlib.dates import AutoDateLocator, num2date
+    from matplotlib.ticker import FuncFormatter, MaxNLocator
     palette = colors or CHART_COLORS
     with _chart_lock:
         fig, ax = _figure()
-        ax.grid(axis="y", color=CHART_GRID, linewidth=0.5, alpha=0.6)
+        ax.grid(axis="y", color=CHART_GRID, linewidth=0.8, alpha=CHART_GRID_ALPHA)
+        ax.set_axisbelow(True)
         for i, (name, values) in enumerate(series.items()):
-            ax.plot(days, values, label=name, color=palette[i % len(palette)],
-                    linewidth=2.4 if i == 0 else 1.4, marker="o" if len(days) <= 14 else None, markersize=3)
-        ax.set_ylabel(ylabel, color=CHART_FG, fontsize=9)
+            ax.plot(days, values, label=ui.truncate(name, 18), color=palette[i % len(palette)],
+                    linestyle=CHART_STYLES[i % len(CHART_STYLES)], linewidth=3 if i == 0 else 2.2,
+                    marker="o" if len(days) <= 14 else None, markersize=5, solid_capstyle="round")
+        ax.set_ylabel(ylabel, color=CHART_FG, fontsize=CHART_FONT)
         ax.set_ylim(bottom=0)
-        ax.xaxis.set_major_locator(AutoDateLocator(maxticks=8))
-        ax.xaxis.set_major_formatter(DateFormatter("%b %d"))
+        ax.yaxis.set_major_locator(MaxNLocator(nbins=5, integer=True))
+        ax.xaxis.set_major_locator(AutoDateLocator(minticks=3, maxticks=6))
+        ax.xaxis.set_major_formatter(FuncFormatter(lambda x, _: short_date(num2date(x).date())))
         if len(series) > 1:
-            ax.legend(fontsize=8, facecolor=CHART_BG, edgecolor=CHART_GRID, labelcolor=CHART_FG, loc="upper left")
+            labels = [ui.truncate(n, 18) for n in series]
+            wide = len(series) > 3 or sum(len(n) for n in labels) > 30   # one row would be wider than the plot
+            ax.legend(loc="lower left", bbox_to_anchor=(0, 1.0), ncol=2 if wide else len(series), frameon=False,
+                      fontsize=CHART_SMALL, labelcolor=CHART_FG, borderaxespad=0.3, handlelength=2.4)
         return _png(fig)
 
 
 def heatmap_chart(grid: List[List[float]], tz_name: str) -> bytes:
+    """
+    Messages by weekday and hour as tiles. The color ramps from nearly transparent to solid blurple, so on a white
+    background busy tiles get darker and on a dark one they get brighter: either way, more color means busier.
+    """
+    from matplotlib.collections import PatchCollection
+    from matplotlib.colors import LinearSegmentedColormap, Normalize, to_rgb
+    from matplotlib.patches import Rectangle
+    from matplotlib.ticker import MaxNLocator
+    r, g, b = to_rgb(CHART_HEAT)
+    cmap = LinearSegmentedColormap.from_list("busy", [(r, g, b, 0.07), (r, g, b, 1.0)])
     with _chart_lock:
-        fig, ax = _figure(8, 3.2)
-        image = ax.imshow(grid, aspect="auto", cmap="magma", interpolation="nearest")
+        fig, ax = _figure(6.4, 3.4)
+        tiles = PatchCollection([Rectangle((h - 0.45, d - 0.45), 0.9, 0.9) for d in range(7) for h in range(24)],
+                                cmap=cmap, norm=Normalize(0, max(1, max(max(row) for row in grid))),
+                                linewidth=0)
+        tiles.set_array([grid[d][h] for d in range(7) for h in range(24)])
+        ax.add_collection(tiles)
+        ax.set_xlim(-0.6, 23.6)
+        ax.set_ylim(6.6, -0.6)   # Monday at the top
         ax.set_yticks(range(7), WEEKDAYS)
-        ax.set_xticks(range(0, 24, 3), [hour_label(h) for h in range(0, 24, 3)])
-        ax.set_xlabel(f"Hour of the day ({tz_name})", color=CHART_FG, fontsize=9)
-        bar = fig.colorbar(image, ax=ax, pad=0.02)
-        bar.ax.tick_params(colors=CHART_FG, labelsize=7)
-        bar.set_label("messages", color=CHART_FG, fontsize=8)
+        ax.set_xticks(range(0, 24, 4), [hour_label(h) for h in range(0, 24, 4)])
+        ax.set_xlabel(f"Hour of the day ({tz_name})", color=CHART_FG, fontsize=CHART_FONT)
+        bar = fig.colorbar(tiles, ax=ax, pad=0.02, fraction=0.05)
+        bar.outline.set_visible(False)
+        bar.ax.tick_params(colors=CHART_FG, labelcolor=CHART_FG, labelsize=CHART_SMALL, length=0)
+        bar.locator = MaxNLocator(nbins=4, integer=True)
+        bar.update_ticks()
+        bar.set_label("messages", color=CHART_FG, fontsize=CHART_SMALL)
         return _png(fig)
+
+
+def line_alt(days: List[date], series: Dict[str, List[float]], what: str) -> str:
+    """Alt text for a daily_chart: what it shows, the dates, the lines, and the first line's peak."""
+    if not days:
+        return f"Line chart of {what}."
+    text = f"Line chart of {what} per day, {short_date(days[0])} to {short_date(days[-1])}"
+    if len(series) > 1:
+        text += ". Lines: " + ", ".join(series)
+    name, values = next(iter(series.items()))
+    if values and max(values):
+        peak = max(range(len(values)), key=lambda i: values[i])
+        text += f". {name} peaked at {values[peak]:,g} on {short_date(days[peak])}"
+    return ui.truncate(text + ".", 1000)
+
+
+# ==========================================
+#              REPORT LAYOUT
+# ==========================================
+
+ROW_ROOM = 450        # a longer list line (e.g. 25 names) is split onto several board rows, between names
+HEAD_ROOM = 600       # a summary longer than this (above a list) goes into the paged rows too
+HEAD_ALONE_ROOM = 3400   # ...and a report with no list pages once its summary is longer than this
+COVERAGE_NOTE = "-# Tracking started"   # _coverage_note's lines start with this
+
+
+def split_row(line: str, room: int = ROW_ROOM) -> List[str]:
+    """
+    A list line as board rows of at most `room` characters. Long lines break at ", " (between names, so a mention
+    is never cut) and at line breaks; a small-print ("-# ") line stays small on its continuation rows.
+    """
+    if len(line) <= room:
+        return [line]
+    rows: List[str] = []
+    current = ""
+    for part in line.split("\n"):
+        small = "-# " if part.startswith("-# ") else ""
+        for i, name in enumerate(part.split(", ")):
+            sep = "" if not current else "\n" if i == 0 else ", "
+            if current and len(current) + len(sep) + len(name) >= room:   # leaves room for the comma
+                rows.append(current + ("," if i else ""))
+                current = (small if i else "") + name
+            else:
+                current += sep + name
+    rows.append(current)
+    return rows
+
+
+def report_layout(report: Report) -> Tuple[Optional[str], List[str]]:
+    """
+    (summary, rows) for a report's board. The "Tracking started …" note at the end of a list moves up
+    into the summary, so a full page of rows doesn't spill a lone note onto page 2.
+    """
+    lines = list(report.lines)
+    split = len(lines) if report.rows_from is None else report.rows_from
+    head, rows = lines[:split], lines[split:]
+    if report.rows_from is not None:
+        while len(rows) > 1 and rows[-1].startswith(COVERAGE_NOTE):
+            head.append(rows.pop())
+    room = HEAD_ROOM if rows else HEAD_ALONE_ROOM
+    if len("\n".join(head)) > room:   # too long to repeat on every page: page everything instead
+        head, rows = [], lines
+    out: List[str] = []
+    for row in rows:
+        out.extend(split_row(row))
+    return "\n".join(head) or None, out
 
 
 # ==========================================
@@ -649,7 +768,7 @@ class ActivityStats(commands.Cog):
     async def _coverage_note(self, guild: discord.Guild, since: float) -> Optional[str]:
         start = await self._data_start(guild)
         if start > since:
-            return f"-# Tracking started <t:{int(start)}:R>, so earlier days are empty."
+            return f"{COVERAGE_NOTE} <t:{int(start)}:R>, so earlier days are empty."
         return None
 
     # ==========================================
@@ -695,7 +814,7 @@ class ActivityStats(commands.Cog):
         if note := await self._coverage_note(guild, since):
             report.lines.append(note)
         days_list = day_range(since, now, tz)
-        report.chart = lambda: daily_chart(days_list, {"Messages": [daily[d] for d in days_list]}, "messages")
+        report.line_chart(days_list, {"Messages": [daily[d] for d in days_list]}, "messages", "messages")
         return report
 
     async def report_channels(self, viewer: Optional[discord.Member], guild: discord.Guild, days: int = 30) -> Report:
@@ -711,16 +830,17 @@ class ActivityStats(commands.Cog):
         total = sum(per_channel.values())
         report.lines.append(f"**{total:,}** messages in **{len(per_channel)}** channels, "
                             f"about **{total / days:,.0f}** a day.")
+        report.start_list()
         for cid, n in per_channel.most_common(15):
             report.lines.append(f"{self._channel_name(guild, cid)}: **{n:,}** ({n / days:,.1f}/day)")
         if note := await self._coverage_note(guild, since):
             report.lines.append(note)
         days_list = day_range(since, now, tz)
         series = {"All channels": [sum(per_day[c][d] for c in per_day) for d in days_list]}
-        for cid, _ in per_channel.most_common(5):
+        for cid, _ in per_channel.most_common(MAX_CHART_SERIES - 1):
             channel = guild.get_channel(cid)
             series[f"#{channel.name}" if channel else "#deleted"] = [per_day[cid][d] for d in days_list]
-        report.chart = lambda: daily_chart(days_list, series, "messages per day")
+        report.line_chart(days_list, series, "messages per day", "messages in the busiest channels")
         return report
 
     async def report_channel(self, viewer: discord.Member, channel_id: int, days: int = 30) -> Report:
@@ -746,7 +866,7 @@ class ActivityStats(commands.Cog):
         if note := await self._coverage_note(guild, since):
             report.lines.append(note)
         days_list = day_range(since, now, tz)
-        report.chart = lambda: daily_chart(days_list, {"Messages": [daily[d] for d in days_list]}, "messages per day")
+        report.line_chart(days_list, {"Messages": [daily[d] for d in days_list]}, "messages per day", "messages")
         return report
 
     async def report_top(self, viewer: discord.Member, channel_id: Optional[int] = None, days: int = 30) -> Report:
@@ -758,7 +878,7 @@ class ActivityStats(commands.Cog):
                 counts[uid] += n
         ranked = [(uid, n) for uid, n in counts.most_common() if guild.get_member(uid)]
         where = f" in #{getattr(guild.get_channel(channel_id), 'name', 'deleted')}" if channel_id else ""
-        report = Report(f"🏆 Top posters{where}: {period_label(days)}")
+        report = Report(f"🏆 Top posters{where}: {period_label(days)}", rows_from=0)
         for i, (uid, n) in enumerate(ranked[:TOP_COUNT]):
             report.lines.append(f"{MEDALS[i] if i < 3 else f'`{i + 1}.`'} <@{uid}>: **{n:,}**")
         mine = next((i for i, (uid, _) in enumerate(ranked) if uid == viewer.id), None)
@@ -797,6 +917,10 @@ class ActivityStats(commands.Cog):
         if note := await self._coverage_note(guild, since):
             report.lines.append(note)
         report.chart = lambda: heatmap_chart(grid, tz_name)
+        report.alt = ui.truncate(
+            f"Heatmap of messages by weekday (rows, Monday at the top) and hour of the day (columns), in {tz_name}. "
+            f"Stronger blue means busier. The busiest hour is {WEEKDAYS[slots[0][1]]} {hour_label(slots[0][2])}.",
+            1000)
         return report
 
     async def report_voice(self, viewer: discord.Member, days: int = 30) -> Report:
@@ -831,8 +955,8 @@ class ActivityStats(commands.Cog):
         if note := await self._coverage_note(guild, since):
             report.lines.append(note)
         days_list = day_range(since, now, tz)
-        report.chart = lambda: daily_chart(days_list, {"Voice hours": [round(daily[d], 1) for d in days_list]},
-                                           "hours in voice")
+        report.line_chart(days_list, {"Voice hours": [round(daily[d], 1) for d in days_list]}, "hours in voice",
+                          "hours in voice")
         return report
 
     async def report_me(self, viewer: discord.Member, member: discord.Member, days: int = 30) -> Report:
@@ -916,7 +1040,7 @@ class ActivityStats(commands.Cog):
         for uid, game, start, end in await self._game_rows(guild, since, now):
             seconds[game] += end - start
             players[game].add(uid)
-        report = Report(f"🎮 Most-played games: {period_label(days)}")
+        report = Report(f"🎮 Most-played games: {period_label(days)}", rows_from=0)
         if not await self.config.guild(guild).track_games():
             report.lines.append("Game tracking is turned off on this server.")
         elif not seconds:
@@ -966,7 +1090,8 @@ class ActivityStats(commands.Cog):
         report.lines.append(f"Out of **{humans}** members, **{pct(mau[-1], humans)}** were active this month.")
         if note := await self._coverage_note(guild, since - 29 * DAY):
             report.lines.append(note)
-        report.chart = lambda: daily_chart(days_list, {"Monthly": mau, "Weekly": wau, "Daily": dau}, "members")
+        report.line_chart(days_list, {"Monthly": mau, "Weekly": wau, "Daily": dau}, "members",
+                          "active members (monthly, weekly and daily)")
         return report
 
     async def report_retention(self, guild: discord.Guild, days: int = 90) -> Report:
@@ -1014,7 +1139,7 @@ class ActivityStats(commands.Cog):
         went_quiet = sorted((m for m in humans if earlier[m.id] >= QUIET_MIN_MESSAGES and not recent[m.id]),
                             key=lambda m: -earlier[m.id])
         lurkers = [m for m in humans if not recent[m.id] and m.id not in in_voice]
-        report = Report("🤫 Quiet members", admin=True)
+        report = Report("🤫 Quiet members", admin=True, rows_from=0)
         report.lines.append(f"**Went quiet** ({len(went_quiet)}): {QUIET_MIN_MESSAGES}+ messages 1–3 months ago, "
                             "none in the last 30 days.")
         report.lines.append(self._names(m.mention for m in went_quiet) or "-# Nobody.")
@@ -1053,9 +1178,8 @@ class ActivityStats(commands.Cog):
         if note := await self._coverage_note(guild, since):
             report.lines.append(note)
         days_list = day_range(since, now, tz)
-        report.chart = lambda: daily_chart(days_list, {"Joined": [joins[d] for d in days_list],
-                                                       "Left": [leaves[d] for d in days_list]}, "members",
-                                           colors=[CHART_GOOD, CHART_BAD])
+        report.line_chart(days_list, {"Joined": [joins[d] for d in days_list], "Left": [leaves[d] for d in days_list]},
+                          "members", "members joining and leaving", colors=[CHART_GOOD, CHART_BAD])
         return report
 
     async def report_dead_channels(self, guild: discord.Guild, days: int = 30) -> Report:
@@ -1070,7 +1194,7 @@ class ActivityStats(commands.Cog):
                 ts = max(ts, discord.utils.snowflake_time(channel.last_message_id).timestamp())
             if ts < now - days * DAY:
                 dead.append((ts, channel))
-        report = Report(f"🕸️ Channels with no posts in {days} days", admin=True)
+        report = Report(f"🕸️ Channels with no posts in {days} days", admin=True, rows_from=0)
         if not dead:
             report.lines.append("Every channel has had a post recently.")
         for ts, channel in sorted(dead, key=lambda x: x[0])[:30]:
@@ -1081,7 +1205,7 @@ class ActivityStats(commands.Cog):
         rows = await self.db.query(
             "SELECT title, start, joined, showed FROM game_sessions WHERE guild = ? ORDER BY start DESC LIMIT ?",
             (guild.id, max(1, min(count, 25))))
-        report = Report("🎲 Game night attendance", admin=True)
+        report = Report("🎲 Game night attendance", admin=True, rows_from=0)
         if not rows:
             report.lines.append("No game sessions recorded yet. Sessions are recorded when they end.")
             return report
@@ -1125,6 +1249,7 @@ class ActivityStats(commands.Cog):
                 failures[command] += n
         report = Report(f"🛠️ Command usage: {period_label(days)}", admin=True)
         report.lines.append(f"**{sum(uses.values()):,}** commands run by members.")
+        report.start_list()
         for command, n in uses.most_common(15):
             name = command if command.startswith("/") else f"{prefix}{command}"
             report.lines.append(f"`{name}`: **{n:,}**" + (f" ({failures[command]} failed)" if failures[command] else ""))
@@ -1155,7 +1280,7 @@ class ActivityStats(commands.Cog):
         rows = await self.db.query(
             "SELECT user, question, ts FROM unmet_questions WHERE guild = ? AND ts >= ? ORDER BY ts DESC LIMIT 25",
             (guild.id, int(time.time() - days * DAY)))
-        report = Report(f"🔎 Guide questions with no matching command: {period_label(days)}", admin=True)
+        report = Report(f"🔎 Guide questions with no matching command: {period_label(days)}", admin=True, rows_from=0)
         if not rows:
             report.lines.append("None. The guide found a command for every question.")
         for uid, question, ts in rows:
@@ -1182,6 +1307,7 @@ class ActivityStats(commands.Cog):
                                 "games.")
         missing = [m.mention for m in humans if not sizes[m.id]]
         if missing:
+            report.start_list()
             report.lines.append(f"**No library yet:** {self._names(missing)}")
         return report
 
@@ -1242,7 +1368,7 @@ class ActivityStats(commands.Cog):
         if dead.lines and not dead.lines[0].startswith("Every"):
             report.lines.append(f"🕸️ **{len(dead.lines)}** channels with no posts in 30 days")
         days_list = day_range(week, now, tz)
-        report.chart = lambda: daily_chart(days_list, {"Messages": [daily[d] for d in days_list]}, "messages")
+        report.line_chart(days_list, {"Messages": [daily[d] for d in days_list]}, "messages", "messages")
         return report
 
     # ==========================================
@@ -1371,30 +1497,31 @@ class ActivityStats(commands.Cog):
     #                  OUTPUT
     # ==========================================
 
-    async def _report_embed(self, report: Report, footer: Optional[str] = None
-                            ) -> Tuple[discord.Embed, Optional[discord.File]]:
-        description = "\n".join(report.lines) or "Nothing to show yet."
-        # Admin reports keep the normal color and say "Staff only" in the footer instead.
-        embed = discord.Embed(title=report.title, description=ui.truncate(description, 4000), color=ui.BRAND)
-        footer = " · ".join(part for part in (STAFF_HINT if report.admin else None, footer) if part)
-        if footer:
-            embed.set_footer(text=footer)
-        file = None
+    async def _report_card(self, report: Report, footer: Optional[str] = None
+                           ) -> Tuple[ui.Board, Optional[discord.File]]:
+        """
+        A report as a board (a card that pages): the summary, then the chart, then the list, 15 rows a page.
+        Returns the board and the chart file, which must be sent with it (a card hides files it doesn't show).
+        """
+        head, rows = report_layout(report)
+        file = media = None
         if report.chart is not None:
             try:
                 data = await asyncio.to_thread(report.chart)
-                file = discord.File(io.BytesIO(data), filename="stats.png")
-                embed.set_image(url="attachment://stats.png")
+                file = discord.File(io.BytesIO(data), filename="stats.png", description=report.alt or None)
+                media = ui.image("attachment://stats.png", description=ui.truncate(report.alt or "Chart", 1000))
             except Exception:
                 log.exception("Couldn't draw a stats chart")
-        return embed, file
+        # Admin reports keep the normal color and say "Staff only" in the footer instead.
+        footer = " · ".join(part for part in (STAFF_HINT if report.admin else None, footer) if part) or None
+        board = ui.Board(report.title, rows, color=ui.BRAND, header=head, footer=footer, media=media,
+                         empty="" if head else "Nothing to show yet.")
+        return board, file
 
-    async def _send(self, ctx: commands.Context, report: Report, footer: Optional[str] = None):
-        embed, file = await self._report_embed(report, footer)
-        kwargs = {"embed": embed}
-        if file is not None:
-            kwargs["file"] = file
-        await ctx.send(**kwargs)
+    async def _send(self, target, report: Report, footer: Optional[str] = None):
+        """Send a report card to a Context or channel. Nothing in it pings."""
+        board, file = await self._report_card(report, footer)
+        await board.send(target, **({"file": file} if file is not None else {}))
 
     async def _channel_id(self, ctx: commands.Context, channel) -> Optional[int]:
         """The tracked channel ID for a channel argument, or None after telling the user it's unavailable."""
@@ -1691,8 +1818,8 @@ class ActivityStats(commands.Cog):
     async def digest_channel(self, ctx: commands.Context, channel: discord.TextChannel):
         """Choose where the digest is posted. Pick an admin-only channel."""
         perms = channel.permissions_for(ctx.guild.me)
-        if not (perms.send_messages and perms.embed_links and perms.attach_files):
-            return await ctx.send(f"❌ I need to send messages, embeds and files in {channel.mention}.")
+        if not (perms.send_messages and perms.attach_files):
+            return await ctx.send(f"❌ I need to send messages and attach files in {channel.mention}.")
         await self.config.guild(ctx.guild).digest_channel.set(channel.id)
         note = "" if not channel.permissions_for(ctx.guild.default_role).view_channel else (
             "\n⚠️ Everyone can see that channel, and the digest includes admin-only stats.")
@@ -1746,5 +1873,4 @@ class ActivityStats(commands.Cog):
         if channel is None:
             return
         await self.config.guild(guild).digest_last.set(due_day.isoformat())
-        embed, file = await self._report_embed(await self.report_digest(guild))
-        await channel.send(embed=embed, **({"file": file} if file else {}))
+        await self._send(channel, await self.report_digest(guild))

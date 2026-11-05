@@ -186,16 +186,19 @@ def fit(text: str, limit: int) -> str:
     return text + "\n```" if text.count("```") % 2 else text
 
 
-def fit_lines(lines: List[str], room: int, *, limit: Optional[int] = None, more: str = "…and {n} more") -> str:
-    """As many whole lines as fit in `room` characters (and at most `limit`), then a count of the rest."""
-    shown, used = [], 0
-    for i, entry in enumerate(lines):
-        if used + len(entry) + 1 > room or (limit is not None and i >= limit):
-            shown.append(more.format(n=len(lines) - i))
+def rows_per_page(lines: List[str], room: int) -> int:
+    """
+    How many rows a help board can show a page so that no page's rows go over `room` characters. A board budgets
+    about 3,400 characters for its rows alone, but a help card's header (usage, description) shares the card's
+    4,000, so a long header needs shorter pages.
+    """
+    per_page = ui.PAGE_SIZE
+    while per_page > 3:
+        # Any run of rows, not just the first page's: the board may also break a page early by size.
+        if all(sum(len(r) + 1 for r in lines[i:i + per_page]) <= room for i in range(len(lines))):
             break
-        shown.append(entry)
-        used += len(entry) + 1
-    return "\n".join(shown)
+        per_page -= 1
+    return per_page
 
 
 def anchor(command: commands.Command) -> str:
@@ -334,6 +337,20 @@ class Handbook(commands.Cog):
                             footer=HELP_FOOTER.format(p=ctx.clean_prefix))
         return await ui.send_card(ctx, ui.CardView(container))
 
+    async def _send_board(self, ctx: commands.Context, header: Optional[str], rows: List[str], *, title: str,
+                          links: List[Tuple[str, str]], empty: str = "No commands.", divider: bool = False):
+        """
+        A help card whose command lines page with ◀ ▶; the link buttons sit beside the arrows. Ping-free.
+        `divider` puts a line between the header and the rows (the board's media slot, which every page repeats).
+        """
+        footer = HELP_FOOTER.format(p=ctx.clean_prefix)
+        # Room for one page of rows: the card's ~4,000 characters less the title, header and footer.
+        room = 3800 - len(title) - len(header or "") - len(footer) - len("Page 99 of 99 · ")
+        board = ui.Board(title, rows, color=ui.BRAND, header=header, footer=footer, empty=empty,
+                         per_page=rows_per_page(rows, max(room, 600)), extra=self._link_buttons(links),
+                         media=discord.ui.Separator() if divider else None)
+        return await board.send(ctx)
+
     # ---------- cards ----------
 
     async def _is_staff(self, ctx: commands.Context) -> bool:
@@ -368,21 +385,20 @@ class Handbook(commands.Cog):
                                                  for a in command.aliases))
         head = f"`{usage(command, prefix)}`\n" + " · ".join(meta)
         text = fit(fill(command.help, prefix, bot_name), 1500) or "No description."
-        subs_text = None
-        if isinstance(command, commands.Group):
-            subs = visible_commands(command)
-            if subs:
-                lines = [f"`{s.name}`: {ui.truncate(fill(s.short_doc, prefix, bot_name), 90)}" for s in subs]
-                # A card holds about 4,000 characters of text in all: list what fits and count the rest.
-                subs_text = (f"**Subcommands** · `{prefix}{command.qualified_name} <subcommand>`\n"
-                             + fit_lines(lines, max(3400 - len(head) - len(text), 300), limit=25))
         links = []
         topic = self.topic_for(command, None)
         if topic:
             links.append(("Open handbook page", await self.topic_url(topic)))
         if not owner_only:
             links.append(("Open the reference", await self.reference_url(command.cog, command)))
-        await self._send_card(ctx, head, text, subs_text, title=f"📖 {prefix}{command.qualified_name}", links=links)
+        title = f"📖 {prefix}{command.qualified_name}"
+        subs = visible_commands(command) if isinstance(command, commands.Group) else []
+        if not subs:
+            return await self._send_card(ctx, head, text, title=title, links=links)
+        # A group's subcommands page with ◀ ▶ under the usage and description, which every page repeats.
+        lines = [f"`{s.name}`: {ui.truncate(fill(s.short_doc, prefix, bot_name), 90)}" for s in subs]
+        header = f"{head}\n\n{text}\n\n**Subcommands** · `{prefix}{command.qualified_name} <subcommand>`"
+        await self._send_board(ctx, header, lines, title=title, links=links)
 
     async def send_cog_card(self, ctx: commands.Context, cog: commands.Cog):
         prefix, bot_name = ctx.clean_prefix, self._bot_name(ctx)
@@ -395,15 +411,14 @@ class Handbook(commands.Cog):
             note = "" if who == "everyone" else f" *({who})*"
             lines.append(f"`{prefix}{command.qualified_name}`: "
                          f"{ui.truncate(fill(command.short_doc, prefix, bot_name), 100)}{note}")
-        # A card holds about 4,000 characters of text: list what fits and count the rest.
-        listed = fit_lines(lines, 3300 - len(about), more="…and {n} more in the command reference.")
         links = []
         topic = self.topic_for(None, cog)
         if topic:
             links.append(("Open handbook page", await self.topic_url(topic)))
         links.append(("Open the reference", await self.reference_url(cog)))
-        await self._send_card(ctx, about, ui.SEPARATOR if about and listed else None,
-                              listed or "No commands.", title=f"📖 {friendly_name(cog)}", links=links)
+        # The commands page with ◀ ▶ under the category's description, which every page repeats.
+        await self._send_board(ctx, about or None, lines, title=f"📖 {friendly_name(cog)}", links=links,
+                               divider=bool(about))
 
     async def send_not_found(self, ctx: commands.Context, text: str):
         names = [c.qualified_name for c in self.bot.walk_commands() if not c.hidden] + list(self.bot.cogs)

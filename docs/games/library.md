@@ -35,7 +35,9 @@ Run it again any time to update things. Menus like this expire after a while: th
 | `!games uninstall [games]` | Mark games not installed. They stay in your library. |
 | `!games mygames` | Your library, favorites first (💾 = installed). |
 | `!games usergames <member>` | Someone else's library. |
-| `!games list` / `!games search <text>` | The whole server library. |
+| `!games list` / `!games search <text>` | The whole server library, with how many people own and have installed each game. |
+
+Long lists show 15 games at a time. Anyone can page through them with ◀ ▶ for 15 minutes after they're posted. `/games library` and `/games wishlist` show your own list just to you.
 
 **Name matching:**
 - Names match loosely: "counterstrike 2" finds "Counter-Strike 2".
@@ -69,7 +71,7 @@ Before a new game is requested or added, ButlerBot looks up its proper title:
 | `!games want <games>` | Add games you want (any Steam game, even ones not in the server library). |
 | `!games unwant <game>` | Remove one. |
 | `!games wishlist [member]` | Your wishlist with current Steam prices. |
-| `!games wanted` | The server's most-wanted games, and which are on sale. |
+| `!games wanted` | The server's most-wanted games, who wants each one, and which are on sale. People who already own a game don't count. |
 
 **Sale alerts:**
 - When sale alerts are on, ButlerBot checks Steam prices every few hours.

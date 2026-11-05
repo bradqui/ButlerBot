@@ -216,6 +216,12 @@ AI answers, adventure narration and butler replies stay plain text, split with `
 - **`settings_text([(name, value)])`** writes `**Name** · value` rows, with On/Off for booleans.
 - **`send_card(target, view, ephemeral=…, reply_to=…)`** sends to a Context, channel, user or interaction.
 - **`is_card(message)`** tells you whether a message is a card.
+- **`Board(title, rows, *, color, header, footer, per_page=15, media, empty, owner_id=None, timeout=900, extra)`** is a paged card (Phase 3). Send it with `await board.send(target, ephemeral=…)`.
+  - Anyone can page it with ◀ ▶. Paging redraws the same message, and the custom IDs are stable per board.
+  - A single page has no buttons and no timeout.
+  - Pages also break by size, at about 3,400 characters of rows.
+  - On timeout the buttons grey out, with "Run the command again to page through it."
+- **`image(url, description)`** puts a picture in a card. For an uploaded file, use `"attachment://name.png"` and send the file with the card. A card hides attachments it doesn't reference.
 
 Rules for card messages:
 - **They can't have content or embeds**, and Discord never lets a message switch back. Persistent features switch for new messages only, and their handlers must check `is_card(interaction.message)` and edit older embed messages the old way.
@@ -294,6 +300,32 @@ Rules for card messages:
 - **Claude:** `!claude settings`, `models` and `usage` are cards. Usage for another member, and the server totals, carry "Staff only". The persona is shown in full only by `!claude persona`, as text.
 - **Gemini:** `!gemini settings` is the "🎨 Image settings" card. `!gemini list` sends one card per 3,500 characters.
 - **Tests:** the scratchpad harness checks every card sent or edited against Discord's limits. Problems print as `LAYOUT PROBLEMS` at the end of a run.
+
+**Phase 3 notes (boards, 2026-11-05).** These replace the Phase 2 notes that said lists, reports and the digest were still embeds.
+- **GameManager:**
+  - `send_list(target, items, title, footer, ephemeral, *, header, empty)` posts a `ui.Board`. An empty list sends a ❓ line unless `empty=` is passed.
+  - Private boards sent through an interaction time out at `LIST_PRIVATE_TIMEOUT` (840 s), before the 15-minute token dies; others at `LIST_TIMEOUT` (900 s).
+  - `library_rows()` writes `Name 💾 · N own, M installed` and counts current members only.
+  - Every list title uses 🎮, and vote tallies use 🗳️. `top` and `wanted` have no cap; paging handles the length.
+- **ActivityStats:**
+  - **Rendering:** reports and the digest are boards built by `_report_card(report, footer) -> (Board, file)`. The chart is `attachment://stats.png` with alt text from `Report.alt`.
+  - **Paging:** `Report.rows_from` and `start_list()` mark where the paged list starts, and the lines before it repeat on every page. `split_row` (`ROW_ROOM` 450) breaks long rows only at ", ".
+  - **Charts:** transparent background, `#80848E` text and 12 pt ticks, 960 px wide.
+    - Line colors come from `CHART_COLORS`/`CHART_STYLES`: blurple, then deeper green `#3BA55C` and gold `#D4A20A`, then fuchsia, dashed or dotted after the first. The bright palette green and gold vanish on white.
+    - A chart shows at most 4 lines (`MAX_CHART_SERIES`).
+    - Joins are `CHART_GOOD` and leaves `CHART_BAD`.
+    - The heatmap is a blurple opacity ramp, which stays monotonic on both themes.
+  - **Digest:** its channel needs Send Messages and Attach Files.
+- **ButlerFun:**
+  - `maketrivia show` is a 🧠 board. Rows come from `trivia_row()`: the question is cut at 420 characters and the answer at 150, so a spoiler is never split. The `.txt` file is gone.
+  - The no-name version is the "🧠 Trivia lists" board.
+  - `guessgame top` is a HIGHLIGHT board of every winner.
+- **SpeakUp:** `!reminders` is a board.
+- **Handbook:**
+  - Help for groups and cogs is a board from `_send_board()`. The header repeats on each page, link buttons go in `extra`, and the cog card's divider goes in `media`.
+  - `rows_per_page()` replaced `fit_lines()`. Plain command cards and the home card are single cards.
+- **Gemini:** `!gemini list` is one board.
+- **Claude:** `usage` and `models` stay cards, since neither can pass one page.
 
 ## Secrets (never print, log, or copy out)
 

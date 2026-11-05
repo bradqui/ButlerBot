@@ -13,7 +13,7 @@ permalink: /games/nights/
 |---|---|
 | `!games shared [members…]` | Games everyone named owns. With no names, uses everyone in the channel who has a library. |
 | `!games installed [members…]` | Games everyone named has installed, ready to go. |
-| `!games top [installed] [shared]` | The channel's favorites, by everyone's rankings. |
+| `!games top [installed] [shared]` | The channel's favorites, by everyone's rankings, with how many own and have installed each one. Page through with ◀ ▶. |
 | `!games whoowns <game>` / `!games whoinstalled <game>` | Who has a game. |
 | `!games lfg <game>` | Pings everyone who has the game installed ("looking for group"). Once per 5 minutes. |
 

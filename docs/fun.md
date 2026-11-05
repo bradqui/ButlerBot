@@ -55,7 +55,7 @@ To answer, just type in the channel; capitalization doesn't matter.
 !maketrivia redo our games                throw it away and write it again
 ```
 
-`show` reveals the answers, so run it somewhere players won't see it. A failed `redo` leaves the old quiz as it was.
+`show` reveals the answers, so run it somewhere players won't see it. Long quizzes page 15 questions at a time with ◀ ▶. A failed `redo` leaves the old quiz as it was.
 
 {: .staff }
 > **Trivia settings** (mods): `!triviaset maxscore`, `timelimit`, `stopafter`, `revealanswer`, `usespoilers`, `botplays`, `showsettings`.

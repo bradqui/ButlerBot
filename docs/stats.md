@@ -21,6 +21,8 @@ See how the server is doing: which channels are busy, when people are around, wh
 
 **Periods** look like `week`, `month`, `year`, `90d`, `2 weeks` or `all`. For example: `!stats top week`, `!stats heatmap #general month`.
 
+Long reports, such as a full channel list, come in pages: flip through them with ◀ ▶. Anyone can page a report. After 15 minutes the buttons stop working, so run the command again.
+
 Or ask in plain English: `!butler when is voice busiest?`
 
 ## Privacy

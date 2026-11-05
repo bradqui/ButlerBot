@@ -344,6 +344,95 @@ class ExpiringCard(CardView):
         await edit_quietly(self.message, view=self)
 
 
+def image(url: str, description: Optional[str] = None) -> discord.ui.MediaGallery:
+    """An image inside a card. For an uploaded file use "attachment://<filename>" and send the file with the card."""
+    return discord.ui.MediaGallery(discord.MediaGalleryItem(url, description=description))
+
+
+# ==========================================
+#                  BOARDS
+# ==========================================
+
+PAGE_SIZE = 15
+_BOARD_TEXT_ROOM = 3400   # characters of rows per page, leaving room for title, header and footer
+
+
+class Board(ExpiringCard):
+    """
+    A card that pages through rows with ◀ ▶ (15 a page). Anyone can page it: it's the same list for everyone, and
+    paging just redraws the message. One page means no buttons and no timeout. `header` goes above the rows on every
+    page, `media` (e.g. image(...)) under the header. Send with `await board.send(target)`.
+    """
+
+    expired_note = "Run the command again to page through it."
+
+    def __init__(self, title: Optional[str], rows: List[str], *, color: discord.Color = BRAND,
+                 header: Optional[str] = None, footer: Optional[str] = None, per_page: int = PAGE_SIZE,
+                 media: Optional[discord.ui.Item] = None, empty: str = "Nothing to show yet.",
+                 owner_id: Optional[int] = None, timeout: Optional[float] = 900, extra: Optional[list] = None):
+        self.title, self.color, self.header, self.footer, self.media = title, color, header, footer, media
+        self.empty, self.extra = empty, list(extra or [])
+        overhead = sum(len(part or "") for part in (title, header, footer)) + 40   # "Page x of y · " and markup
+        self.pages = self.paginate(rows, per_page, max(1000, _BOARD_TEXT_ROOM - overhead))
+        self.page = 0
+        single = len(self.pages) <= 1
+        super().__init__(owner_id, timeout=None if single else timeout)
+        self._key = f"board:{id(self)}"
+        self.redraw()
+
+    @staticmethod
+    def paginate(rows: List[str], per_page: int, room: int = _BOARD_TEXT_ROOM) -> List[List[str]]:
+        """Split rows into pages of at most `per_page`, also keeping each page's text within `room` characters."""
+        pages: List[List[str]] = []
+        current: List[str] = []
+        size = 0
+        for row in rows:
+            row = truncate(row, 600)
+            if current and (len(current) >= per_page or size + len(row) + 1 > room):
+                pages.append(current)
+                current, size = [], 0
+            current.append(row)
+            size += len(row) + 1
+        if current:
+            pages.append(current)
+        return pages
+
+    def build(self) -> discord.ui.Container:
+        many = len(self.pages) > 1
+        body = "\n".join(self.pages[self.page]) if self.pages else self.empty
+        footer_parts = []
+        if many:
+            footer_parts.append(f"Page {self.page + 1} of {len(self.pages)}")
+        if self.footer:
+            footer_parts.append(self.footer)
+        nav = []
+        if many:
+            prev = discord.ui.Button(emoji="◀️", style=discord.ButtonStyle.secondary,
+                                     custom_id=f"{self._key}:prev", disabled=self.page == 0)
+            nxt = discord.ui.Button(emoji="▶️", style=discord.ButtonStyle.secondary,
+                                    custom_id=f"{self._key}:next", disabled=self.page >= len(self.pages) - 1)
+            prev.callback = self._go(-1)
+            nxt.callback = self._go(1)
+            nav = [prev, nxt]
+        buttons = nav + self.extra
+        return card(self.header, self.media, body, SEPARATOR if buttons else None, buttons or None,
+                    title=self.title, color=self.color, footer=" · ".join(footer_parts) or None)
+
+    def _go(self, step: int):
+        async def callback(interaction: discord.Interaction):
+            self.page = max(0, min(len(self.pages) - 1, self.page + step))
+            self.redraw()
+            await interaction.response.edit_message(view=self, allowed_mentions=NO_PINGS)
+        return callback
+
+    async def send(self, target, *, ephemeral: bool = False, **kwargs):
+        """Send the board (see send_card) and remember the message so it can expire."""
+        message = await send_card(target, self, ephemeral=ephemeral, **kwargs)
+        # A private response or followup comes back as a message that can be edited with the interaction's token.
+        self.message = message if message is not None else target
+        return message
+
+
 def is_card(message: Optional[discord.Message]) -> bool:
     """True if a message was sent as a card (Components V2). Old embed messages must be edited the old way."""
     flags = getattr(message, "flags", None)

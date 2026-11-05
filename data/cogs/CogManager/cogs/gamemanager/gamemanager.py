@@ -60,7 +60,8 @@ REMINDER_MINUTES = 15           # heads-up ping before a scheduled session
 SESSION_EXPIRE_HOURS = 12       # sessions end on their own this long after starting (or being created)
 LFG_COOLDOWN_SECONDS = 300
 PICKER_PAGE_SIZE = 25           # Discord's limit for one select menu
-LIST_PAGE_SIZE = 40             # lines per embed in long lists
+LIST_TIMEOUT = 900              # seconds a list board can be paged before its buttons grey out
+LIST_PRIVATE_TIMEOUT = 840      # private boards expire before their 15-minute interaction token does
 
 PING = discord.AllowedMentions(everyone=False, roles=False, users=True)   # plain-text pings: reminders, LFG, winners
 # Cards that ping (vote, sale alert, install request) pass pings([...]) with exactly the people meant.
@@ -1468,19 +1469,40 @@ class GameManager(commands.Cog):
         return await ui.send_card(target, view, ephemeral=ephemeral, allowed_mentions=allowed_mentions or NO_PING)
 
     async def send_list(self, target: Target, items: List[str], title: str, footer: Optional[str] = None,
-                        ephemeral: bool = False):
-        if not items:
+                        ephemeral: bool = False, *, header: Optional[str] = None,
+                        empty: Optional[str] = None) -> Optional[ui.Board]:
+        """
+        Post a list as a board: one card that pages 15 rows at a time with ◀ ▶ (anyone can page it). Rows are one
+        line each. `footer` follows "Page x of y"; `header` sits above the rows on every page. Mentions in rows never
+        ping. With no rows it's a ❓ line, unless `empty` is given (then the board shows that text instead).
+        """
+        if not items and empty is None:
             await self.reply(target, content=ui.line(ui.ASK, "Nothing to show."), ephemeral=ephemeral)
-            return
-        embeds = []
-        for i in range(0, len(items), LIST_PAGE_SIZE):
-            embed = discord.Embed(title=title if i == 0 else f"{title} (continued)",
-                                  description="\n".join(items[i:i + LIST_PAGE_SIZE]), color=ui.BRAND)
-            if i + LIST_PAGE_SIZE >= len(items):
-                embed.set_footer(text=footer or f"Total: {len(items)}")
-            embeds.append(embed)
-        for i in range(0, len(embeds), 10):
-            await self.reply(target, embeds=embeds[i:i + 10], ephemeral=ephemeral)
+            return None
+        # A private reply can only be edited while its interaction token lasts (15 minutes), so it expires a bit sooner.
+        private = ephemeral and isinstance(target, discord.Interaction)
+        board = ui.Board(ui.truncate(title, 100), items, header=header, footer=footer,
+                         empty=empty or "Nothing to show yet.",
+                         timeout=LIST_PRIVATE_TIMEOUT if private else LIST_TIMEOUT)
+        await board.send(target, ephemeral=ephemeral, allowed_mentions=NO_PING)
+        return board
+
+    async def library_rows(self, guild: discord.Guild, viewer: discord.abc.User, games: List[dict]) -> List[str]:
+        """Board rows for server games: `Name 💾 · 4 own, 3 installed` (💾 = the viewer has it installed)."""
+        users = await self.config.guild(guild).users()
+        owners, installers = Counter(), Counter()
+        for uid, data in users.items():
+            if guild.get_member(int(uid)) is None:
+                continue   # people who left aren't counted
+            installed = set(data.get("installed", []))
+            installers.update(installed)
+            owners.update(set(data.get("owned", [])) | installed)   # installing implies owning
+        mine = set(users.get(str(viewer.id), {}).get("installed", []))
+        rows = []
+        for g in games:
+            counts = f"{owners[g['id']]} own" + (f", {installers[g['id']]} installed" if installers[g["id"]] else "")
+            rows.append(g["name"] + (f" {INSTALLED}" if g["id"] in mine else "") + f" · {counts}")
+        return rows
 
     async def find_game(self, target: Target, name: str, ephemeral: bool = False) -> Optional[dict]:
         """Resolve a game name, or explain to the user why it couldn't be."""
@@ -1824,9 +1846,9 @@ class GameManager(commands.Cog):
         items = []
         for gid in owned:
             name = games[gid]["name"] + (f" {INSTALLED}" if gid in installed else "")
-            items.append(f"{ranks[gid]}. {name}" if ranks.get(gid) else f"- {name}")
+            items.append(f"**{ranks[gid]}.** {name}" if ranks.get(gid) else name)
         count = len([g for g in owned if g in installed])
-        await self.send_list(target, items, f"{member.display_name}'s library",
+        await self.send_list(target, items, f"🎮 {member.display_name}'s library",
                              f"{len(owned)} owned · {count} installed · {INSTALLED} = installed", ephemeral)
 
     async def set_rank(self, target: Target, rank: int, name: str, ephemeral: bool = False):
@@ -1864,17 +1886,18 @@ class GameManager(commands.Cog):
             member = guild.get_member(int(uid))
             if member is not None:
                 mark = f" {INSTALLED}" if has_installed and not installed_only else ""
-                rows.append((member.display_name.lower(), f"- {member.display_name}{mark}"))
+                rows.append((member.display_name.lower(), f"{member.display_name}{mark}", has_installed))
         if not rows:
             verb = "has it installed" if installed_only else "owns it"
             return await self.reply(target, content=f"❓ Nobody {verb} yet: **{game['name']}**.")
         rows.sort()
         if installed_only:
-            await self.send_list(target, [r[1] for r in rows], f"Installed {game['name']}",
+            await self.send_list(target, [r[1] for r in rows], f"🎮 Who has {game['name']} installed",
                                  ui.plural(len(rows), "player"))
         else:
-            await self.send_list(target, [r[1] for r in rows], f"Own {game['name']}",
-                                 f"{ui.plural(len(rows), 'owner')} · {INSTALLED} = installed")
+            count = len([r for r in rows if r[2]])
+            await self.send_list(target, [r[1] for r in rows], f"🎮 Who owns {game['name']}",
+                                 f"{ui.plural(len(rows), 'owner')} · {count} installed · {INSTALLED} = installed")
 
     async def shared_games(self, target: Target, members: List[discord.Member], installed: bool):
         guild, author, channel = who(target)
@@ -1899,10 +1922,10 @@ class GameManager(commands.Cog):
             return await self.reply(target, content=f"❓ No game is {field} by all of: {names}.")
         mine = set(users.get(str(author.id), {}).get("installed", []))
         common.sort(key=lambda g: g["name"].lower())
-        items = [f"- {g['name']}" + (f" {INSTALLED}" if g["id"] in mine and not installed else "") for g in common]
-        title = "Installed by everyone" if installed else "Owned by everyone"
-        footer = f"{names}" + ("" if installed else f" · {INSTALLED} = you have it installed")
-        await self.send_list(target, items, title, footer[:2000])
+        items = [g["name"] + (f" {INSTALLED}" if g["id"] in mine and not installed else "") for g in common]
+        title = "🎮 Installed by everyone" if installed else "🎮 Owned by everyone"
+        footer = ui.plural(len(items), "game") + ("" if installed else f" · {INSTALLED} = you have it installed")
+        await self.send_list(target, items, title, footer, header=ui.truncate(f"With {names}", 200))
 
     async def top_games(self, target: Target, installed_only: bool, shared_only: bool):
         guild, author, channel = who(target)
@@ -1929,12 +1952,15 @@ class GameManager(commands.Cog):
         if not rows:
             return await self.reply(target, content="❓ No games match those filters.")
         rows.sort()
-        items = [f"**{i}.** {name}{f' {INSTALLED}' if is_mine else ''} (owned by {owners}/{len(member_ids)}, "
-                 f"installed by {inst})" for i, (_, _, _, name, owners, inst, is_mine) in enumerate(rows, 1)]
-        title = "Top games" + (" (installed by all owners)" if installed_only else "") + (" (owned by everyone)" if shared_only else "")
-        await self.send_list(target, items, title,
+        items = [f"**{i}.** {name}{f' {INSTALLED}' if is_mine else ''} · {owners}/{len(member_ids)} own"
+                 + (f", {inst} installed" if inst else "")
+                 for i, (_, _, _, name, owners, inst, is_mine) in enumerate(rows, 1)]
+        filters = [label for on, label in ((shared_only, "owned by everyone"),
+                                           (installed_only, "installed by every owner")) if on]
+        header = "Only games " + " and ".join(filters) + "." if filters else None
+        await self.send_list(target, items, "🎮 Top games",
                              f"Ranked by the rankings of {ui.plural(len(members), 'player')} · "
-                             f"{INSTALLED} = you have it installed")
+                             f"{INSTALLED} = you have it installed", header=header)
 
     async def lfg(self, target: Target, name: str):
         guild, member, _ = who(target)
@@ -2276,11 +2302,12 @@ class GameManager(commands.Cog):
             return await self.reply(target, ephemeral=ephemeral, content=(
                 f"⚠️ Your wishlist is empty. Add a game with {await self.cmd(guild, 'games want <game>')}." if mine
                 else f"❓ {member.display_name}'s wishlist is empty."))
-        items = [f"- [{e['name']}]({STEAM_APP_URL.format(e['appid'])})"
-                 + (f": {price_text(e['price'])}" if e.get("checked_at") else "") for e in wanted]
+        items = [f"[{e['name']}]({STEAM_APP_URL.format(e['appid'])})"
+                 + (f" · {price_text(e['price'])}" if e.get("checked_at") else "") for e in wanted]
         channel_id = await self.config.guild(guild).sale_channel()
-        footer = "Sale alerts are on" if channel_id else "Sale alerts aren't turned on in this server"
-        await self.send_list(target, items, f"⭐ {member.display_name}'s wishlist", footer, ephemeral)
+        alerts = "Sale alerts are on" if channel_id else "Sale alerts aren't turned on in this server"
+        await self.send_list(target, items, f"🎮 {member.display_name}'s wishlist",
+                             f"{ui.plural(len(items), 'game')} · {alerts}", ephemeral)
 
     async def most_wanted(self, target: Target):
         guild = who(target)[0]
@@ -2297,12 +2324,13 @@ class GameManager(commands.Cog):
             return await self.reply(target, content=f"❓ Nobody has a wishlist yet. Add a game with "
                                                     f"{await self.cmd(guild, 'games want <game>')}.")
         items = []
-        for _, _, entry, fans in sorted(rows)[:40]:
-            names = ", ".join(self._display(guild, u) for u in fans[:8]) + (" …" if len(fans) > 8 else "")
+        for _, _, entry, fans in sorted(rows, key=lambda r: r[:2]):
+            names = ", ".join(self._display(guild, u) for u in fans[:5]) + (" …" if len(fans) > 5 else "")
             sale = f" · **{entry['price']['discount']}% off**" if (entry.get("price") or {}).get("discount") else ""
-            items.append(f"**[{entry['name']}]({STEAM_APP_URL.format(entry['appid'])})**: "
-                         f"{len(fans)} ({names}){sale}")
-        await self.send_list(target, items, "⭐ Most-wanted games", "Number of people who want each game")
+            items.append(f"**[{entry['name']}]({STEAM_APP_URL.format(entry['appid'])})** · "
+                         f"wanted by {len(fans)}: {names}{sale}")
+        await self.send_list(target, items, "🎮 Most-wanted games",
+                             f"{ui.plural(len(items), 'game')} · owners aren't counted")
 
     async def check_sales(self, guild: discord.Guild) -> int:
         """Refresh wishlist prices and post one alert for games that went on sale (or got cheaper). Returns # alerted."""
@@ -3122,10 +3150,8 @@ class GameManager(commands.Cog):
         if not games:
             return await ctx.send(f"⚠️ No games have been added yet. Request one with "
                                   f"{await self.cmd(ctx.guild, 'games request <game>')}.")
-        mine = set((await self.config.guild(ctx.guild).users()).get(str(ctx.author.id), {}).get("installed", []))
-        items = [f"- {g['name']}" + (f" {INSTALLED}" if g["id"] in mine else "")
-                 for g in sorted(games.values(), key=lambda g: g["name"].lower())]
-        await self.send_list(ctx, items, "Server game library",
+        items = await self.library_rows(ctx.guild, ctx.author, sorted(games.values(), key=lambda g: g["name"].lower()))
+        await self.send_list(ctx, items, "🎮 Server library",
                              f"{ui.plural(len(items), 'game')} · {INSTALLED} = you have it installed")
 
     @games.command(name="search")
@@ -3137,10 +3163,9 @@ class GameManager(commands.Cog):
                          key=lambda g: g["name"].lower())
         if not matches:
             return await ctx.send(f"❓ No games match **{query}**.", allowed_mentions=NO_PING)
-        mine = set((await self.config.guild(ctx.guild).users()).get(str(ctx.author.id), {}).get("installed", []))
-        await self.send_list(ctx, [f"- {g['name']}" + (f" {INSTALLED}" if g["id"] in mine else "") for g in matches],
-                             f"Games matching '{query}'", f"{ui.plural(len(matches), 'game')} · "
-                                                          f"{INSTALLED} = you have it installed")
+        await self.send_list(ctx, await self.library_rows(ctx.guild, ctx.author, matches),
+                             f"🎮 Games matching “{ui.truncate(query, 60)}”",
+                             f"{ui.plural(len(matches), 'game')} · {INSTALLED} = you have it installed")
 
     @games.command(name="own", aliases=["ownadd", "addowned", "iown"])
     async def games_own(self, ctx: commands.Context, *, game_names: str = None):
@@ -3249,9 +3274,10 @@ class GameManager(commands.Cog):
         requests = await self.config.guild(ctx.guild).game_requests()
         if not requests:
             return await ctx.send("❓ No pending requests.")
-        items = [f"- **{r['name']}** (requested by <@{r['requested_by']}>)" for r in requests.values()]
-        await self.send_list(ctx, items, "Pending game requests",
-                             f"Game admins: approve with {await self.prefix(ctx.guild)}games admin approve <game>")
+        items = [f"**{r['name']}** · requested by <@{r['requested_by']}>" for r in requests.values()]
+        await self.send_list(ctx, items, "🎮 Game requests",
+                             f"{ui.plural(len(items), 'request')} · Game admins approve with "
+                             f"{await self.prefix(ctx.guild)}games admin approve <game>")
 
     @games.command(name="shared")
     async def games_shared(self, ctx: commands.Context, *members: str):
@@ -3359,9 +3385,9 @@ class GameManager(commands.Cog):
             status = " · 🗳️ voting" if s.get("vote_id") else (f" · 🏆 {s['winner']}" if s.get("winner") else "")
             link = self.session_link(ctx.guild, s)
             title = f"[{s['title']}]({link})" if link else s["title"]
-            items.append(f"- **{title}**{when} · host <@{s['host_id']}> · {len(s['participants'])} players{status} "
-                         f"· `{s['id']}`")
-        await self.send_list(ctx, items, "Active sessions")
+            items.append(f"**{title}**{when} · <@{s['host_id']}> hosting · "
+                         f"{ui.plural(len(s['participants']), 'player')}{status} · `{s['id']}`")
+        await self.send_list(ctx, items, "🎮 Active sessions", ui.plural(len(items), "session"))
 
     @games.command(name="endsession")
     async def games_endsession(self, ctx: commands.Context, session_id: str = None):
@@ -3389,9 +3415,11 @@ class GameManager(commands.Cog):
         names = vote.get("names") or {}
         games = await self.config.guild(ctx.guild).games()
         tallies = sorted(((c, g) for g, c in vote["tallies"].items() if c > 0), reverse=True)
-        items = [f"**{names.get(g) or games.get(g, {}).get('name', 'Unknown game')}**: {c}" for c, g in tallies]
-        await self.send_list(ctx, items or ["No votes yet."], f"Votes so far: {vote.get('title', '')}".strip(),
-                             f"{len(vote['user_votes'])} of {len(vote['allowed_voters'])} voted · ID {vote['id']}")
+        items = [f"**{names.get(g) or games.get(g, {}).get('name', 'Unknown game')}** · {ui.plural(c, 'vote')}"
+                 for c, g in tallies]
+        await self.send_list(ctx, items, f"🗳️ Votes so far: {vote.get('title', '')}".strip().rstrip(":"),
+                             f"{len(vote['user_votes'])} of {len(vote['allowed_voters'])} voted · ID {vote['id']}",
+                             empty="No votes yet.")
 
     @games.command(name="endvote")
     async def games_endvote(self, ctx: commands.Context, vote_id: str = None):
@@ -3411,11 +3439,11 @@ class GameManager(commands.Cog):
         """Show install requests from game admins and how many people have installed each game."""
         games = await self.config.guild(ctx.guild).games()
         requests = await self.config.guild(ctx.guild).install_requests()
-        items = [f"- **{games[r['game_id']]['name']}**: {len(r['installed_by'])}/{len(r['target_users'])} installed"
+        items = [f"**{games[r['game_id']]['name']}** · {len(r['installed_by'])}/{len(r['target_users'])} installed"
                  for r in requests.values() if r["game_id"] in games]
         if not items:
             return await ctx.send("❓ No install requests.")
-        await self.send_list(ctx, items, "Install requests")
+        await self.send_list(ctx, items, "🎮 Install requests", ui.plural(len(items), "request"))
 
     @games.command(name="timezone", aliases=["tz"])
     async def games_timezone(self, ctx: commands.Context, *, zone: str = None):
@@ -3508,10 +3536,11 @@ class GameManager(commands.Cog):
         items = []
         for s in sorted(schedules.values(), key=lambda s: s["next_start"]):
             nxt = parse_iso(s["next_start"])
-            items.append(f"- **{s['title']}** · {repeat_label(s)} · next {stamp(nxt, 'R')} · host <@{s['host_id']}> "
+            items.append(f"**{s['title']}** · {repeat_label(s)} · next {stamp(nxt, 'R')} · <@{s['host_id']}> hosting "
                          f"· <#{s['channel_id']}> · `{s['id']}`")
-        await self.send_list(ctx, items, "🔁 Repeating sessions",
-                             f"Manage with {await self.prefix(ctx.guild)}games recurring skip <id> or stop <id>")
+        await self.send_list(ctx, items, "🎮 Repeating sessions",
+                             f"{ui.plural(len(items), 'schedule')} · Manage with "
+                             f"{await self.prefix(ctx.guild)}games recurring skip <id> or stop <id>")
 
     async def _schedule_for(self, ctx: commands.Context, schedule_id: str) -> Optional[dict]:
         schedule = (await self.config.guild(ctx.guild).recurring()).get(schedule_id)

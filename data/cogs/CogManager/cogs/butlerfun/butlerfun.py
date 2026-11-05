@@ -16,7 +16,6 @@ import asyncio
 import contextlib
 import difflib
 import importlib.util
-import io
 import json
 import logging
 import random
@@ -224,6 +223,13 @@ def read_trivia(path) -> Tuple[dict, dict]:
     data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
     return ({k: v for k, v in data.items() if k in TRIVIA_META_KEYS},
             {str(k): v for k, v in data.items() if k not in TRIVIA_META_KEYS})
+
+
+def trivia_row(number: int, question: str, answers) -> str:
+    """One numbered board row with the answers behind a spoiler, short enough that the board never cuts the spoiler."""
+    answer = ", ".join(map(str, answers)) if isinstance(answers, list) else str(answers)
+    answer = ui.truncate(answer.replace("|", "/"), 150)
+    return f"{number}. {ui.truncate(str(question), 420)} ||{answer}||"
 
 
 def write_trivia(path, meta: dict, questions: dict):
@@ -786,30 +792,29 @@ class ButlerFun(commands.Cog):
         """
         Show a trivia list ButlerBot wrote, numbered, with the answers behind spoilers (mods).
 
-        Leave out the name to see every list. Long lists come as a text file. Run it where players can't see it if
-        you don't want to spoil the quiz.
+        Leave out the name to see every list. Long lists page with ◀ ▶. Run it where players can't see it if you
+        don't want to spoil the quiz.
 
         **Example:** `[p]maketrivia show our games`
         """
+        p = ctx.clean_prefix
         if not name:
             lists = self._trivia_lists()
             if not lists:
-                return await ctx.send(f"❓ I haven't written any trivia lists yet. Try "
-                                      f"`{ctx.clean_prefix}maketrivia <topic>`.")
+                return await ctx.send(f"❓ I haven't written any trivia lists yet. Try `{p}maketrivia <topic>`.")
             lines = [f"`{n}`: {ui.plural(len(read_trivia(self._trivia_path(n))[1]), 'question')}" for n in lists]
-            return await ctx.send(ui.truncate("🧠 **Trivia lists I've written**\n" + "\n".join(lines), 2000))
+            return await ui.Board("🧠 Trivia lists", lines,
+                                  footer=f"`{p}maketrivia show <name>` lists one · `{p}trivia <name>` plays it"
+                                  ).send(ctx)
         name = trivia_name(name)
         _, questions = read_trivia(self._trivia_path(name))
         if not questions:
             return await ctx.send(self._no_list(name))
-        answers = [", ".join(map(str, a)) if isinstance(a, list) else str(a) for a in questions.values()]
-        header = f"🧠 **{name}**: {ui.plural(len(questions), 'question')}"
-        body = "\n".join(f"{i}. {q} ||{a}||" for i, (q, a) in enumerate(zip(questions, answers), 1))
-        if len(header) + len(body) < 1990:
-            return await ctx.send(f"{header}\n{body}", allowed_mentions=ui.NO_PINGS)
-        plain = "\n".join(f"{i}. {q}\n   Answer: {a}" for i, (q, a) in enumerate(zip(questions, answers), 1))
-        await ctx.send(f"{header}. Answers are in the file.",
-                       file=discord.File(io.BytesIO(plain.encode("utf-8")), filename=f"{name}.txt"))
+        rows = [trivia_row(i, q, a) for i, (q, a) in enumerate(questions.items(), 1)]
+        board = ui.Board(f"🧠 {name}", rows,
+                         footer=f"{ui.plural(len(questions), 'question')} · Answers are spoilered, but anyone here "
+                                f"can reveal them · `{p}maketrivia remove {name} <numbers>` drops some")
+        await board.send(ctx)
 
     @maketrivia.command(name="remove", aliases=["delete"])
     @commands.guild_only()
@@ -948,13 +953,14 @@ class ButlerFun(commands.Cog):
         """The guess-the-game leaderboard."""
         members = await self.config.all_members(ctx.guild)
         ranked = sorted(((d["guess_wins"], uid) for uid, d in members.items()
-                         if d.get("guess_wins") and ctx.guild.get_member(uid)), reverse=True)[:15]
+                         if d.get("guess_wins") and ctx.guild.get_member(uid)), reverse=True)
         if not ranked:
             return await ctx.send(f"❓ No winners yet. Start a round with `{ctx.clean_prefix}guessgame`.")
         medals = ["🥇", "🥈", "🥉"]
         lines = [f"{medals[i] if i < 3 else f'`{i + 1}.`'} <@{uid}>: **{wins}**" for i, (wins, uid) in enumerate(ranked)]
-        await ctx.send(embed=discord.Embed(title="🎨 Guess the game: top players", description="\n".join(lines),
-                                           color=ui.HIGHLIGHT))
+        # A board's mentions highlight names without pinging anyone (send_card's default).
+        await ui.Board("🎨 Guess the game: top players", lines, color=ui.HIGHLIGHT,
+                       footer=f"Start a round with `{ctx.clean_prefix}guessgame`").send(ctx)
 
     @guessgame.command(name="stop")
     @checks.mod_or_permissions(manage_messages=True)

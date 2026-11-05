@@ -22,7 +22,7 @@ from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone, tzinfo
 from pathlib import Path
-from typing import Callable, Dict, Iterable, List, Optional, Set, Tuple, Union
+from typing import Callable, Dict, Iterable, List, Optional, Set, Tuple
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import discord
@@ -47,9 +47,6 @@ def _load_butlerui():
 
 ui = _load_butlerui()
 log = logging.getLogger("red.activitystats")
-
-ChannelArg = Union[discord.TextChannel, discord.VoiceChannel, discord.ForumChannel, discord.StageChannel,
-                   discord.Thread]
 
 
 # ==========================================
@@ -247,6 +244,75 @@ class Period(commands.Converter):
             raise commands.BadArgument(ui.line(ui.ASK, f"`{ui.truncate(argument, 40)}` isn't a time period. Try "
                                                        "`week`, `month`, `90d` or `all`."))
         return days
+
+
+CHANNEL_ICONS = {discord.VoiceChannel: "🔊", discord.StageChannel: "🎙️", discord.ForumChannel: "🗂️",
+                 discord.Thread: "🧵"}
+
+
+@dataclass
+class SharedName:
+    """A channel name that more than one channel has (say a text and a voice channel): the command asks which."""
+    name: str
+    channels: list
+
+
+class ChannelArg(commands.Converter):
+    """
+    A channel or thread, by mention, ID or name (with or without #). A name that more than one channel has gives a
+    SharedName, and `_pick_channel` asks which one, so a voice channel named like a text channel can be chosen.
+    """
+
+    async def convert(self, ctx: commands.Context, argument: str):
+        guild = ctx.guild
+        match = re.fullmatch(r"<#(\d+)>|(\d{15,21})", argument)
+        if match:
+            channel = guild.get_channel_or_thread(int(match.group(1) or match.group(2)))
+            if channel is not None and not isinstance(channel, discord.CategoryChannel):
+                return channel
+        else:
+            name = argument.lstrip("#")
+            channels = [c for c in [*guild.channels, *guild.threads] if not isinstance(c, discord.CategoryChannel)]
+            found = ([c for c in channels if c.name == name]
+                     or [c for c in channels if c.name.lower() == name.lower()])
+            found = [c for c in found if c.permissions_for(ctx.author).view_channel] or found
+            found.sort(key=lambda c: (isinstance(c, discord.Thread), getattr(c, "position", 0)))
+            if len(found) == 1:
+                return found[0]
+            if found:
+                return SharedName(found[0].name, found)
+        raise commands.BadArgument(ui.line(ui.ASK, f"I couldn't find a channel called "
+                                                   f"`{ui.truncate(argument, 40)}`."))
+
+
+class ChannelPicker(ui.ExpiringCard):
+    """Asks which of several same-named channels the command meant."""
+
+    expired_note = "Expired. Nothing was changed."
+    SHOWN = 10
+
+    def __init__(self, owner_id: int, shared: SharedName):
+        super().__init__(owner_id, timeout=60)
+        self.chosen = None
+        buttons = []
+        for channel in shared.channels[:self.SHOWN]:
+            place = getattr(getattr(channel, "category", None), "name", None)
+            label = f"{channel.name} · {place}" if place else channel.name
+            button = discord.ui.Button(label=ui.truncate(label, 80), emoji=CHANNEL_ICONS.get(type(channel), "💬"))
+            button.callback = self._choose(channel)
+            buttons.append(button)
+        extra = len(shared.channels) - self.SHOWN
+        self.add_item(ui.card(
+            ui.line(ui.ASK, f"More than one channel is called **{discord.utils.escape_markdown(shared.name)}**. "
+                            "Which one?"),
+            buttons, footer=f"{extra} more not shown. Use the channel's mention instead." if extra > 0 else None))
+
+    def _choose(self, channel):
+        async def callback(interaction: discord.Interaction):
+            self.chosen = channel
+            await interaction.response.defer()
+            self.stop()
+        return callback
 
 
 @dataclass
@@ -1533,10 +1599,27 @@ class ActivityStats(commands.Cog):
 
     async def _channel_id(self, ctx: commands.Context, channel) -> Optional[int]:
         """The tracked channel ID for a channel argument, or None after telling the user it's unavailable."""
+        channel = await self._pick_channel(ctx, channel)
+        if channel is None:
+            return None
         if not channel.permissions_for(ctx.author).view_channel:
             await ctx.send(ui.line(ui.LOCKED, "You can't see that channel, so its stats are hidden from you."))
             return None
         return self._channel_key(channel)
+
+    async def _pick_channel(self, ctx: commands.Context, channel):
+        """The channel argument, after asking which one was meant if several share its name. None if nobody chose."""
+        if not isinstance(channel, SharedName):
+            return channel
+        view = ChannelPicker(ctx.author.id, channel)
+        view.message = await ui.send_card(ctx, view)
+        if await view.wait() or view.chosen is None:
+            return None
+        try:
+            await view.message.delete()
+        except discord.HTTPException:
+            pass
+        return view.chosen
 
     # ==========================================
     #            COMMANDS FOR EVERYONE
@@ -1728,12 +1811,17 @@ class ActivityStats(commands.Cog):
     @stats_admin.command(name="exclude")
     async def admin_exclude(self, ctx: commands.Context, channel: ChannelArg):
         """Stop tracking a channel (and its threads). Existing counts are deleted."""
+        channel = await self._pick_channel(ctx, channel)
+        if channel is None:
+            return
         cid = self._channel_key(channel)
         async with self.config.guild(ctx.guild).excluded_channels() as excluded:
             if cid not in excluded:
                 excluded.append(cid)
         self._excluded.setdefault(ctx.guild.id, set()).add(cid)
         self._pending = Counter({k: v for k, v in self._pending.items() if k[:2] != (ctx.guild.id, cid)})
+        for key in [k for k, (open_cid, _) in self._voice_open.items() if k[0] == ctx.guild.id and open_cid == cid]:
+            self._voice_open.pop(key)
         for table in ("messages", "voice"):
             await self.db.query(f"DELETE FROM {table} WHERE guild = ? AND channel = ?", (ctx.guild.id, cid))
         await ctx.send(f"✅ {self._channel_name(ctx.guild, cid)} is no longer tracked, and its stats are deleted.")
@@ -1741,11 +1829,19 @@ class ActivityStats(commands.Cog):
     @stats_admin.command(name="include")
     async def admin_include(self, ctx: commands.Context, channel: ChannelArg):
         """Start tracking an excluded channel again."""
+        channel = await self._pick_channel(ctx, channel)
+        if channel is None:
+            return
         cid = self._channel_key(channel)
         async with self.config.guild(ctx.guild).excluded_channels() as excluded:
             if cid in excluded:
                 excluded.remove(cid)
         self._excluded.setdefault(ctx.guild.id, set()).discard(cid)
+        if isinstance(channel, (discord.VoiceChannel, discord.StageChannel)):
+            now = time.time()
+            for member in channel.members:
+                if self._tracks_voice(member, channel):
+                    self._voice_open.setdefault((ctx.guild.id, member.id), (channel.id, now))
         await ctx.send(f"✅ {self._channel_name(ctx.guild, cid)} is tracked again.")
 
     @stats_admin.command(name="gametracking")

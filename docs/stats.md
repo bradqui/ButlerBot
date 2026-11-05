@@ -48,5 +48,5 @@ Or ask in plain English: `!butler when is voice busiest?`
 >
 > **Settings:**
 > - `!stats admin digest on|off|channel #ch|time monday 9am|preview` is a weekly summary for an admin channel.
-> - `exclude` / `include #channel` controls what's tracked; `gametracking on|off` controls game tracking.
+> - `exclude` / `include #channel` controls what's tracked, voice channels included (`exclude Lounge`). If a text and a voice channel share a name, the bot asks which one you mean. `gametracking on|off` controls game tracking.
 > - `backfill <days>` counts messages from before tracking started.

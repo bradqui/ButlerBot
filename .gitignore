@@ -25,6 +25,9 @@
 # Never track config data, even inside a cog folder
 settings.json
 
+# Libraries for tools/build_reference.py
+/tools/.pylibs/
+
 __pycache__/
 *.pyc
 /.vscode/

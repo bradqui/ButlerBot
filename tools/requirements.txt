@@ -1,0 +1,4 @@
+# For build_reference.py: python -m pip install --target tools/.pylibs -r tools/requirements.txt
+discord.py==2.7.1
+pyyaml
+tzdata

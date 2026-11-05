@@ -28,11 +28,11 @@ Right-click a message (long-press on mobile) → **Apps**. Only you see the resu
 | [Admin]({{ '/reference/admin/' | relative_url }}) | A collection of server administration utilities. | 14 |
 | [Alias]({{ '/reference/alias/' | relative_url }}) | Create aliases for commands. | 9 |
 | [AutoRoom]({{ '/reference/autoroom/' | relative_url }}) | Automatic voice channel management. | 46 |
-| [ButlerFun]({{ '/reference/butlerfun/' | relative_url }}) | AI extras: catch-up summaries, ButlerBot's judgments, text adventures, trivia writing and guess the game. | 8 |
+| [ButlerFun]({{ '/reference/butlerfun/' | relative_url }}) | AI extras: catch-up summaries, ButlerBot's judgments, text adventures, trivia writing and guess the game. | 12 |
 | [ButtonGreeter]({{ '/reference/buttongreeter/' | relative_url }}) | A welcome system that greets users with buttons to self-assign a role/nickname,  | 13 |
 | [Censord]({{ '/reference/censord/' | relative_url }}) | Censor chat using CSV-based lists with specific levels and threshold punishments. | 12 |
 | [Chatchart]({{ '/reference/chatchart/' | relative_url }}) | Show activity. | 5 |
-| [ClaudeChat]({{ '/reference/claudechat/' | relative_url }}) | Chat with Anthropic's Claude. | 19 |
+| [ClaudeChat]({{ '/reference/claudechat/' | relative_url }}) | Chat with Anthropic's Claude. | 20 |
 | [Cleanup]({{ '/reference/cleanup/' | relative_url }}) | This cog contains commands used for "cleaning up" (deleting) messages. | 12 |
 | [ClearChannel]({{ '/reference/clearchannel/' | relative_url }}) | A cog to delete ALL messages of a channel! | 10 |
 | [Core]({{ '/reference/core/' | relative_url }}) | The Core cog has many commands related to core functions. | 80 |

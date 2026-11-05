@@ -22,9 +22,27 @@ For a task-by-task guide, see [Fun and games]({{ '/fun/' | relative_url }}).
 Start a group text adventure in a new thread, narrated by ButlerBot.
 
 Everyone in the thread plays by just typing what they do. ButlerBot waits a few seconds to gather everyone's
-moves, then narrates what happens. End it with `!adventure stop` inside the thread.
+moves, then narrates what happens. End it with `!adventure stop` inside the thread, for a final scene and a
+picture of it. Set the character you play with `!adventure bio`.
 
 **Example:** `!adventure a haunted space station where the AI has gone quiet`
+
+<a id="adventure-bio"></a>
+### !adventure bio
+
+`!adventure bio [text]`
+
+**Who:** everyone · **Also:** `!adventure character`
+
+Set the character you play in every adventure (up to 200 characters).
+
+The narrator uses it in every adventure you join. Anything you say during an adventure ("my character has
+dyed her hair green") wins for that adventure only; your bio stays as it is.
+
+**Examples:**
+- `!adventure bio` shows yours (`!adventure bio @member` shows theirs)
+- `!adventure bio a red-haired dwarf engineer with a bad knee and a fear of birds`
+- `!adventure bio clear` removes yours (mods: `!adventure bio clear @member`)
 
 <a id="adventure-stop"></a>
 ### !adventure stop
@@ -33,7 +51,7 @@ moves, then narrates what happens. End it with `!adventure stop` inside the thre
 
 **Who:** everyone · **Also:** `!adventure end`
 
-End the adventure in this thread with a final scene (whoever started it, or a mod).
+End the adventure in this thread with a final scene and a picture of it (whoever started it, or a mod).
 
 <a id="catchup"></a>
 ### !catchup
@@ -91,17 +109,59 @@ It reads the recent messages (20 by default, up to 60) and delivers a ruling, in
 <a id="maketrivia"></a>
 ### !maketrivia
 
-`!maketrivia [count=20] <topic>`
+`!maketrivia [count=30] <topic>`
 
 **Who:** mods, or anyone with the manage messages permission · **Also:** `!trivia-make`, `!writetrivia`
 
 Have Claude write a trivia list, ready to play with Red's trivia game (mods).
 
-Use `our games` as the topic for questions about the games in this server's library. The list is saved
-for the `trivia` cog, so you can start it right away.
+Writes 30 questions unless you give a number (10-100). Running it again on the same topic adds new
+questions to the list instead of replacing it. Use `our games` as the topic for questions about the games in
+this server's library.
 
 **Examples:**
 - `!maketrivia our games`
-- `!maketrivia 15 1990s video game consoles`
+- `!maketrivia 50 1990s video game consoles`
+
+<a id="maketrivia-redo"></a>
+### !maketrivia redo
+
+`!maketrivia redo [count=30] <topic>`
+
+**Who:** mods, or anyone with the manage messages permission
+
+Throw away a trivia list and write it again from scratch (mods).
+
+**Example:** `!maketrivia redo 40 our games`
+
+<a id="maketrivia-remove"></a>
+### !maketrivia remove
+
+`!maketrivia remove <name> <which>`
+
+**Who:** mods, or anyone with the manage messages permission · **Also:** `!maketrivia delete`
+
+Remove questions from a trivia list ButlerBot wrote (mods).
+
+Give the question numbers from `!maketrivia show`, or part of the question's text. Put quotes around a list
+name with spaces, or use its saved name (`our_games` or `bb_our_games`).
+
+**Examples:**
+- `!maketrivia remove our_games 4 17`
+- `!maketrivia remove our_games which year was Barony released`
+
+<a id="maketrivia-show"></a>
+### !maketrivia show
+
+`!maketrivia show [name]`
+
+**Who:** mods, or anyone with the manage messages permission
+
+Show a trivia list ButlerBot wrote, numbered, with the answers behind spoilers (mods).
+
+Leave out the name to see every list. Long lists come as a text file. Run it where players can't see it if
+you don't want to spoil the quiz.
+
+**Example:** `!maketrivia show our games`
 
 {% endraw %}

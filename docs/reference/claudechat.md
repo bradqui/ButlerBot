@@ -123,6 +123,20 @@ Let the bot guide run commands for people when they ask it to do something.
 Commands always run with the asker's own permissions. Ones that need mod, admin, or
 game admin rights wait for the asker to press Run. When off, the guide only explains.
 
+<a id="claude-guidehandoff"></a>
+### !claude guidehandoff
+
+`!claude guidehandoff <enabled>`
+
+**Who:** admins, or anyone with the manage guild permission · **Also:** `!claude butlerhandoff`
+
+Pass questions that aren't about the bot from the butler to the AI chat.
+
+When on, asking `!butler` (or @mentioning the bot) something like "who won the game last night?" gets an
+answer from the AI chat, as if it had been asked with `!ai`. It uses the channel's shared AI conversation,
+counts toward the daily AI limit, and only happens where the asker may use `!ai`. When off, the butler
+just suggests `!ai`.
+
 <a id="claude-guidementions"></a>
 ### !claude guidementions
 

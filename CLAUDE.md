@@ -111,10 +111,14 @@ Quirks to know:
       - `create_event` and `push_event` (which edits the event, or creates it if missing) use it.
     - **Setting details at start:**
       - `/games session` has description, banner (attachment), voice and length options.
-      - Text commands use `details_from_message`: an attached image is the banner, and a mentioned voice channel is taken out of the title.
+      - Text commands use `details_from_message`: lines after the first are the description, an attached image is the banner, and a mentioned voice channel is taken out of the title. The AI chat's `run_commands` runs on a copy of the asker's message, so its attachments come along; the Claude cog's `one_line()` shows only a command's first line in its "Running:" note.
       - Bad banners are refused with `read_banner` (10 MB; PNG, JPG, GIF or WebP by magic bytes, `image_ext`).
     - **Edit event:** scheduled sessions' cards have it (`SessionButton` action `event`). It opens `EventDetailsModal` (discord.py 2.7 `Label`, `ChannelSelect`, `FileUpload` and `CheckboxGroup`), which has 5 fields: description, length, voice, banner, and options ("Remove the banner"; "Also use for future sessions" on repeating ones).
       - `apply_event_details` saves the form; "future" also writes the schedule's `event` and stores the banner under the schedule's ID.
+    - **Banner on the card:** the card shows the event's own cover image full width above the title (`ui.card(banner=url)`), from `event["cover_url"]`.
+      - That's Discord's CDN copy, so moving or redrawing the card never re-uploads it.
+      - `create_event` sets it on the session it's given, `push_event` refreshes it after an edit, and `on_scheduled_event_update` picks up a banner changed in Discord.
+      - Schedules never store `cover_url`, because each week's event has its own.
     - **Edits made in Discord:** `on_scheduled_event_update` copies a changed time (recomputing `reminded`), name and voice channel (compared with the effective default) to that one session. A cancelled event ends the session.
   - **Winner history (2026-11-05):** sessions keep `winners` (every vote's winner, in order, repeats included); `finish_vote` appends, seeding from `winner` for older sessions. The card's result block, and the ended card, add `Earlier: …` (`played_text()`, which counts a run of repeats as "(won twice)"). Later votes never leave out earlier winners: a vote to switch can keep the current game. Recurring schedules (guild `recurring`) use `post_session` too.
     - A schedule stores weekday, hour, minute, `interval` (7 or 14), the host's timezone name and `next_start`. `advance_occurrence` rebuilds the local time each time, so daylight saving changes don't shift it. Input starting with `every`/`weekly` goes to `create_recurring`.
@@ -239,7 +243,7 @@ Rules for using them:
 AI answers, adventure narration and butler replies stay plain text, split with `split_text()` (never by slicing).
 
 **Building cards** (`butlerui`):
-- **`card(*parts, title, color, footer, thumbnail)`** builds a `discord.ui.Container`. Parts can be:
+- **`card(*parts, title, color, footer, thumbnail, banner)`** builds a `discord.ui.Container` (`banner`: an image URL shown full width above the title). Parts can be:
   - strings, which become text blocks;
   - `SEPARATOR`;
   - lists of buttons or selects, which become action rows (five buttons to a row, each select on its own row);

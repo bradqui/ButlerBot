@@ -210,7 +210,7 @@ SEPARATOR = "---"   # in card(): a divider line
 
 
 def card(*parts, title: Optional[str] = None, color: discord.Color = BRAND, footer: Optional[str] = None,
-         thumbnail: Optional[str] = None) -> discord.ui.Container:
+         thumbnail: Optional[str] = None, banner: Optional[str] = None) -> discord.ui.Container:
     """
     Build a card. Each part can be:
     - a string: a block of text (empty strings are skipped)
@@ -218,7 +218,8 @@ def card(*parts, title: Optional[str] = None, color: discord.Color = BRAND, foot
     - a list or tuple of buttons/selects: an action row (five buttons per row; a select gets a row of its own)
     - any discord.ui item (Section, ActionRow, TextDisplay, MediaGallery, Separator): added as is
     - None: skipped
-    `thumbnail` (an image URL) sits beside the title and the first block of text.
+    `thumbnail` (an image URL) sits beside the title and the first block of text. `banner` (an image URL) goes
+    full width above the title, like a Discord event's cover.
     """
     items: List[discord.ui.Item] = []
     first_text = None
@@ -244,6 +245,8 @@ def card(*parts, title: Optional[str] = None, color: discord.Color = BRAND, foot
         items.insert(0, discord.ui.Section(*texts, accessory=discord.ui.Thumbnail(thumbnail)))
     elif head:
         items.insert(0, discord.ui.TextDisplay(head[0]))
+    if banner:
+        items.insert(0, image(banner, "Banner"))
     if footer:
         items.append(discord.ui.TextDisplay(hint(footer)))
     return discord.ui.Container(*items, accent_color=color)

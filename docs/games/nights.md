@@ -66,7 +66,13 @@ These are short for the `!games …` versions (`!games session`, `!games join`, 
 - Pressing **Interested** there joins the session too, and Discord reminds you.
 - **Give the event details when you start the session:**
   - `/games session` has optional fields for a description, a banner image, a voice channel and a length (like `2h`).
-  - With `!session new`, attach an image for the banner and mention a voice channel to hold it there: `!session new friday 9pm Raid night #Raid Voice`.
+  - With `!session new`, attach an image for the banner, mention a voice channel to hold it there, and put a description on the lines below (Shift+Enter for a new line):
+    ```
+    !session new friday 9pm Raid night #Raid Voice
+    Bring a mic. We're starting the new raid.
+    ```
+  - Asking the AI works too: "`!ai` set up a weekly session on Fridays at 9pm in #Raid Voice, banner attached". Attach the image to that message and mention the channel with `#`.
+- **The banner shows on the session card too,** full width across the top, the same picture as the event.
 - **Change them later** with the session card's **✏️ Edit event** button (host or game admin): description, length, voice channel and banner, or remove the banner. You don't need Discord's Manage Events permission for this.
 - **Weekly sessions:** each week's session is its own event, posted a day ahead. Details set when you create the weekly session are used every week. In **Edit event**, tick **Also use for future sessions** to change every week from then on; otherwise only that week changes.
 - **Edited the event in Discord instead?** That works too: a new time, name or voice channel carries over to the session card and its reminders, and cancelling the event ends the session. It only changes that one week's session.

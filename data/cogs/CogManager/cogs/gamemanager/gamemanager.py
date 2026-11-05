@@ -410,6 +410,12 @@ def fmt_minutes(minutes: Optional[int]) -> str:
     return (f"{hours}h" if hours else "") + (f"{mins}m" if mins else "")
 
 
+def cover_url(event) -> Optional[str]:
+    """The URL of a Discord event's cover image (Discord keeps it, so a card can show it), or None."""
+    cover = getattr(event, "cover_image", None)
+    return cover.url if cover is not None else None
+
+
 def image_ext(data: bytes) -> Optional[str]:
     """The file type of an image Discord takes as an event banner, from its first bytes, else None."""
     if data.startswith(b"\x89PNG\r\n\x1a\n"):
@@ -2682,12 +2688,13 @@ class GameManager(commands.Cog):
         who_main = f"**{count} {'played' if ended else 'playing'}**" if count else "**Nobody yet**"
         blocks.append(ui.two_line(who_main, ", ".join(players) or None))
         title = f"🎮 {session['title']}"
+        banner = (session.get("event") or {}).get("cover_url")   # the Discord event's banner, full width on top
 
         if vote is not None and vote.get("in_card") and not ended:   # voting: the options are in this card
             # How to vote is in the private reply to a vote button, so the card stays short and has no footer.
             return ui.CardView(ui.card(*blocks, ui.SEPARATOR, self.vote_status(vote, guild), vote_buttons(vote),
                                        ui.SEPARATOR, [SessionButton("end", session["id"])],
-                                       title=title, color=ui.ATTENTION))
+                                       title=title, color=ui.ATTENTION, banner=banner))
 
         # Every winner this session, in order; sessions from before the history only know the last one.
         winners = session.get("winners") or ([session["winner"]] if session.get("winner") else [])
@@ -2709,7 +2716,8 @@ class GameManager(commands.Cog):
             blocks.append(ui.two_line(f"🏆 **{winners[-1]}** won the {'last ' if earlier else ''}vote.",
                                       f"Earlier: {played_text(earlier)}" if earlier else None))
         if ended:
-            return ui.CardView(ui.card(*blocks, title=title, color=ui.MUTED, footer="This session has ended."))
+            return ui.CardView(ui.card(*blocks, title=title, color=ui.MUTED, footer="This session has ended.",
+                                       banner=banner))
         if session.get("vote_id"):   # a vote posted as its own card (sessions from before Phase 4 / old votes)
             blocks.append("🗳️ Voting now: pick a game on the vote below.")
         if tz_hint:   # the host's time may have been read in the wrong timezone: that's the one hint until it starts
@@ -2726,7 +2734,7 @@ class GameManager(commands.Cog):
             footer = details(*notes) or None
         return ui.CardView(ui.card(*blocks, ui.SEPARATOR if result_block else None, result_block,
                                    ui.SEPARATOR, session_buttons(session["id"], bool(starts)),
-                                   title=title, color=ui.SUCCESS, footer=footer))
+                                   title=title, color=ui.SUCCESS, footer=footer, banner=banner))
 
     def session_embed(self, session: dict, ended: bool = False) -> discord.Embed:
         """The pre-card look, for session messages posted as embeds before 2026-11-05."""
@@ -2847,7 +2855,7 @@ class GameManager(commands.Cog):
         session["event_id"] = await self.create_event(guild, session, host)
         async with self.config.guild(guild).play_sessions() as sessions:
             if sid in sessions:
-                sessions[sid].update(message_id=message.id, event_id=session["event_id"])
+                sessions[sid].update(message_id=message.id, event_id=session["event_id"], event=session["event"])
         if session["event_id"]:
             await self.refresh_session_message(guild, session)
         return session
@@ -2871,11 +2879,14 @@ class GameManager(commands.Cog):
         if banner:
             kwargs["image"] = banner
         try:
-            return (await guild.create_scheduled_event(name=session["title"][:100], start_time=starts,
-                                                       privacy_level=discord.PrivacyLevel.guild_only, **kwargs)).id
+            event = await guild.create_scheduled_event(name=session["title"][:100], start_time=starts,
+                                                       privacy_level=discord.PrivacyLevel.guild_only, **kwargs)
         except discord.HTTPException as e:
             log.info("Couldn't create a Discord event for session %s: %s", session["id"], e)
             return None
+        if cover_url(event):   # the card shows Discord's copy of the banner; the caller saves the session
+            session.setdefault("event", {})["cover_url"] = cover_url(event)
+        return event.id
 
     async def _event_fields(self, guild: discord.Guild, session: dict) -> dict:
         """
@@ -2952,14 +2963,18 @@ class GameManager(commands.Cog):
 
     async def details_from_message(self, target: Target, text: Optional[str]) -> Tuple[Optional[dict], Optional[str]]:
         """
-        Event details from a text command: an attached image is the banner, and a mentioned voice channel (taken out
-        of the text) is the place. Returns (details, the text without the mention), or (None, None) after
-        explaining a bad banner.
+        Event details from a text command: lines after the first are the description, an attached image is the
+        banner, and a mentioned voice channel (taken out of the text) is the place. Returns (details, the first
+        line without the mention), or (None, None) after explaining a bad banner.
         """
         if isinstance(target, discord.Interaction):
             return {}, text
         guild = target.guild
         details: dict = {}
+        first, _, rest = (text or "").strip().partition("\n")
+        if rest.strip():
+            details["description"] = rest.strip()[:800]
+            text = first
         for match in re.finditer(r"<#(\d+)>", text or ""):
             channel = guild.get_channel(int(match.group(1)))
             if isinstance(channel, (discord.VoiceChannel, discord.StageChannel)):
@@ -3024,7 +3039,8 @@ class GameManager(commands.Cog):
         async with self.config.guild(guild).play_sessions() as sessions:
             if sid not in sessions:
                 return await interaction.followup.send("⚠️ This session has ended.", ephemeral=True)
-            sessions[sid]["event"] = details
+            # The banner's link stays until push_event hears from Discord what the event shows now.
+            sessions[sid]["event"] = {**details, **({"cover_url": old["cover_url"]} if old.get("cover_url") else {})}
             session = dict(sessions[sid])
         if future:
             async with self.config.guild(guild).recurring() as recurring:
@@ -3050,7 +3066,7 @@ class GameManager(commands.Cog):
                         "need Manage Events.")
             async with self.config.guild(guild).play_sessions() as sessions:
                 if session["id"] in sessions:
-                    sessions[session["id"]]["event_id"] = event_id
+                    sessions[session["id"]].update(event_id=event_id, event=session.get("event") or {})
             return None
         try:
             event = guild.get_scheduled_event(session["event_id"]) or await guild.fetch_scheduled_event(
@@ -3058,7 +3074,15 @@ class GameManager(commands.Cog):
             kwargs = await self._event_fields(guild, session)
             if image_change:
                 kwargs["image"] = self.banner_bytes((session.get("event") or {}).get("banner"))
-            await event.edit(**kwargs)
+            edited = await event.edit(**kwargs)
+            async with self.config.guild(guild).play_sessions() as sessions:
+                if session["id"] in sessions:   # the card shows the event's banner, wherever it came from
+                    details = sessions[session["id"]].setdefault("event", {})
+                    url = cover_url(edited) if edited is not None else cover_url(event)
+                    if url:
+                        details["cover_url"] = url
+                    else:
+                        details.pop("cover_url", None)
         except discord.Forbidden:
             return "I couldn't update the Discord event: I need Manage Events."
         except discord.HTTPException as e:
@@ -3096,6 +3120,12 @@ class GameManager(commands.Cog):
                     saved["title"] = after.name[:200]
                     changed = True
                 details = saved.setdefault("event", {})
+                if cover_url(after) != details.get("cover_url"):
+                    if cover_url(after):
+                        details["cover_url"] = cover_url(after)
+                    else:
+                        details.pop("cover_url", None)
+                    changed = True
                 expected = details.get("voice_id") or default_voice
                 if (after.channel_id or None) != (expected or None):
                     details["voice_id"] = after.channel_id or None
@@ -4082,8 +4112,8 @@ class GameManager(commands.Cog):
 
         Scheduled sessions also show up in the server's Discord events. Start with `every` to repeat weekly
         (or `every other` for every two weeks); each one is posted a day ahead. For the event, attach an image
-        as its banner and mention a voice channel to hold it there; the host can change these later with the
-        card's **Edit event** button.
+        as its banner, mention a voice channel to hold it there, and put a description on the lines after the
+        first (Shift+Enter); the host can change these later with the card's **Edit event** button.
 
         **Examples:**
         - `[p]games session` (starts now)
@@ -4669,8 +4699,8 @@ class GameManager(commands.Cog):
         Start a game session people can join.
 
         Optionally start with a time (read in your timezone; everyone sees their own). Start with `every` to
-        repeat weekly. Attach an image for the Discord event's banner, and mention a voice channel to hold it there.
-        The same as `[p]games session`.
+        repeat weekly. For the Discord event: attach an image for its banner, mention a voice channel to hold it
+        there, and put a description on the lines after the first (Shift+Enter). The same as `[p]games session`.
 
         **Examples:** `[p]session new`, `[p]session new friday 9pm Raid night`, `[p]session new in 2h Rocket League`,
         `[p]session new every friday 9pm`

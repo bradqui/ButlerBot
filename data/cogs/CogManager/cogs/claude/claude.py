@@ -283,6 +283,12 @@ class Turn:
     about_bot: bool = False      # the turn looked up commands or ran them (doesn't count toward the daily limit)
 
 
+def one_line(command: str) -> str:
+    """A command as shown in inline code, which can't span lines: its first line, then … for the rest."""
+    first, _, rest = command.partition("\n")
+    return first + (" …" if rest.strip() else "")
+
+
 def utc_today() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
@@ -898,10 +904,10 @@ class ClaudeChat(commands.Cog):
                 lines = [summary]
                 if planned and confirm:
                     lines.append("These need extra permissions, so press **Run** to go ahead:")
-                    lines.extend(f"`{c}`" for c in planned)
+                    lines.extend(f"`{one_line(c)}`" for c in planned)
                     view = ActionConfirmView(message.author.id)
                 elif planned:
-                    lines.append("-# Running: " + " · ".join(f"`{c}`" for c in planned))
+                    lines.append("-# Running: " + " · ".join(f"`{one_line(c)}`" for c in planned))
                 if problems:
                     lines.append("-# Skipped: " + "; ".join(problems))
                 reply = "\n".join(lines)

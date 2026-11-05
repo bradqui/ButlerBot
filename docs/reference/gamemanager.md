@@ -422,8 +422,8 @@ a reminder 15 minutes before and a ping at the start. Times are read in your tim
 
 Scheduled sessions also show up in the server's Discord events. Start with `every` to repeat weekly
 (or `every other` for every two weeks); each one is posted a day ahead. For the event, attach an image
-as its banner and mention a voice channel to hold it there; the host can change these later with the
-card's **Edit event** button.
+as its banner, mention a voice channel to hold it there, and put a description on the lines after the
+first (Shift+Enter); the host can change these later with the card's **Edit event** button.
 
 **Examples:**
 - `!games session` (starts now)
@@ -661,8 +661,8 @@ Leave a game session. Add its name if there's more than one.
 Start a game session people can join.
 
 Optionally start with a time (read in your timezone; everyone sees their own). Start with `every` to
-repeat weekly. Attach an image for the Discord event's banner, and mention a voice channel to hold it there.
-The same as `!games session`.
+repeat weekly. For the Discord event: attach an image for its banner, mention a voice channel to hold it
+there, and put a description on the lines after the first (Shift+Enter). The same as `!games session`.
 
 **Examples:** `!session new`, `!session new friday 9pm Raid night`, `!session new in 2h Rocket League`,
 `!session new every friday 9pm`

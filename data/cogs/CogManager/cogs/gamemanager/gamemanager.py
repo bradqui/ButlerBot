@@ -620,6 +620,19 @@ def details(*parts: Optional[str]) -> str:
     return text[:1].upper() + text[1:]
 
 
+def played_text(winners: List[str]) -> str:
+    """Vote winners in order, a game that won several votes in a row counted once: `Deep Rock Galactic (won
+    twice), then Helldivers 2`."""
+    runs: List[List] = []
+    for name in winners:
+        if runs and runs[-1][0] == name:
+            runs[-1][1] += 1
+        else:
+            runs.append([name, 1])
+    return ", then ".join(name if n == 1 else f"{name} (won {'twice' if n == 2 else f'{n} times'})"
+                          for name, n in runs)
+
+
 def repeat_short(label: str) -> str:
     """`Every other Friday at 9 PM (UTC)` (a session's "repeat") as `every other Friday`."""
     head = label.split(" at ")[0]
@@ -2591,18 +2604,25 @@ class GameManager(commands.Cog):
                                        ui.SEPARATOR, [SessionButton("end", session["id"])],
                                        title=title, color=ui.ATTENTION))
 
+        # Every winner this session, in order; sessions from before the history only know the last one.
+        winners = session.get("winners") or ([session["winner"]] if session.get("winner") else [])
         result = session.get("vote_result")
         result_block = None
         if result and not ended:
             if result.get("winner"):
                 head = f"🏆 **{result['winner']}** won the vote."
+                earlier = winners[:-1] if winners and winners[-1] == result["winner"] else winners
             else:
                 head = "🗳️ **The vote ended without any votes.**"
+                earlier = winners
             lines = ([result["tie"]] if result.get("tie") else []) + result.get("lines", [])
             lines += [result["footer"]] if result.get("footer") else []
+            lines += [f"Earlier: {played_text(earlier)}"] if earlier else []
             result_block = ui.two_line(head, "\n".join(lines) or None)
-        elif session.get("winner"):
-            blocks.append(f"🏆 **{session['winner']}** won the vote.")
+        elif winners:
+            earlier = winners[:-1]
+            blocks.append(ui.two_line(f"🏆 **{winners[-1]}** won the {'last ' if earlier else ''}vote.",
+                                      f"Earlier: {played_text(earlier)}" if earlier else None))
         if ended:
             return ui.CardView(ui.card(*blocks, title=title, color=ui.MUTED, footer="This session has ended."))
         if session.get("vote_id"):   # a vote posted as its own card (sessions from before Phase 4 / old votes)
@@ -2711,6 +2731,7 @@ class GameManager(commands.Cog):
             "tz_note": tz_note,
             "pings": [],          # IDs of this session's ping lines (in its channel), deleted when it ends
             "vote_result": None,  # the last vote's result, shown in the card: {winner, tie, lines, footer}
+            "winners": [],        # every vote's winner, in order (a vote can keep the current game: it's listed again)
         }
         async with self.config.guild(guild).play_sessions() as sessions:
             sessions[sid] = session
@@ -3469,6 +3490,8 @@ class GameManager(commands.Cog):
             if session is not None and session.get("vote_id") == vid:
                 session["vote_id"] = None
                 if winner_name:
+                    history = session.setdefault("winners", [session["winner"]] if session.get("winner") else [])
+                    history.append(winner_name)
                     session["winner"] = winner_name
                 if in_card:
                     session["vote_result"] = {"winner": winner_name, "tie": tie_note.strip(), "lines": lines,

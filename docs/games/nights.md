@@ -100,6 +100,7 @@ When everyone's in, the host presses **Start vote** on the session, or runs:
 - Press a game to vote. Press it again to take the vote back.
 - The vote ends when everyone has voted or time runs out.
 - The result stays in the card: the 🏆 winner and how many votes each game got. Players get a one-line ping with the winner.
+- **Want to switch games later?** Start another vote. Every game is an option again, including the one you're playing, so if most people want to stay, it wins. The card keeps a history of the winners: "Earlier: Deep Rock Galactic (won twice)".
 - **Ties** go to the game the players rank higher, then to a random pick.
 - Only people who joined before the vote started can vote.
 

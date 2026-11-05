@@ -102,7 +102,8 @@ Quirks to know:
     - **Shortcuts:** top-level `!session` (group) and `!sessions` are short for the `games` session commands. `!session` alone runs `bring_here`. Its subcommands are `new` (aliases `create`/`host`), `join`, `leave`, `here`, `vote` and `end`.
       - Starting needs `new`, because a title like "join the raid" would otherwise read as a subcommand.
       - The group's catch-all `words` argument (hidden with `usage=""`) means SpeakUp treats a stray word as an argument and stays quiet; the group answers with its own "add `new`" hint instead.
-      - Handbook's `topic_for` maps both to the Game nights page. Recurring schedules (guild `recurring`) use `post_session` too.
+      - Handbook's `topic_for` maps both to the Game nights page.
+  - **Winner history (2026-11-05):** sessions keep `winners` (every vote's winner, in order, repeats included); `finish_vote` appends, seeding from `winner` for older sessions. The card's result block, and the ended card, add `Earlier: …` (`played_text()`, which counts a run of repeats as "(won twice)"). Later votes never leave out earlier winners: a vote to switch can keep the current game. Recurring schedules (guild `recurring`) use `post_session` too.
     - A schedule stores weekday, hour, minute, `interval` (7 or 14), the host's timezone name and `next_start`. `advance_occurrence` rebuilds the local time each time, so daylight saving changes don't shift it. Input starting with `every`/`weekly` goes to `create_recurring`.
   - **Discord events:** `create_event` makes an external event (the location is the text channel, ending after `EVENT_LENGTH_HOURS`), or a voice event if `event_channel` is set. It needs Manage Events.
     - `update_event` starts it at the start ping and ends or cancels it in `end_session`.

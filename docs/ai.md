@@ -21,6 +21,7 @@ ButlerBot chats using Anthropic's Claude and draws pictures with Google's Gemini
 - In an AI thread, @mention ButlerBot or reply to its messages.
 
 **What it can do:**
+- **The bot itself:** ask how to use ButlerBot, or ask it to do something, and it looks up the commands and can run them for you. See [Asking ButlerBot]({{ '/butler/' | relative_url }}); `!butler` is the same conversation as `!ai`.
 - **Attachments:** it reads images, PDFs and text files you attach, or ones in the message you reply to.
 - **Web search:** it searches the web when it needs current information, and lists its sources under the answer.
 - **Tagging people:** it can tag people it talks about. These are highlighted mentions that don't ping anyone.
@@ -58,6 +59,7 @@ Or use Gemini directly:
 
 - AI use costs real money, so admins may set a **daily limit** per person (`!claude limit`).
   - Mods and admins aren't limited.
+  - Questions about using the bot don't count.
   - When you hit it, ButlerBot says so; it resets at midnight UTC.
 - `!claude usage` sends your own usage and estimated cost to your DMs, and puts a ✅ on your command. If your DMs are closed, it's posted in the channel instead.
 

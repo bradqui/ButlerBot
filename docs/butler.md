@@ -6,7 +6,7 @@ permalink: /butler/
 
 # Asking ButlerBot
 
-Not sure which command you need? Ask in plain English. ButlerBot knows every command in the server. It explains what to type, or does it for you.
+Not sure which command you need? Ask in plain English. ButlerBot looks up the commands in this server, then explains what to type or does it for you.
 
 ```
 !butler how do I find a game everyone owns?
@@ -15,7 +15,7 @@ Not sure which command you need? Ask in plain English. ButlerBot knows every com
 !butler what games do Alex and I both have installed?
 ```
 
-`!guide` works too; it's the same thing. You can also skip the command and @mention ButlerBot: "@ButlerBot when is the server busiest?"
+`!butler`, `!guide` and `!ai` are all the same thing: one conversation per channel, so ask whichever way you like. You can also skip the command and @mention ButlerBot: "@ButlerBot when is the server busiest?"
 
 ## Questions vs. requests
 
@@ -26,9 +26,9 @@ Not sure which command you need? Ask in plain English. ButlerBot knows every com
 
 ## Questions that aren't about the bot
 
-Ask ButlerBot something unrelated, like "summarize yesterday's election" or "help with my homework", and it passes the question to the [AI chat]({{ '/ai/' | relative_url }}). You get the same answer as `!ai`, in the channel's shared AI conversation. **The handoff:**
-- counts toward any daily AI limit;
-- only happens where you're allowed to use `!ai`.
+Ask anything else too, like "summarize yesterday's election" or "help with my homework". It's the same [AI chat]({{ '/ai/' | relative_url }}), so you can mix the two in one question: "what's a good co-op game for four, and how do I add it to my library?"
+
+Questions about using the bot don't count toward a daily AI limit, even when you've reached it. Everything else does.
 
 ## It can look things up
 
@@ -40,7 +40,7 @@ Before answering, ButlerBot can check real data:
 
 ## Following up
 
-- **Reply** to one of ButlerBot's answers to continue the conversation. It remembers your last few questions for about 15 minutes.
+- **Reply** to one of ButlerBot's answers, or just ask again with `!butler` or `!ai`. It's the channel's shared conversation, so "and can I make that weekly?" follows on from what was just said.
 - **Replying to the bot's other messages,** like a game announcement, also reaches ButlerBot. It stays quiet when your reply was clearly meant for other people.
 
 ## Mistyped a command?
@@ -55,8 +55,7 @@ If nothing the bot has fits your question, ButlerBot says so plainly. Admins see
 
 {: .staff }
 > Admins control this with:
-> - `!claude guidementions on|off`, whether @mentions and replies reach the butler;
-> - `!claude guideactions on|off`, whether it may run commands;
-> - `!claude butlerhandoff on|off`, whether off-topic questions go to the AI chat (otherwise it just suggests `!ai`).
+> - `!claude guidementions on|off`, whether @mentions and replies to the bot's posts reach it;
+> - `!claude guideactions on|off`, whether it may run commands.
 >
-> The bot owner picks its model with `!claude guidemodel`.
+> It uses the channel's AI model (`!claude channelmodel`). The bot owner picks the quick model, used for typo suggestions, with `!claude quickmodel`.

@@ -7,13 +7,14 @@ permalink: /reference/claudechat/
 
 # ClaudeChat
 
-Chat with Anthropic's Claude.
+Chat with Anthropic's Claude, which also answers questions about the bot and runs commands for you.
 
 `!ai` talks in this channel's shared conversation, `!myai` keeps a private
 conversation that follows you around, and `!aithread` starts a dedicated thread.
 Reply to any of my answers to keep that conversation going.
 
-`!butler` answers questions about the bot itself, like "how do I start a game vote?"
+Ask about the bot itself too ("how do I start a game vote?"), or ask it to do something.
+`!butler` is the same as `!ai`.
 
 For a task-by-task guide, see [AI chat and images]({{ '/ai/' | relative_url }}).
 
@@ -31,12 +32,16 @@ Everyone in the channel shares one conversation, so Claude can follow along
 with multiple people. Attach images, PDFs, or text files and Claude will read them.
 Reply to any of Claude's answers to keep going without typing the command.
 
+Ask how to use the bot, or ask it to do something, and Claude looks up the
+commands and can run them for you, with your own permissions. `!butler` is the same.
+
 Start with "draw", "paint", or "image of" to go straight to the image generator
 (Gemini). Other ways of asking for a picture work too; Claude hands them off.
 Reply "make it blue" or similar to change the last image.
 
 **Examples:**
 - `!ai what's a good name for a guild?`
+- `!ai how do I start a vote on what to play?`
 - `!ai summarize this` (with a PDF attached)
 - `!ai could you make us a banner with a dragon guarding a castle?`
 
@@ -67,10 +72,10 @@ Inside the thread, @mention me or reply to my messages to keep talking.
 
 **Who:** everyone · **Also:** `!guide`
 
-Ask how to use this bot, or ask it to do something, in plain English.
+Ask how to use this bot, ask it to do something, or ask anything else, in plain English.
 
-The butler knows every command enabled in this server. Ask "how do I…" and it tells you
-what to type; ask it to do something and it runs the commands for you, with your own
+The same as `!ai`: it continues this channel's shared AI conversation. Ask "how do I…" and it
+tells you what to type; ask it to do something and it runs the commands for you, with your own
 permissions. Anything that needs mod, admin, or game admin rights waits for you to press Run.
 Reply to its answers to follow up. You can also just @mention me.
 
@@ -118,24 +123,10 @@ Set the persona that `!claude persona reset` goes back to.
 
 **Who:** admins, or anyone with the manage guild permission · **Also:** `!claude butleractions`
 
-Let the bot guide run commands for people when they ask it to do something.
+Let the AI chat run commands for people when they ask it to do something.
 
 Commands always run with the asker's own permissions. Ones that need mod, admin, or
-game admin rights wait for the asker to press Run. When off, the guide only explains.
-
-<a id="claude-guidehandoff"></a>
-### !claude guidehandoff
-
-`!claude guidehandoff <enabled>`
-
-**Who:** admins, or anyone with the manage guild permission · **Also:** `!claude butlerhandoff`
-
-Pass questions that aren't about the bot from the butler to the AI chat.
-
-When on, asking `!butler` (or @mentioning the bot) something like "who won the game last night?" gets an
-answer from the AI chat, as if it had been asked with `!ai`. It uses the channel's shared AI conversation,
-counts toward the daily AI limit, and only happens where the asker may use `!ai`. When off, the butler
-just suggests `!ai`.
+game admin rights wait for the asker to press Run. When off, it only explains.
 
 <a id="claude-guidementions"></a>
 ### !claude guidementions
@@ -144,10 +135,10 @@ just suggests `!ai`.
 
 **Who:** admins, or anyone with the manage guild permission · **Also:** `!claude butlermentions`
 
-Turn on or off sending @mentions of the bot, and replies to its messages, to the bot guide.
+Turn on or off answering @mentions of the bot, and replies to its other messages, in the AI chat.
 
-Applies outside AI threads. Replies to AI chat answers always continue that chat.
-The guide stays quiet when a reply is meant for other people ("I'm in!").
+Applies outside AI threads, and uses the channel's shared AI conversation. Replies to AI chat answers
+always continue that chat. The AI stays quiet when a reply is meant for other people ("I'm in!").
 
 <a id="claude-limit"></a>
 ### !claude limit

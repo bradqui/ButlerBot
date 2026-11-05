@@ -32,7 +32,7 @@ Right-click a message (long-press on mobile) → **Apps**. Only you see the resu
 | [ButtonGreeter]({{ '/reference/buttongreeter/' | relative_url }}) | Welcome buttons for new members: pick a group (role and nickname tag), then agree to the rules. | 13 |
 | [Censord]({{ '/reference/censord/' | relative_url }}) | Censor chat using CSV-based lists with specific levels and threshold punishments. | 12 |
 | [Chatchart]({{ '/reference/chatchart/' | relative_url }}) | Show activity. | 5 |
-| [ClaudeChat]({{ '/reference/claudechat/' | relative_url }}) | Chat with Anthropic's Claude. | 20 |
+| [ClaudeChat]({{ '/reference/claudechat/' | relative_url }}) | Chat with Anthropic's Claude, which also answers questions about the bot and runs commands for you. | 19 |
 | [Cleanup]({{ '/reference/cleanup/' | relative_url }}) | This cog contains commands used for "cleaning up" (deleting) messages. | 12 |
 | [ClearChannel]({{ '/reference/clearchannel/' | relative_url }}) | A cog to delete ALL messages of a channel! | 10 |
 | [Core]({{ '/reference/core/' | relative_url }}) | The Core cog has many commands related to core functions. | 80 |

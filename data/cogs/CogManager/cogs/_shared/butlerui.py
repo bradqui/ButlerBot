@@ -466,6 +466,19 @@ def is_card(message: Optional[discord.Message]) -> bool:
     return bool(getattr(flags, "components_v2", False))
 
 
+def message_text(message: discord.Message) -> str:
+    """What a message says: its text, a card's text blocks, or an old embed's title and description."""
+    if is_card(message):
+        def walk(components):
+            for component in components or []:
+                yield component
+                yield from walk(getattr(component, "children", None))
+        return "\n".join(c.content for c in walk(message.components) if isinstance(getattr(c, "content", None), str))
+    if message.content:
+        return message.content
+    return "\n".join(filter(None, (part for e in message.embeds[:1] for part in (e.title, e.description))))
+
+
 async def send_card(target, view: discord.ui.LayoutView, *, ephemeral: bool = False, reply_to=None, **kwargs):
     """
     Send a card to a Context, channel, user or interaction. Ping-free unless `allowed_mentions` is given.

@@ -31,7 +31,7 @@ ButlerBot chats using Anthropic's Claude and draws pictures with Google's Gemini
 
 ## Summarizing links
 
-ButlerBot can read an article or video page and sum it up in three lines:
+ButlerBot can read an article and sum it up in three lines (videos can't be summarized):
 - **Privately:** right-click the message with the link → **Apps** → **Summarize link**. Only you see it.
 - **For the channel:** click the 📄 under the link.
 

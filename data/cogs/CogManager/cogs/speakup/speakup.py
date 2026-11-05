@@ -9,7 +9,7 @@ someone clicks, or posts a small card for things that are clearly useful. Everyt
   schedule a GameManager session.
 - Steam store links: a small card with the price, any sale, who in the server owns or wants it, and
   I own it / Add to wishlist buttons.
-- Article and video links: a page reaction; clicking posts a short summary (Claude's web fetch reads the page).
+- Article links: a page reaction; clicking posts a short summary (Claude's web fetch reads the page).
 - Command mistakes: "Did you mean `!games own Barony`?" with a Run button.
 - Reminders: `[p]remindme 2h check the oven`.
 """
@@ -58,7 +58,7 @@ log = logging.getLogger("red.speakup")
 FEATURES = {
     "times": "Clock reaction on times in chat",
     "steam": "Cards for Steam store links",
-    "links": "Summary offer on article and video links",
+    "links": "Summary offer on article links",
     "mistakes": "\"Did you mean…\" for mistyped commands",
 }
 TIME_EMOJI = "🕘"
@@ -80,9 +80,12 @@ SKIP_LINK_HOSTS = ("discord.com", "discord.gg", "discordapp.com", "discordapp.ne
                    "imgur.com", "steampowered.com", "steamcommunity.com", "twitch.tv", "clips.twitch.tv",
                    "spotify.com", "medal.tv", "streamable.com", "reddit.com/media", "x.com", "twitter.com",
                    "twimg.com", "klipy.com", "gfycat.com", "imgflip.com", "i.redd.it", "v.redd.it", "gyazo.com",
-                   "prnt.sc", "lightshot.com", "pinimg.com", "fxtwitter.com", "vxtwitter.com")
+                   "prnt.sc", "lightshot.com", "pinimg.com", "fxtwitter.com", "vxtwitter.com",
+                   # video sites: web fetch only sees the page around the video, so there's nothing to summarize
+                   "youtube.com", "youtu.be", "youtube-nocookie.com", "vimeo.com", "tiktok.com", "dailymotion.com",
+                   "kick.com", "rumble.com")
 EMBED_WAIT = 3                   # seconds to let Discord attach link previews before deciding what a link is
-MEDIA_EMBED_TYPES = ("image", "gifv")   # previews Discord shows as a picture or GIF: nothing to summarize
+MEDIA_EMBED_TYPES = ("image", "gifv", "video")   # previews Discord shows as a picture, GIF or video: nothing to summarize
 MEDIA_EXTENSIONS = (".png", ".jpg", ".jpeg", ".gif", ".webp", ".mp4", ".webm", ".mov", ".mp3", ".wav", ".ogg",
                     ".zip", ".exe", ".pdf")
 STEAM_DETAILS_URL = "https://store.steampowered.com/api/appdetails"
@@ -749,15 +752,15 @@ class SpeakUp(commands.Cog):
                                                                   "right now."))
         links = await self._article_links(message, summary_links(message.content), wait=False)
         if not links:
-            return await ui.respond(interaction, ui.line(ui.ASK, "There's no article or video link in that message "
-                                                                 "to summarize."))
+            return await ui.respond(interaction, ui.line(ui.ASK, "There's no article link in that message to "
+                                                                 "summarize.", "Videos can't be summarized."))
         if not self._summary_allowed(interaction.user):
             return await ui.respond(interaction, ui.line(ui.WAIT, f"That's {SUMMARIES_PER_HOUR} summaries this hour. "
                                                                   "Try again later."))
         summary = await self.summarize(links[0], interaction.user)
         if not summary:
-            return await ui.respond(interaction, ui.line(ui.FAIL, "I couldn't read that page. It may block bots, need "
-                                                                  "a login, or be mostly video."))
+            return await ui.respond(interaction, ui.line(ui.FAIL, "I couldn't read that page. It may block bots or "
+                                                                  "need a login."))
         await ui.respond(interaction, summary_text(links[0], summary), suppress_embeds=True)
 
     async def _answer_link(self, channel, message: discord.PartialMessage, entry: dict, clicker: discord.Member) -> bool:
@@ -773,9 +776,9 @@ class SpeakUp(commands.Cog):
         view = discord.ui.View(timeout=None)
         view.add_item(RemoveButton(clicker.id))
         if not summary:
-            await channel.send(ui.line(ui.FAIL, "I couldn't read that page. It may block bots, need a login, or be "
-                                                f"mostly video. Try `{await self._prefix(channel.guild)}ai` with what "
-                                                "you want to know about it."),
+            await channel.send(ui.line(ui.FAIL, "I couldn't read that page. It may block bots or need a login. Try "
+                                                f"`{await self._prefix(channel.guild)}ai` with what you want to know "
+                                                "about it."),
                                view=view, reference=reference, mention_author=False, allowed_mentions=ui.NO_PINGS)
             return True
         await channel.send(summary_text(entry["url"], summary, f"Asked by {clicker.mention}"),
@@ -1153,7 +1156,7 @@ class SpeakUp(commands.Cog):
         When the bot chimes in on its own, and how to quiet it.
 
         The bot reacts to times in chat (click the clock to see the time in everyone's timezone), posts a card for
-        Steam store links, offers a summary of article and video links (click the page icon), and suggests the
+        Steam store links, offers a summary of article links (click the page icon), and suggests the
         right command when one is mistyped. It never pings anyone for these.
         """
         conf = await self.config.guild(ctx.guild).all()

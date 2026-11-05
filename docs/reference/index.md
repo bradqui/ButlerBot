@@ -17,7 +17,7 @@ Right-click a message (long-press on mobile) → **Apps**. Only you see the resu
 
 | Option | What it does |
 |---|---|
-| **Summarize link** | A three-line summary of the article or video linked in the message. See [Reminders and auto-replies]({{ '/speakup/' | relative_url }}). |
+| **Summarize link** | A three-line summary of the article linked in the message. See [Reminders and auto-replies]({{ '/speakup/' | relative_url }}). |
 | **Translate** | Translates the message into your language. See [Translation]({{ '/translate/' | relative_url }}). |
 
 ## Commands

@@ -67,7 +67,7 @@ this channel is gone.
 When the bot chimes in on its own, and how to quiet it.
 
 The bot reacts to times in chat (click the clock to see the time in everyone's timezone), posts a card for
-Steam store links, offers a summary of article and video links (click the page icon), and suggests the
+Steam store links, offers a summary of article links (click the page icon), and suggests the
 right command when one is mistyped. It never pings anyone for these.
 
 <a id="speakup-feature"></a>

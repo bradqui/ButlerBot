@@ -37,7 +37,7 @@ ButlerBot sometimes offers help without being asked. Its replies never ping anyo
 |---|---|
 | A time while making plans ("anyone up for 9?", "friday 8pm?") | Adds a 🕘 reaction. Click it for a small card with the time in everyone's own timezone and a **Schedule a session** button. |
 | A Steam store link | Replies with a small card: the price and any sale, who here owns or wants it, and **I own it** / **Add to wishlist** buttons. The card updates when someone clicks. |
-| An article or video link | Adds a 📄 reaction. Click it for a three-line summary, posted in the channel. |
+| An article link (not a video) | Adds a 📄 reaction. Click it for a three-line summary, posted in the channel. |
 | A command that doesn't exist | Suggests the one you probably meant, with a **Run it** button. **Run it** works for 5 minutes, for the person who typed the command. |
 
 **Reactions are offers:** nothing happens unless someone clicks. Each offer is answered once, and then ButlerBot takes its own 🕘 or 📄 back, so a reaction from the bot always means the offer is still open. Offers nobody uses expire after a day, and the bot takes those reactions back too.

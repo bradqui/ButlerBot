@@ -99,7 +99,7 @@ GAME_NIGHT_COMMANDS = {"session", "sessions", "join", "leave", "here", "endsessi
                        "endvote", "recurring", "lfg", "shared", "installed", "top"}
 # Right-click options have no help text of their own: (description, handbook topic) for the reference.
 CONTEXT_MENU_HELP = {
-    "Summarize link": ("A three-line summary of the article or video linked in the message.", "speakup/"),
+    "Summarize link": ("A three-line summary of the article linked in the message.", "speakup/"),
     "Translate": ("Translates the message into your language.", "translate/"),
 }
 

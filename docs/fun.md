@@ -106,7 +106,7 @@ You get a short summary of everything since you last spoke in the channel, and o
 
 ## Summarize a link
 
-Someone posted a long article or video?
+Someone posted a long article? (Videos can't be summarized.)
 - **Just for you:** right-click the message (long-press on mobile) → **Apps** → **Summarize link**. You get a three-line summary that only you can see.
 - **For everyone:** click the 📄 that ButlerBot adds under the link, and the summary is posted in the channel.
 

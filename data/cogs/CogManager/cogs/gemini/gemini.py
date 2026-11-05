@@ -44,7 +44,7 @@ class GeminiChat(commands.Cog):
         # Same identifier as before so the saved API key and image model choices carry over.
         self.config = Config.get_conf(self, identifier=9283748291)
         self.config.register_global(api_key=None)
-        self.config.register_user(image_model=DEFAULT_IMAGE_MODEL)
+        self.config.register_user(image_model=DEFAULT_IMAGE_MODEL)   # unused since !myai was removed (2026-11-05)
         self.config.register_channel(image_model=DEFAULT_IMAGE_MODEL)
 
         self.client = None
@@ -138,7 +138,7 @@ class GeminiChat(commands.Cog):
         """
         Generate a new image (new=True) or refine the session's last one (new=False) and post it.
 
-        `session_key` is the caller's conversation key (CHANNEL_/THREAD_/USER_<id>). With `quiet`, failures are
+        `session_key` is the caller's conversation key (CHANNEL_<id> or THREAD_<id>). With `quiet`, failures are
         only logged, not posted (for optional pictures, like an adventure's final scene).
         Returns the posted message, or None if nothing was generated.
         Called by the Claude cog and ButlerFun; keep this signature stable.
@@ -149,11 +149,8 @@ class GeminiChat(commands.Cog):
                 await self._send(reply_target, channel, await self._not_set_up(user))
             return None
 
-        if session_key.startswith("USER_"):
-            model_name = await self.config.user(user).image_model()
-        else:
-            conf_channel = channel.parent if isinstance(channel, discord.Thread) and channel.parent else channel
-            model_name = await self.config.channel(conf_channel).image_model()
+        conf_channel = channel.parent if isinstance(channel, discord.Thread) and channel.parent else channel
+        model_name = await self.config.channel(conf_channel).image_model()
 
         if new:
             self.image_sessions.pop(session_key, None)
@@ -258,7 +255,6 @@ class GeminiChat(commands.Cog):
         if not models:
             return await ctx.send(ui.line(ui.ASK, "Google didn't list any image models."))
         # One model a row: its name, then what it's used for here and its shortcut name in small text underneath.
-        user_model = await self.config.user(ctx.author).image_model()
         channel_model = await self.config.channel(ctx.channel).image_model()
         rows = []
         for m in models:
@@ -267,25 +263,21 @@ class GeminiChat(commands.Cog):
                 notes.append("default")
             if m == channel_model:
                 notes.append("this channel")
-            if m == user_model:
-                notes.append("your private requests")
             detail = " · ".join(notes)
             rows.append(ui.row(f"`{m}`", detail[:1].upper() + detail[1:]))
         p = ctx.clean_prefix
         await ui.Board("🎨 Image models", rows, color=ui.BRAND,
-                       footer=f"Pick one with {p}gemini model or {p}gemini channelmodel").send(ctx)
+                       footer=f"Pick one with {p}gemini channelmodel").send(ctx)
 
     @gemini.command(name="settings")
     async def show_settings(self, ctx):
-        """Show the image models used for you and this channel."""
-        u_img = await self.config.user(ctx.author).image_model()
+        """Show the image model used in this channel."""
         c_img = await self.config.channel(ctx.channel).image_model()
         p = ctx.clean_prefix
         container = ui.card(
-            ui.settings_text([(f"Your private requests (`{p}myai draw …`)", f"`{u_img}`"),
-                              ("This channel", f"`{c_img}`")]),
+            ui.settings_text([("This channel", f"`{c_img}`")]),
             ui.SEPARATOR, title="🎨 Image settings", color=ui.BRAND,
-            footer=f"Change with {p}gemini model or {p}gemini channelmodel")
+            footer=f"Change with {p}gemini channelmodel")
         await ui.send_card(ctx, ui.CardView(container))
 
     async def _check_model(self, ctx, model_name: str):
@@ -306,16 +298,6 @@ class GeminiChat(commands.Cog):
             return None, ui.line(ui.FAIL, f"`{name[:80]}` isn't an image model I can use.",
                                  hint=f"Try `image` or `3image`, or one of: {shown}.")
         return name, None
-
-    @gemini.command(name="model")
-    async def set_user_image_model(self, ctx, model_name: str):
-        """Set the image model for your private requests. Aliases: `image`, `3image`."""
-        target, note = await self._check_model(ctx, model_name)
-        if target is None:
-            return await ctx.send(note)
-        await self.config.user(ctx.author).image_model.set(target)
-        self.image_sessions.pop(f"USER_{ctx.author.id}", None)
-        await ctx.send(ui.line(ui.DONE, f"Your private image model is now `{target}`.", hint=note))
 
     @gemini.command(name="channelmodel")
     @checks.mod_or_permissions(manage_channels=True)

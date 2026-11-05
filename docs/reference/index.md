@@ -32,7 +32,7 @@ Right-click a message (long-press on mobile) → **Apps**. Only you see the resu
 | [ButtonGreeter]({{ '/reference/buttongreeter/' | relative_url }}) | Welcome buttons for new members: pick a group (role and nickname tag), then agree to the rules. | 13 |
 | [Censord]({{ '/reference/censord/' | relative_url }}) | Censor chat using CSV-based lists with specific levels and threshold punishments. | 12 |
 | [Chatchart]({{ '/reference/chatchart/' | relative_url }}) | Show activity. | 5 |
-| [ClaudeChat]({{ '/reference/claudechat/' | relative_url }}) | Chat with Anthropic's Claude, which also answers questions about the bot and runs commands for you. | 19 |
+| [ClaudeChat]({{ '/reference/claudechat/' | relative_url }}) | Chat with Anthropic's Claude, which also answers questions about the bot and runs commands for you. | 16 |
 | [Cleanup]({{ '/reference/cleanup/' | relative_url }}) | This cog contains commands used for "cleaning up" (deleting) messages. | 12 |
 | [ClearChannel]({{ '/reference/clearchannel/' | relative_url }}) | A cog to delete ALL messages of a channel! | 10 |
 | [Core]({{ '/reference/core/' | relative_url }}) | The Core cog has many commands related to core functions. | 80 |
@@ -41,7 +41,7 @@ Right-click a message (long-press on mobile) → **Apps**. Only you see the resu
 | [EasyTranslate]({{ '/reference/easytranslate/' | relative_url }}) | Translate messages using Google Translate for free. Supports context menu commands. | 3 |
 | [Filter]({{ '/reference/filter/' | relative_url }}) | This cog is designed for "filtering" unwanted words and phrases from a server. | 14 |
 | [GameManager]({{ '/reference/gamemanager/' | relative_url }}) | Track the games your server owns, find something everyone can play, and vote on it. | 51 |
-| [GeminiChat]({{ '/reference/geminichat/' | relative_url }}) | Image generation with Google Gemini. | 7 |
+| [GeminiChat]({{ '/reference/geminichat/' | relative_url }}) | Image generation with Google Gemini. | 6 |
 | [General]({{ '/reference/general/' | relative_url }}) | General commands. | 9 |
 | [Handbook]({{ '/reference/handbook/' | relative_url }}) | The online handbook, short help cards, and the generated command reference. | 1 |
 | [Mod]({{ '/reference/mod/' | relative_url }}) | Moderation tools. | 32 |

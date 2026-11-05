@@ -9,8 +9,7 @@ permalink: /reference/claudechat/
 
 Chat with Anthropic's Claude, which also answers questions about the bot and runs commands for you.
 
-`!ai` talks in this channel's shared conversation, `!myai` keeps a private
-conversation that follows you around, and `!aithread` starts a dedicated thread.
+`!ai` talks in this channel's shared conversation, and `!aithread` starts a dedicated thread.
 Reply to any of my answers to keep that conversation going.
 
 Ask about the bot itself too ("how do I start a game vote?"), or ask it to do something.
@@ -160,17 +159,6 @@ Mods, admins, and the bot owner are exempt. Resets at midnight UTC.
 
 List the available Claude models and their prices.
 
-<a id="claude-mymodel"></a>
-### !claude mymodel
-
-`!claude mymodel <model>`
-
-**Who:** admins, or anyone with the manage guild permission
-
-Pick the model for your private conversations (`!myai`). Admins only. Use `reset` for the default.
-
-Only models the bot owner allows can be picked (see `!claude models`).
-
 <a id="claude-persona"></a>
 ### !claude persona
 
@@ -227,27 +215,5 @@ member's usage, or name a member to see theirs, right where they ask.
 **Who:** admins, or anyone with the manage guild permission
 
 Turn web search on or off for this server (searches cost $10 per 1,000).
-
-<a id="myai"></a>
-### !myai
-
-`!myai [prompt]`
-
-**Who:** everyone
-
-Talk to Claude in your own private conversation.
-
-Your private conversation follows you across channels and only you can
-continue it (by command or by replying to its answers). It uses the bot's
-default model; admins can pick their own with `!claude mymodel`.
-
-<a id="myai-reset"></a>
-### !myai reset
-
-`!myai reset`
-
-**Who:** everyone
-
-Wipe your private conversation memory.
 
 {% endraw %}

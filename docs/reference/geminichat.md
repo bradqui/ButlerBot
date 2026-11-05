@@ -63,15 +63,6 @@ Set the image model for this channel. Aliases: `image`, `3image`.
 
 List the Gemini models that can generate images.
 
-<a id="gemini-model"></a>
-### !gemini model
-
-`!gemini model <model_name>`
-
-**Who:** everyone
-
-Set the image model for your private requests. Aliases: `image`, `3image`.
-
 <a id="gemini-settings"></a>
 ### !gemini settings
 
@@ -79,6 +70,6 @@ Set the image model for your private requests. Aliases: `image`, `3image`.
 
 **Who:** everyone
 
-Show the image models used for you and this channel.
+Show the image model used in this channel.
 
 {% endraw %}

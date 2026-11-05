@@ -172,7 +172,7 @@ MAX_LOOKUP_ROUNDS = 3         # rounds of lookups (bot_commands and other cogs' 
 MAX_ACTION_COMMANDS = 5
 ACTION_STEP_TIMEOUT = 20      # seconds to wait for one command before starting the next
 ACTION_CONFIRM_TIMEOUT = 120
-ACTION_BLOCKED_COMMANDS = {"butler", "ai", "myai", "aithread"}
+ACTION_BLOCKED_COMMANDS = {"butler", "ai", "aithread"}
 GUIDE_ACTION_TOOL = {
     "name": "run_commands",
     "description": (
@@ -367,8 +367,7 @@ class ClaudeChat(commands.Cog):
     """
     Chat with Anthropic's Claude, which also answers questions about the bot and runs commands for you.
 
-    `[p]ai` talks in this channel's shared conversation, `[p]myai` keeps a private
-    conversation that follows you around, and `[p]aithread` starts a dedicated thread.
+    `[p]ai` talks in this channel's shared conversation, and `[p]aithread` starts a dedicated thread.
     Reply to any of my answers to keep that conversation going.
 
     Ask about the bot itself too ("how do I start a game vote?"), or ask it to do something.
@@ -403,7 +402,7 @@ class ClaudeChat(commands.Cog):
             usage_since=None,
         )
         self.config.register_channel(model=None)
-        self.config.register_user(model=None)
+        self.config.register_user(model=None)   # unused since !myai was removed (2026-11-05); old values are cleared on data deletion
         self.config.register_member(usage=dict(EMPTY_USAGE), daily={"date": "", "count": 0})
 
         self._client: Optional[anthropic.AsyncAnthropic] = None
@@ -431,7 +430,6 @@ class ClaudeChat(commands.Cog):
         for guild_id, members in (await self.config.all_members()).items():
             if user_id in members:
                 await self.config.member_from_ids(guild_id, user_id).clear()
-        self._sessions.pop(f"USER_{user_id}", None)
 
     # ==========================================
     #                 HELPERS
@@ -464,9 +462,7 @@ class ClaudeChat(commands.Cog):
         info = MODELS.get(model)
         return f"{info.name} (`{model}`)" if info else f"`{model}`"
 
-    def _session_key(self, ctx: commands.Context, private: bool) -> str:
-        if private:
-            return f"USER_{ctx.author.id}"
+    def _session_key(self, ctx: commands.Context) -> str:
         return self._channel_key(ctx.channel)
 
     def _channel_key(self, channel) -> str:
@@ -497,16 +493,9 @@ class ClaudeChat(commands.Cog):
         return await conf.persona() or await conf.default_persona() or DEFAULT_PERSONA
 
     async def _model_for(self, key: str, author: discord.Member, channel) -> str:
-        if key.startswith("USER_"):
-            model = await self.config.user(author).model()
-            # A personal choice only counts while that model is still allowed.
-            if model not in await self.config.allowed_models():
-                model = None
-        else:
-            if isinstance(channel, discord.Thread) and channel.parent is not None:
-                channel = channel.parent
-            model = await self.config.channel(channel).model()
-        model = model or await self.config.default_model()
+        if isinstance(channel, discord.Thread) and channel.parent is not None:
+            channel = channel.parent
+        model = await self.config.channel(channel).model() or await self.config.default_model()
         return model if model in MODELS else DEFAULT_MODEL
 
     async def _is_exempt(self, member: discord.Member) -> bool:
@@ -612,13 +601,13 @@ class ClaudeChat(commands.Cog):
                          "Don't search for things you already know well.")
         if lookups:
             lines.append("- You can look up this server's data with the lookup tools (for example people's game "
-                         "libraries, who owns a game, and active sessions and votes). Use them instead of guessing "
-                         "or asking people to check for themselves; \"me\" means the person talking to you.")
-        lines += await self._bot_prompt_lines(guild, actions)
+                         "libraries, who owns a game, active sessions and votes, and activity stats); \"me\" means "
+                         "the person talking to you.")
+        lines += await self._bot_prompt_lines(guild, actions, lookups)
         lines += ["", f"Today's date is {today} (UTC)."]   # last, so the date changing keeps the rest cached
         return "\n".join(lines)
 
-    async def _bot_prompt_lines(self, guild: discord.Guild, actions: bool) -> List[str]:
+    async def _bot_prompt_lines(self, guild: discord.Guild, actions: bool, lookups: bool = False) -> List[str]:
         """The system prompt's part about the bot itself: what it can do, and how to answer questions about it."""
         prefix = await self._prefix(guild)
         lines = [
@@ -646,7 +635,22 @@ class ClaudeChat(commands.Cog):
             "- In commands, a <@id> mention works wherever a member is expected.",
             f"- For every detail of one command, they can run `{prefix}help <command>`.",
             "- Your personality never changes command names, arguments, game names or steps: those stay exact.",
+            "",
+            "Server data (who owns or has installed which games, libraries, wishlists, sessions, votes, stats):",
+            "- Never state server data unless a lookup or command in this same turn returned it. Your earlier "
+            "replies may be out of date or wrong, so look it up again instead of repeating them, even for a "
+            "follow-up about the same thing.",
         ]
+        if actions:
+            lines.append("- When one command shows exactly what was asked (who owns or has installed a game, "
+                         "someone's library, top or most-wanted games, active sessions, a stats report), run it with "
+                         "run_commands so its real card is posted, and say at most one short sentence yourself. "
+                         "Look it up with bot_commands first, like any command.")
+        if lookups:
+            lines.append("- When the question needs reasoning over the data (what a group can play together, who "
+                         "owns a game but hasn't installed it), use the lookup tools and answer in your own words, "
+                         "using only what they returned.")
+        lines.append("- If you can't check something, say so and give the command that shows it, without guessing.")
         if actions:
             lines += [
                 "",
@@ -669,7 +673,7 @@ class ClaudeChat(commands.Cog):
                 "- Commands that need mod, admin, or game admin rights wait for the asker to press Run.",
                 "- Only ban, kick, mute, warn, or delete messages when the asker explicitly asks for exactly that. "
                 "If a request is ambiguous, ask a short question instead of guessing.",
-                "- Never run the AI chat commands (ai, myai, aithread, butler).",
+                "- Never run the AI chat commands (ai, aithread, butler).",
             ]
         else:
             lines.append("- You can't run commands for people; tell them what to type.")
@@ -1120,7 +1124,7 @@ class ClaudeChat(commands.Cog):
         if isinstance(e, anthropic.NotFoundError):
             log.warning("Anthropic model not found: %s", e)
             return (ui.line(ui.FAIL, "That model wasn't found.",
-                            hint=f"Pick another with `{prefix}claude channelmodel` or `{prefix}claude mymodel`."), False)
+                            hint=f"Pick another with `{prefix}claude channelmodel`."), False)
         if isinstance(e, anthropic.RateLimitError):
             return ui.line(ui.WAIT, "Claude is getting too many requests right now.", "Try again in a minute."), False
         if isinstance(e, anthropic.BadRequestError):
@@ -1740,35 +1744,14 @@ class ClaudeChat(commands.Cog):
         """
         if not prompt and not ctx.message.attachments:
             return await ctx.send_help()
-        await self._respond(ctx.message, prompt, self._session_key(ctx, private=False))
+        await self._respond(ctx.message, prompt, self._session_key(ctx))
 
     @ai.command(name="reset")
     @checks.mod_or_permissions(manage_channels=True)
     async def ai_reset(self, ctx: commands.Context):
         """Wipe this channel's shared conversation memory."""
-        self._get_session(self._session_key(ctx, private=False)).reset()
+        self._get_session(self._session_key(ctx)).reset()
         await ctx.send("✅ This channel's shared AI conversation is cleared, so the next message starts fresh.")
-
-    @commands.group(name="myai", invoke_without_command=True)
-    @commands.guild_only()
-    @commands.cooldown(1, 4, commands.BucketType.user)
-    async def myai(self, ctx: commands.Context, *, prompt: str = ""):
-        """
-        Talk to Claude in your own private conversation.
-
-        Your private conversation follows you across channels and only you can
-        continue it (by command or by replying to its answers). It uses the bot's
-        default model; admins can pick their own with `[p]claude mymodel`.
-        """
-        if not prompt and not ctx.message.attachments:
-            return await ctx.send_help()
-        await self._respond(ctx.message, prompt, self._session_key(ctx, private=True), owner_id=ctx.author.id)
-
-    @myai.command(name="reset")
-    async def myai_reset(self, ctx: commands.Context):
-        """Wipe your private conversation memory."""
-        self._get_session(self._session_key(ctx, private=True)).reset()
-        await ctx.send("✅ Your private AI conversation is cleared, so the next message starts fresh.")
 
     @commands.command(name="aithread")
     @commands.guild_only()
@@ -1819,7 +1802,7 @@ class ClaudeChat(commands.Cog):
             actions = await self.config.guild(ctx.guild).guide_actions()
             await self._send(ctx.message, ctx.channel, self._butler_intro(await self._prefix(ctx.guild), actions))
             return
-        await self._respond(ctx.message, request, self._session_key(ctx, private=False))
+        await self._respond(ctx.message, request, self._session_key(ctx))
 
     @commands.Cog.listener()
     async def on_message_without_command(self, message: discord.Message):
@@ -1851,9 +1834,7 @@ class ClaudeChat(commands.Cog):
 
         if entry is not None:
             key, owner_id, _ = entry
-            if owner_id is not None and owner_id != message.author.id:
-                return   # private conversations belong to their owner
-            command = self.myai if key.startswith("USER_") else self.ai
+            command = self.ai
         elif in_ai_thread:
             key, owner_id, command = f"THREAD_{message.channel.id}", None, self.ai
         else:
@@ -1894,8 +1875,6 @@ class ClaudeChat(commands.Cog):
         persona = ui.truncate(persona, 200) + ("" if g["persona"] else " *(default)*")
         channel = ctx.channel.parent if isinstance(ctx.channel, discord.Thread) and ctx.channel.parent else ctx.channel
         models = ui.settings_text([
-            ("Your private chats", self._model_label(await self._model_for(f"USER_{ctx.author.id}", ctx.author,
-                                                                           ctx.channel))),
             ("This channel", self._model_label(await self._model_for("CHANNEL", ctx.author, channel))),
             ("Bot default", self._model_label(await self.config.default_model())),
         ])
@@ -1937,27 +1916,7 @@ class ClaudeChat(commands.Cog):
                 detail.append("no web search")
             rows.append(ui.row(f"**{info.name}**", " · ".join(detail)))
         await ui.Board("🤖 AI models", rows, color=ui.BRAND,
-                       footer="Admins (for their private chats) and channel managers can pick allowed models").send(ctx)
-
-    @claude.command(name="mymodel")
-    @checks.admin_or_permissions(manage_guild=True)
-    async def claude_mymodel(self, ctx: commands.Context, model: str):
-        """
-        Pick the model for your private conversations (`[p]myai`). Admins only. Use `reset` for the default.
-
-        Only models the bot owner allows can be picked (see `[p]claude models`).
-        """
-        if model.lower() == "reset":
-            await self.config.user(ctx.author).model.set(None)
-            self._get_session(f"USER_{ctx.author.id}").reset()
-            return await ctx.send("✅ Your private chats now use the default model.")
-        resolved = self._resolve_model(model)
-        if resolved is None or resolved not in await self.config.allowed_models():
-            return await ctx.send(ui.line(ui.FAIL, "That model isn't available.",
-                                          f"`{ctx.clean_prefix}claude models` lists the allowed ones."))
-        await self.config.user(ctx.author).model.set(resolved)
-        self._get_session(f"USER_{ctx.author.id}").reset()
-        await ctx.send(f"✅ Your private chats now use {self._model_label(resolved)}.")
+                       footer=f"Channel managers pick from the allowed ones with {ctx.clean_prefix}claude channelmodel").send(ctx)
 
     @claude.command(name="channelmodel")
     @checks.mod_or_permissions(manage_channels=True)
@@ -1987,7 +1946,7 @@ class ClaudeChat(commands.Cog):
     @claude.command(name="allowmodel")
     @checks.is_owner()
     async def claude_allowmodel(self, ctx: commands.Context, model: str):
-        """Let admins (for their private chats) and channel managers choose a model."""
+        """Let channel managers choose a model for their channels."""
         resolved = self._resolve_model(model)
         if resolved is None:
             return await ctx.send(f"❌ Unknown model. See `{ctx.clean_prefix}claude models`.")
@@ -2002,8 +1961,7 @@ class ClaudeChat(commands.Cog):
         """
         Stop a model from being chosen.
 
-        Private chats that had picked it switch to the default model. Channels that had picked it keep it
-        until a channel manager changes it.
+        Channels that had picked it keep it until a channel manager changes it.
         """
         resolved = self._resolve_model(model)
         if resolved is None:
@@ -2018,7 +1976,7 @@ class ClaudeChat(commands.Cog):
         if not was_allowed:
             return await ctx.send(ui.line(ui.WARN, f"{self._model_label(resolved)} already can't be chosen."))
         await ctx.send(ui.line(ui.DONE, f"{self._model_label(resolved)} can no longer be chosen.",
-                               "Private chats using it now use the default model."))
+                               "Channels already using it keep it until someone changes it."))
 
     @claude.command(name="effort")
     @checks.is_owner()

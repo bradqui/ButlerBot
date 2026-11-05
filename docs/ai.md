@@ -8,12 +8,11 @@ permalink: /ai/
 
 ButlerBot chats using Anthropic's Claude and draws pictures with Google's Gemini.
 
-## Three ways to chat
+## Two ways to chat
 
 | Command | Who sees it | Good for |
 |---|---|---|
 | `!ai <message>` (also `!chat`, `!ask`, `!g`) | The whole channel shares one conversation | Group questions and banter |
-| `!myai <message>` | A private conversation that follows you between channels (still posted where you type it) | Your own ongoing questions |
 | `!aithread <message>` | A new thread just for that conversation | Long discussions without cluttering the channel |
 
 **Keeping a conversation going:**
@@ -28,7 +27,6 @@ ButlerBot chats using Anthropic's Claude and draws pictures with Google's Gemini
 
 **Starting fresh:**
 - **Idle reset:** conversations reset after a while without activity, and when the bot restarts.
-- `!myai reset` wipes your private conversation.
 - `!ai reset` wipes the channel's (mods).
 
 ## Summarizing links
@@ -74,10 +72,9 @@ ButlerBot's personality (a slightly put-upon robot butler) is set by the server'
 > - `limit <per day>`
 > - `usage [member]`: the server's totals and every member's usage, or one member's usage, shown where you ask
 > - `resetusage`
-> - `mymodel <model>` (admins' private chats)
 >
 > **Mods:** `!claude channelmodel <model|reset>` picks the model for a channel and its threads.
 >
-> **Gemini:** `!gemini channelmodel` sets a channel's image model. `!gemini model` sets your own; see `!gemini list` and `!gemini settings`. Use `image`, `3image` or a name from `!gemini list`; other names are turned down.
+> **Gemini:** `!gemini channelmodel` sets a channel's image model; see `!gemini list` and `!gemini settings`. Use `image`, `3image` or a name from `!gemini list`; other names are turned down.
 >
 > The bot owner sets the default model, effort and memory length, and the API keys.

@@ -38,10 +38,24 @@ To answer, just type in the channel; capitalization doesn't matter.
 
 ```
 !maketrivia our games
-!maketrivia 15 1990s video game consoles
+!maketrivia 50 1990s video game consoles
 ```
 
-The quiz is saved as `bb_<topic>`, so start it with `!trivia bb_our_games`.
+- **Size:** 30 questions unless you give a number (10–100).
+- **Name:** the quiz is saved as `bb_<topic>`, so start it with `!trivia bb_our_games`.
+- **Growing a quiz:** run `!maketrivia` on the same topic again to add new questions. ButlerBot skips the ones it already wrote, so a quiz can grow to 300 questions and stay fresh.
+
+**Managing quizzes (mods):**
+
+```
+!maketrivia show                          every quiz ButlerBot wrote
+!maketrivia show our games                numbered questions, answers behind spoilers
+!maketrivia remove our_games 4 17         drop questions by number
+!maketrivia remove our_games release year drop the one question containing those words
+!maketrivia redo our games                throw it away and write it again
+```
+
+`show` reveals the answers, so run it somewhere players won't see it. A failed `redo` leaves the old quiz as it was.
 
 {: .staff }
 > **Trivia settings** (mods): `!triviaset maxscore`, `timelimit`, `stopafter`, `revealanswer`, `usespoilers`, `botplays`, `showsettings`.

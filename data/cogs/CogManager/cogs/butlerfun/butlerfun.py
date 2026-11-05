@@ -6,12 +6,15 @@ AI-powered extras built on the Claude cog (and Gemini and GameManager where note
 - `/catchup` (or `[p]catchup`, sent by DM): a summary of the channel since you last spoke, only for you.
 - `[p]judge`: ButlerBot reads the recent argument and delivers a ruling in character.
 - `[p]adventure <setting>`: a group text adventure in its own thread, narrated by ButlerBot.
-- `[p]maketrivia <topic>`: writes a trivia list for Red's trivia cog (`our games` uses the server's library).
+- `[p]maketrivia <topic>`: writes a trivia list for Red's trivia cog, or adds to it (`our games` uses the server's
+  library); `show`, `remove` and `redo` manage the lists.
 - `[p]guessgame`: Gemini paints a game from the server's library in an odd style; first correct guess wins.
 """
 
 import asyncio
+import contextlib
 import difflib
+import io
 import json
 import logging
 import random
@@ -40,7 +43,10 @@ JUDGE_DEFAULT, JUDGE_MAX = 20, 60
 ADVENTURE_DEBOUNCE = 8          # seconds to gather everyone's moves before narrating
 ADVENTURE_HISTORY = 40          # messages of story kept in context
 MAX_ADVENTURES = 3              # running at once per server
-TRIVIA_MIN, TRIVIA_MAX = 10, 30
+TRIVIA_MIN, TRIVIA_MAX, TRIVIA_DEFAULT = 10, 100, 30   # questions per command
+TRIVIA_BATCH = 25               # questions per Claude call
+TRIVIA_LIST_MAX = 300           # questions one list can grow to
+TRIVIA_META_KEYS = ("AUTHOR", "CONFIG", "DESCRIPTION", "$schema")
 GUESS_SECONDS = 180
 GUESS_HINTS = (60, 120)         # seconds in, when hints appear
 
@@ -50,6 +56,13 @@ ART_STYLES = [
     "8-bit pixel art", "a claymation film still", "a watercolor postcard", "a vintage travel poster",
     "a Soviet propaganda poster", "a cross-stitch sampler", "a cave painting", "a Victorian botanical illustration",
 ]
+
+TRIVIA_SYSTEM = (
+    "You write trivia questions for a Discord quiz game. Facts must be accurate and well established; skip anything "
+    "you're unsure of. Each question has one clear answer that a player can type in a few words. List the main answer "
+    "first, then common alternate spellings or short forms players might type (no more than 5). Vary difficulty, "
+    "mostly medium. Reply with only a JSON array: [{\"q\": \"question?\", \"a\": [\"answer\", \"alternate\"]}, …]"
+)
 
 ADVENTURE_RULES = (
     "You are the narrator of a group text adventure in a Discord thread. Setting: {setting}\n\n"
@@ -125,13 +138,33 @@ def parse_trivia_json(text: str) -> List[Tuple[str, List[str]]]:
             continue
         question = str(item.get("q") or item.get("question") or "").strip()
         answers = [str(a).strip() for a in (item.get("a") or item.get("answers") or []) if str(a).strip()]
-        if question and answers and question not in ("AUTHOR", "CONFIG", "DESCRIPTION", "$schema"):
+        if question and answers and question not in TRIVIA_META_KEYS:
             questions.append((question[:300], answers[:6]))
     return questions
 
 
 def trivia_slug(topic: str) -> str:
     return "bb_" + (re.sub(r"[^a-z0-9]+", "_", topic.lower()).strip("_")[:30] or "trivia")
+
+
+def trivia_name(text: str) -> str:
+    """A list's saved name from its topic ("our games") or the name itself ("our_games", "bb_our_games")."""
+    text = text.strip().lower()
+    return text if re.fullmatch(r"bb_[a-z0-9_]+", text) else trivia_slug(text)
+
+
+def read_trivia(path) -> Tuple[dict, dict]:
+    """(metadata, {question: answers}) from a trivia YAML file; empty if it doesn't exist."""
+    if not path.exists():
+        return {}, {}
+    data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    return ({k: v for k, v in data.items() if k in TRIVIA_META_KEYS},
+            {str(k): v for k, v in data.items() if k not in TRIVIA_META_KEYS})
+
+
+def write_trivia(path, meta: dict, questions: dict):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(yaml.safe_dump({**meta, **questions}, allow_unicode=True, sort_keys=False), encoding="utf-8")
 
 
 # ==========================================
@@ -151,6 +184,7 @@ class ButlerFun(commands.Cog):
         self._timers: Dict[int, asyncio.Task] = {}
         self._locks: Dict[int, asyncio.Lock] = {}
         self._guessing: Dict[int, dict] = {}            # channel ID -> running guess-the-game round
+        self._trivia_busy: set = set()                  # trivia list names being written
 
     async def cog_unload(self):
         for task in self._timers.values():
@@ -403,61 +437,234 @@ class ButlerFun(commands.Cog):
     #               TRIVIA WRITER
     # ==========================================
 
-    @commands.command(name="maketrivia", aliases=["trivia-make", "writetrivia"])
+    def _trivia_path(self, name: str):
+        return cog_data_path(raw_name="Trivia") / f"{name}.yaml"
+
+    def _trivia_lists(self) -> List[str]:
+        folder = cog_data_path(raw_name="Trivia")
+        return sorted(p.stem for p in folder.glob("bb_*.yaml")) if folder.exists() else []
+
+    def _no_list(self, name: str) -> str:
+        lists = self._trivia_lists()
+        return (f"❌ I don't have a trivia list called `{name}`."
+                + (f" Mine: {', '.join(f'`{n}`' for n in lists[:15])}." if lists else ""))
+
+    async def _trivia_subject(self, ctx: commands.Context, topic: str) -> Optional[str]:
+        """What to ask Claude about: the topic, or the server's game library for `our games`."""
+        if simplify(topic) not in ("ourgames", "servergames", "ourlibrary", "library"):
+            return topic[:200]
+        gm = self.bot.get_cog("GameManager")
+        games = sorted(g["name"] for g in (await gm.config.guild(ctx.guild).games()).values()) if gm else []
+        if not games:
+            await ctx.send("❌ The server's game library is empty (or GameManager isn't loaded).")
+            return None
+        return "these video games (mix questions across them): " + ", ".join(games[:80])
+
+    async def _write_trivia(self, member: discord.Member, channel, subject: str, count: int, known: List[str],
+                            progress=None) -> Tuple[List[Tuple[str, List[str]]], Optional[str]]:
+        """Up to `count` new questions, written in batches. Claude sees every question so far, so it doesn't repeat."""
+        new: List[Tuple[str, List[str]]] = []
+        seen = {simplify(q) for q in known}
+        for _ in range(-(-count // TRIVIA_BATCH) + 1):      # one spare batch to make up for duplicates
+            want = min(TRIVIA_BATCH, count - len(new))
+            if want <= 0:
+                break
+            prompt = f"Write {want} questions about {subject}."
+            so_far = known + [q for q, _ in new]
+            if so_far:
+                prompt += ("\n\nThe list already has the questions below. Write different ones: no repeats, and "
+                           "nothing that asks for the same fact in other words.\n" + "\n".join(f"- {q}" for q in so_far))
+            text, error = await self._ask(member, channel, TRIVIA_SYSTEM, [{"role": "user", "content": prompt}],
+                                          max_tokens=4000, persona=False)
+            if text is None:
+                return new, error
+            try:
+                batch = parse_trivia_json(text)
+            except (ValueError, TypeError):
+                batch = []
+            added = 0
+            for question, answers in batch:
+                key = simplify(question)
+                if key and key not in seen and len(new) < count:
+                    seen.add(key)
+                    new.append((question, answers))
+                    added += 1
+            if not added:
+                break
+            if progress is not None:
+                await progress(len(new))
+        return new, None
+
+    async def _make_trivia(self, ctx: commands.Context, count: Optional[int], topic: str, *, replace: bool):
+        p = ctx.clean_prefix
+        topic = topic.strip()
+        name = trivia_slug(topic)
+        if name in self._trivia_busy:
+            return await ctx.send(f"⏳ I'm already writing `{name}`. Give me a moment.")
+        subject = await self._trivia_subject(ctx, topic)
+        if subject is None:
+            return
+        path = self._trivia_path(name)
+        meta, existing = ({}, {}) if replace else read_trivia(path)
+        count = min(max(TRIVIA_MIN, min(count or TRIVIA_DEFAULT, TRIVIA_MAX)), TRIVIA_LIST_MAX - len(existing))
+        if count <= 0:
+            return await ctx.send(f"❌ `{name}` already has {len(existing)} questions, the most one list can hold. "
+                                  f"Remove some with `{p}maketrivia remove {name} <numbers>`, or start over with "
+                                  f"`{p}maketrivia redo {topic}`.")
+        status = None
+
+        async def reply(text: str):
+            if status is not None:
+                with contextlib.suppress(discord.HTTPException):
+                    return await status.edit(content=text, allowed_mentions=discord.AllowedMentions.none())
+            return await ctx.send(text, allowed_mentions=discord.AllowedMentions.none())
+
+        async def progress(done: int):
+            if status is not None and done < count:
+                with contextlib.suppress(discord.HTTPException):
+                    await status.edit(content=f"✍️ Writing {count} questions about **{topic[:100]}**… {done}/{count}")
+
+        self._trivia_busy.add(name)
+        try:
+            if count > TRIVIA_BATCH:
+                status = await ctx.send(f"✍️ Writing {count} questions about **{topic[:100]}**…",
+                                        allowed_mentions=discord.AllowedMentions.none())
+            async with ctx.channel.typing():
+                new, error = await self._write_trivia(ctx.author, ctx.channel, subject, count, list(existing), progress)
+        finally:
+            self._trivia_busy.discard(name)
+        if len(new) < (1 if existing else 5):
+            return await reply((error or "😶 That didn't come out as a usable trivia list. Try again or reword the topic.")
+                               + ("\n-# The old list is unchanged." if replace and path.exists() else ""))
+        questions = {**existing, **{q: a for q, a in new}}
+        meta.setdefault("AUTHOR", f"{ctx.guild.me.display_name} (written by Claude for {ctx.author.display_name})")
+        meta["DESCRIPTION"] = f"{len(questions)} questions about {topic[:100]}"
+        write_trivia(path, meta, questions)
+        if existing:
+            text = f"🧠 Added **{len(new)}** questions to `{name}`, which now has **{len(questions)}**."
+        else:
+            text = f"🧠 Wrote **{len(new)}** questions about **{topic[:100]}**."
+        if len(new) < count:
+            text += f"\n-# Only {len(new)} of the {count} I asked for came out new." + (f" {error}" if error else "")
+        text += ("\n" + (f"Start the quiz with `{p}trivia {name}`." if self.bot.get_cog("Trivia") is not None else
+                         f"Load Red's trivia cog (`{p}load trivia`), then `{p}trivia {name}`.")
+                 + f"\n-# `{p}maketrivia {topic[:60]}` again adds more. `{p}maketrivia show {name}` lists them, "
+                   f"`remove` drops one, `redo` starts over.")
+        await reply(text)
+
+    @commands.group(name="maketrivia", aliases=["trivia-make", "writetrivia"], invoke_without_command=True)
     @commands.guild_only()
     @checks.mod_or_permissions(manage_messages=True)
     @commands.cooldown(1, 60, commands.BucketType.guild)
-    async def maketrivia(self, ctx: commands.Context, count: Optional[int] = 20, *, topic: str):
+    async def maketrivia(self, ctx: commands.Context, count: Optional[int] = TRIVIA_DEFAULT, *, topic: str):
         """
         Have Claude write a trivia list, ready to play with Red's trivia game (mods).
 
-        Use `our games` as the topic for questions about the games in this server's library. The list is saved
-        for the `trivia` cog, so you can start it right away.
+        Writes 30 questions unless you give a number (10-100). Running it again on the same topic adds new
+        questions to the list instead of replacing it. Use `our games` as the topic for questions about the games in
+        this server's library.
 
         **Examples:**
         - `[p]maketrivia our games`
-        - `[p]maketrivia 15 1990s video game consoles`
+        - `[p]maketrivia 50 1990s video game consoles`
         """
-        count = max(TRIVIA_MIN, min(count or 20, TRIVIA_MAX))
-        subject = topic.strip()[:200]
-        if simplify(subject) in ("ourgames", "servergames", "ourlibrary", "library"):
-            gm = self.bot.get_cog("GameManager")
-            games = sorted(g["name"] for g in (await gm.config.guild(ctx.guild).games()).values()) if gm else []
-            if not games:
-                return await ctx.send("❌ The server's game library is empty (or GameManager isn't loaded).")
-            subject = "these video games (mix questions across them): " + ", ".join(games[:80])
-        system = ("You write trivia questions for a Discord quiz game. Facts must be accurate and well established; "
-                  "skip anything you're unsure of. Each question has one clear answer that a player can type in a "
-                  "few words. List the main answer first, then common alternate spellings or short forms players "
-                  "might type (no more than 5). Vary difficulty, mostly medium. Reply with only a JSON array: "
-                  '[{"q": "question?", "a": ["answer", "alternate"]}, …]')
-        async with ctx.channel.typing():
-            text, error = await self._ask(ctx.author, ctx.channel, system,
-                                          [{"role": "user", "content": f"Write {count} questions about {subject}."}],
-                                          max_tokens=6000, persona=False)
-        if text is None:
-            return await ctx.send(error)
-        try:
-            questions = parse_trivia_json(text)
-        except (ValueError, TypeError):
-            questions = []
-        if len(questions) < 5:
-            return await ctx.send("😶 That didn't come out as a usable trivia list. Try again or reword the topic.")
-        name = trivia_slug(topic)
-        trivia_cog = self.bot.get_cog("Trivia")
-        if trivia_cog is not None and name in getattr(getattr(trivia_cog, "trivia", None), "all_commands", {}):
-            name += "_list"
-        data = {"AUTHOR": f"{ctx.guild.me.display_name} (written by Claude for {ctx.author.display_name})",
-                "DESCRIPTION": f"{len(questions)} questions about {topic.strip()[:100]}"}
-        data.update({q: a for q, a in questions})
-        path = cog_data_path(raw_name="Trivia") / f"{name}.yaml"
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(yaml.safe_dump(data, allow_unicode=True, sort_keys=False), encoding="utf-8")
-        loaded = trivia_cog is not None
-        await ctx.send(f"🧠 Wrote **{len(questions)}** questions about **{topic.strip()[:100]}**.\n"
-                       + (f"Start the quiz with `{ctx.clean_prefix}trivia {name}`." if loaded else
-                          f"Load Red's trivia cog (`{ctx.clean_prefix}load trivia`), then `{ctx.clean_prefix}trivia {name}`.")
-                       + f"\n-# Saved as `{name}`; writing the same topic again replaces it.")
+        await self._make_trivia(ctx, count, topic, replace=False)
+
+    @maketrivia.command(name="redo")
+    @commands.guild_only()
+    @checks.mod_or_permissions(manage_messages=True)
+    @commands.cooldown(1, 60, commands.BucketType.guild)
+    async def maketrivia_redo(self, ctx: commands.Context, count: Optional[int] = TRIVIA_DEFAULT, *, topic: str):
+        """
+        Throw away a trivia list and write it again from scratch (mods).
+
+        **Example:** `[p]maketrivia redo 40 our games`
+        """
+        await self._make_trivia(ctx, count, topic, replace=True)
+
+    @maketrivia.command(name="show")
+    @commands.guild_only()
+    @checks.mod_or_permissions(manage_messages=True)
+    async def maketrivia_show(self, ctx: commands.Context, *, name: str = None):
+        """
+        Show a trivia list ButlerBot wrote, numbered, with the answers behind spoilers (mods).
+
+        Leave out the name to see every list. Long lists come as a text file. Run it where players can't see it if
+        you don't want to spoil the quiz.
+
+        **Example:** `[p]maketrivia show our games`
+        """
+        if not name:
+            lists = self._trivia_lists()
+            if not lists:
+                return await ctx.send(f"I haven't written any trivia lists yet. Try `{ctx.clean_prefix}maketrivia <topic>`.")
+            lines = [f"`{n}`: {len(read_trivia(self._trivia_path(n))[1])} questions" for n in lists]
+            return await ctx.send(("🧠 **Trivia lists I've written**\n" + "\n".join(lines))[:2000])
+        name = trivia_name(name)
+        _, questions = read_trivia(self._trivia_path(name))
+        if not questions:
+            return await ctx.send(self._no_list(name))
+        answers = [", ".join(map(str, a)) if isinstance(a, list) else str(a) for a in questions.values()]
+        header = f"🧠 **{name}**: {len(questions)} questions"
+        body = "\n".join(f"{i}. {q} ||{a}||" for i, (q, a) in enumerate(zip(questions, answers), 1))
+        if len(header) + len(body) < 1990:
+            return await ctx.send(f"{header}\n{body}", allowed_mentions=discord.AllowedMentions.none())
+        plain = "\n".join(f"{i}. {q}\n   Answer: {a}" for i, (q, a) in enumerate(zip(questions, answers), 1))
+        await ctx.send(f"{header}. Answers are in the file.",
+                       file=discord.File(io.BytesIO(plain.encode("utf-8")), filename=f"{name}.txt"))
+
+    @maketrivia.command(name="remove", aliases=["delete"])
+    @commands.guild_only()
+    @checks.mod_or_permissions(manage_messages=True)
+    async def maketrivia_remove(self, ctx: commands.Context, name: str, *, which: str):
+        """
+        Remove questions from a trivia list ButlerBot wrote (mods).
+
+        Give the question numbers from `[p]maketrivia show`, or part of the question's text. Put quotes around a list
+        name with spaces, or use its saved name (`our_games` or `bb_our_games`).
+
+        **Examples:**
+        - `[p]maketrivia remove our_games 4 17`
+        - `[p]maketrivia remove our_games which year was Barony released`
+        """
+        p = ctx.clean_prefix
+        name = trivia_name(name)
+        path = self._trivia_path(name)
+        meta, questions = read_trivia(path)
+        if not questions:
+            return await ctx.send(self._no_list(name))
+        keys = list(questions)
+        tokens = [t for t in re.split(r"[\s,]+", which.strip()) if t]
+        if tokens and all(t.isdigit() for t in tokens):
+            numbers = sorted({int(t) for t in tokens})
+            bad = [str(n) for n in numbers if not 1 <= n <= len(keys)]
+            if bad:
+                return await ctx.send(f"❌ `{name}` has questions 1-{len(keys)}, so there's no {', '.join(bad)}.")
+            doomed = [keys[n - 1] for n in numbers]
+        else:
+            needle = simplify(which)
+            matches = [k for k in keys if needle and needle in simplify(k)]
+            exact = [k for k in matches if simplify(k) == needle]
+            doomed = exact[:1] or matches
+            if not doomed:
+                return await ctx.send(f"❌ No question in `{name}` matches that. "
+                                      f"`{p}maketrivia show {name}` lists them with numbers.")
+            if len(doomed) > 1:
+                lines = [f"{keys.index(k) + 1}. {k}" for k in doomed[:8]]
+                return await ctx.send(f"That matches {len(doomed)} questions. Use the number instead:\n"
+                                      + "\n".join(lines), allowed_mentions=discord.AllowedMentions.none())
+        for key in doomed:
+            questions.pop(key)
+        shown = "\n".join(f"- {k}" for k in doomed[:10]) + (f"\n- …and {len(doomed) - 10} more" if len(doomed) > 10 else "")
+        if not questions:
+            path.unlink()
+            return await ctx.send(f"🗑️ Removed the last question, so `{name}` is gone:\n{shown}",
+                                  allowed_mentions=discord.AllowedMentions.none())
+        if re.match(r"\d+ questions", str(meta.get("DESCRIPTION", ""))):
+            meta["DESCRIPTION"] = re.sub(r"^\d+", str(len(questions)), meta["DESCRIPTION"])
+        write_trivia(path, meta, questions)
+        await ctx.send(f"🗑️ Removed {len(doomed)} from `{name}` ({len(questions)} left):\n{shown}",
+                       allowed_mentions=discord.AllowedMentions.none())
 
     # ==========================================
     #              GUESS THE GAME

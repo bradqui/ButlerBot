@@ -1363,11 +1363,16 @@ class ClaudeChat(commands.Cog):
         if persona:
             system = (f'You are {guild.me.display_name}, a bot in the Discord server "{guild.name}".\n'
                       f"Your personality (set by the server's admins):\n{await self._persona(guild)}\n\n{system}")
+        kwargs = dict(model=model, max_tokens=max_tokens, system=system, messages=messages,
+                      output_config={"effort": await self.config.effort()},
+                      extra_body={"cache_control": {"type": "ephemeral"}})
         try:
-            response = await client.messages.create(
-                model=model, max_tokens=max_tokens, system=system, messages=messages,
-                output_config={"effort": await self.config.effort()},
-                extra_body={"cache_control": {"type": "ephemeral"}})
+            if MODELS[model].fallback:
+                # On a safety-classifier refusal, Anthropic re-runs the request on a recommended model.
+                kwargs["extra_body"]["fallbacks"] = "default"
+                response = await client.beta.messages.create(betas=[FALLBACK_BETA], **kwargs)
+            else:
+                response = await client.messages.create(**kwargs)
         except Exception as e:
             return None, self._describe_error(e, prefix)[0]
         await self._record_usage(member, self._usage_from(response, model))

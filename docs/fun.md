@@ -68,8 +68,24 @@ To answer, just type in the channel; capitalization doesn't matter.
 
 ButlerBot opens a thread and narrates a story everyone can play.
 - **Playing:** just type what you do.
-- **Turns:** ButlerBot waits a few seconds to gather everyone's moves, then tells you what happens.
-- **Ending:** `!adventure stop` in the thread writes a final scene. Whoever started it, or a mod, can end it.
+- **Turns:** ButlerBot waits a few seconds to gather everyone's moves, then tells you what happens. It remembers about the last 100 turns.
+- **Ending:** `!adventure stop` in the thread writes a final scene, and Gemini paints a picture of it. Whoever started it, or a mod, can end it.
+- **Keep it PG-13:** fights happen, but without gore, and nothing sexual. If a move goes too far, the narrator tones it down or ignores it and carries on.
+
+**Your character:** set who you play once, and the narrator uses it in every adventure you join.
+
+```
+!adventure bio a red-haired dwarf engineer with a bad knee and a fear of birds
+!adventure bio                 see yours (or !adventure bio @someone)
+!adventure bio clear           remove it
+```
+
+- **Length:** up to 200 characters.
+- **What's allowed:** looks, skills, quirks and backstory. Bios that are sexual, gory, hateful, about real people, or that make you unbeatable or boss the narrator around are turned down.
+- **Changing it for one story:** say it in the adventure ("my character shaved her beard for the disguise"). That counts for that adventure only; your bio stays as it is.
+
+{: .staff }
+> Mods can remove someone's bio with `!adventure bio clear @member`.
 
 ## Settle an argument
 

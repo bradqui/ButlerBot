@@ -90,17 +90,19 @@ class GeminiChat(commands.Cog):
     #        IMAGE GENERATION (public API)
     # ==========================================
 
-    async def generate_image(self, prompt, session_key, reply_target, *, channel, user, new=True):
+    async def generate_image(self, prompt, session_key, reply_target, *, channel, user, new=True, quiet=False):
         """
         Generate a new image (new=True) or refine the session's last one (new=False) and post it.
 
-        `session_key` is the caller's conversation key (CHANNEL_/THREAD_/USER_<id>).
+        `session_key` is the caller's conversation key (CHANNEL_/THREAD_/USER_<id>). With `quiet`, failures are
+        only logged, not posted (for optional pictures, like an adventure's final scene).
         Returns the posted message, or None if nothing was generated.
-        Called by the Claude cog; keep this signature stable.
+        Called by the Claude cog and ButlerFun; keep this signature stable.
         """
         prefix = await self._prefix(channel.guild)
         if not await self._init_genai():
-            await self._send(reply_target, channel, f"⚠️ Gemini API key not set. The bot owner can run `{prefix}gemini setkey <key>`.")
+            if not quiet:
+                await self._send(reply_target, channel, f"⚠️ Gemini API key not set. The bot owner can run `{prefix}gemini setkey <key>`.")
             return None
 
         if session_key.startswith("USER_"):
@@ -121,7 +123,8 @@ class GeminiChat(commands.Cog):
         except Exception as e:
             self.image_sessions.pop(session_key, None)
             log.warning("Gemini image generation failed: %s", e)
-            await self._send(reply_target, channel, self._error_text(e, model_name, prefix))
+            if not quiet:
+                await self._send(reply_target, channel, self._error_text(e, model_name, prefix))
             return None
 
         files, texts = [], []
@@ -139,7 +142,10 @@ class GeminiChat(commands.Cog):
         if not files:
             self.image_sessions.pop(session_key, None)
             reason = " ".join(texts).strip()[:1500] or "No image was returned (the request may have been blocked)."
-            await self._send(reply_target, channel, f"⚠️ **Image generation failed:** {reason}")
+            if quiet:
+                log.info("Gemini returned no image: %s", reason[:200])
+            else:
+                await self._send(reply_target, channel, f"⚠️ **Image generation failed:** {reason}")
             return None
 
         # Just the image: echoing the prompt back is noise, and it would give away guess-the-game answers.

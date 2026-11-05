@@ -15,16 +15,16 @@ Each channel has a level:
 - **low** (only the low list)
 - **high** (both lists)
 
-Messages with a listed word are deleted. Repeat offenders can be punished automatically.
+Messages with a listed word are deleted, and the author gets a short warning (a mention, without a ping) that disappears after 3 seconds. Repeat offenders can be punished automatically.
 
 | Command | What it does |
 |---|---|
 | `!censor config` | Dashboard of the current setup. |
 | `!censor level <off\|low\|high> [#channel]` | Set the level for the server, or for one channel. |
-| `!censor addword <low\|high> <word>` / `delword` | Add or remove a word. `*` is a wildcard (`bad*` matches "badly"). Without one, only whole words match. |
+| `!censor addword <low\|high> <word>` / `delword` | Add or remove a word. `*` is a wildcard (`bad*` matches "badly"). Without one, only whole words match. ButlerBot deletes your command (if it can) and never repeats the word in its reply. `delword` needs the entry exactly as it was added. |
 | `!censor strategy <mode>` | Watch every channel except some (`exclude`), or only some (`include`). |
 | `!censor exceptchan` / `includechan <#channel>` | Toggle channels for that strategy. |
-| `!censor threshold <count> <seconds>` | How many hits within how many seconds trigger a punishment. |
+| `!censor threshold <count> <seconds>` | How many hits within how many seconds trigger a punishment. Both must be at least 1. |
 | `!censor action <action> [#channel]` | The punishment: delete, kick or ban. |
 | `!censor setrole [role]` | A role allowed to change Censord settings. |
 | `!censor reload` | Reload the word lists after editing them on the server. |

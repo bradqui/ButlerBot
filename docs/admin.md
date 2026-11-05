@@ -78,7 +78,13 @@ When the server has some, the [command reference]({{ '/reference/' | relative_ur
 
 ## Welcome flow (ButtonGreeter)
 
-New members get buttons to pick their group, which tags their nickname as `[TAG] Name`, and then agree to the rules.
+New members get buttons to pick their group, which tags their nickname as `[TAG] Name` (replacing any tag they already had), and then agree to the rules.
+
+- Only the welcome message pings the newcomer. The rules prompt mentions them without a second ping.
+- The buttons keep working after a bot restart. Welcome messages posted before the 2026-11 update don't, so use `!forceclass` for those members.
+- Pressing **No** on the rules leaves the prompt up, so they can change their mind.
+- If no rules role is set, members skip the rules step and the error channel gets a note.
+- When something fails (a role the bot can't give, a nickname it can't change), the member gets a private explanation and the error channel gets the details.
 
 | Command | What it sets |
 |---|---|

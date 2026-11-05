@@ -29,7 +29,7 @@ Right-click a message (long-press on mobile) → **Apps**. Only you see the resu
 | [Alias]({{ '/reference/alias/' | relative_url }}) | Create aliases for commands. | 9 |
 | [AutoRoom]({{ '/reference/autoroom/' | relative_url }}) | Automatic voice channel management. | 46 |
 | [ButlerFun]({{ '/reference/butlerfun/' | relative_url }}) | AI extras: catch-up summaries, ButlerBot's judgments, text adventures, trivia writing and guess the game. | 12 |
-| [ButtonGreeter]({{ '/reference/buttongreeter/' | relative_url }}) | A welcome system that greets users with buttons to self-assign a role/nickname,  | 13 |
+| [ButtonGreeter]({{ '/reference/buttongreeter/' | relative_url }}) | Welcome buttons for new members: pick a group (role and nickname tag), then agree to the rules. | 13 |
 | [Censord]({{ '/reference/censord/' | relative_url }}) | Censor chat using CSV-based lists with specific levels and threshold punishments. | 12 |
 | [Chatchart]({{ '/reference/chatchart/' | relative_url }}) | Show activity. | 5 |
 | [ClaudeChat]({{ '/reference/claudechat/' | relative_url }}) | Chat with Anthropic's Claude. | 20 |

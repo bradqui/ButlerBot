@@ -15,12 +15,15 @@ Only one cog can replace the help command: unload customhelp before loading this
 """
 
 import difflib
+import importlib.util
 import inspect
 import io
 import logging
 import re
+import sys
 import zipfile
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Union
 
 import discord
@@ -30,6 +33,22 @@ from discord.ext.commands.bot import BotBase
 from redbot.core.commands.help import HelpFormatterABC
 
 log = logging.getLogger("red.handbook")
+
+
+def _load_butlerui():
+    """The shared style module (../_shared/butlerui.py), re-read when the file changes."""
+    path = Path(__file__).resolve().parent.parent / "_shared" / "butlerui.py"
+    module, mtime = sys.modules.get("butlerui"), path.stat().st_mtime
+    if module is None or getattr(module, "_mtime", None) != mtime:
+        spec = importlib.util.spec_from_file_location("butlerui", path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        module._mtime = mtime
+        sys.modules["butlerui"] = module
+    return module
+
+
+ui = _load_butlerui()
 
 DEFAULT_URL = "https://bradqui.github.io/ButlerBot/"
 PRIVILEGE_NAMES = {
@@ -52,8 +71,8 @@ TOPICS = [
     ("speakup/", "🗣️", "Reminders and auto-replies", "Reminders, and what the bot does on its own.", "everyone"),
     ("voice/", "🔊", "Voice rooms", "Make your own temporary voice channel.", "everyone"),
     ("translate/", "🌐", "Translation", "Translate messages between languages.", "everyone"),
-    ("moderation/", "🛡️", "Moderation", "Warnings, mutes, kicks, bans and cleanup.", "mods"),
-    ("filters/", "🚫", "Filters and spam", "Word filters and spam protection.", "mods"),
+    ("moderation/", "🔨", "Moderation", "Warnings, mutes, kicks, bans and cleanup.", "mods"),
+    ("filters/", "🛡️", "Filters and spam", "Word filters and spam protection.", "mods"),
     ("admin/", "⚙️", "Server setup", "Permissions, custom commands, welcome flow and cog settings.", "admins"),
     ("reference/", "📚", "Command reference", "Every command, generated from the bot.", "everyone"),
 ]
@@ -66,6 +85,15 @@ COG_TOPICS = {
     "filter": "filters/", "censord": "filters/", "antispam": "filters/", "permissions": "admin/", "alias": "admin/",
     "customcommands": "admin/", "buttongreeter": "admin/", "admin": "admin/",
 }
+# Names people know, for help cards (`[p]help <category>`). Cogs not listed here use their handbook topic's title
+# when they're the only cog on that page, else their class name.
+COG_NAMES = {
+    "claudechat": "AI chat", "geminichat": "Image generation", "gamemanager": "Games", "butlerfun": "Fun and games",
+    "activitystats": "Server stats", "chatchart": "Chat charts", "censord": "Word filter", "antispam": "Spam protection",
+    "customcommands": "Custom commands", "buttongreeter": "Welcome flow", "modlog": "Mod log",
+    "clearchannel": "Clear channel",
+}
+HELP_FOOTER = "{p}help <command> for any command · {p}butler to ask in plain English"
 GAME_NIGHT_COMMANDS = {"session", "sessions", "endsession", "sessionvote", "results", "endvote", "recurring", "lfg",
                        "shared", "installed", "top"}
 # Right-click options have no help text of their own: (description, handbook topic) for the reference.
@@ -141,6 +169,23 @@ def denied_by_default(obj, guild_id: int) -> bool:
     return any(getattr(rule, "name", "") == "ACTIVE_DENY" for rule in rules)
 
 
+def friendly_name(cog: commands.Cog) -> str:
+    """The name people know a cog by ("AI chat", not "ClaudeChat")."""
+    key = cog.qualified_name.lower()
+    if key in COG_NAMES:
+        return COG_NAMES[key]
+    topic = COG_TOPICS.get(key)
+    if topic and list(COG_TOPICS.values()).count(topic) == 1:
+        return next(title for path, _, title, _, _ in TOPICS if path == topic)
+    return cog.qualified_name
+
+
+def fit(text: str, limit: int) -> str:
+    """Shorten card text at a line or word break, closing a code block the cut left open."""
+    text = ui.truncate(text, limit - 4)
+    return text + "\n```" if text.count("```") % 2 else text
+
+
 def anchor(command: commands.Command) -> str:
     return command.qualified_name.replace(" ", "-").lower()
 
@@ -192,7 +237,8 @@ class HandbookHelp(HelpFormatterABC):
             command = bot.get_command(text)
             if command is not None and (not command.hidden or await bot.is_owner(ctx.author)):
                 return await self.cog.send_command_card(ctx, command)
-            cog = next((c for name, c in bot.cogs.items() if name.lower() == text.lower()), None)
+            cog = next((c for name, c in bot.cogs.items()
+                        if text.lower() in (name.lower(), friendly_name(c).lower())), None)
             if cog is not None:
                 return await self.cog.send_cog_card(ctx, cog)
             return await self.cog.send_not_found(ctx, text)
@@ -289,7 +335,7 @@ class Handbook(commands.Cog):
                 if audience != "everyone":
                     lines.append(f"{emoji} [{title}]({await self.topic_url(path)}): {about}")
         name = ctx.me.display_name if ctx.guild else self.bot.user.name
-        return discord.Embed(title=f"📖 {name} handbook", description="\n".join(lines), color=discord.Color.blurple())
+        return discord.Embed(title=f"📖 {name} handbook", description="\n".join(lines), color=ui.BRAND)
 
     async def send_home(self, ctx: commands.Context):
         await ctx.send(embed=await self.home_embed(ctx),
@@ -298,11 +344,9 @@ class Handbook(commands.Cog):
     async def send_command_card(self, ctx: commands.Context, command: commands.Command):
         prefix, bot_name = ctx.clean_prefix, (ctx.me.display_name if ctx.guild else self.bot.user.name)
         who, owner_only = requirement(command)
-        text = fill(command.help, prefix, bot_name)
-        if len(text) > 1500:
-            text = text[:1500].rsplit("\n", 1)[0] + "\n…"
-        embed = discord.Embed(title=f"{prefix}{command.qualified_name}", description=text or "No description.",
-                              color=discord.Color.blurple())
+        text = fit(fill(command.help, prefix, bot_name), 1500)
+        embed = discord.Embed(title=f"📖 {prefix}{command.qualified_name}", description=text or "No description.",
+                              color=ui.BRAND)
         embed.add_field(name="Usage", value=f"`{usage(command, prefix)}`", inline=False)
         if command.aliases:
             embed.add_field(name="Also works as", value=", ".join(f"`{prefix}{(command.full_parent_name + ' ' + a).strip()}`"
@@ -311,13 +355,13 @@ class Handbook(commands.Cog):
         if isinstance(command, commands.Group):
             subs = visible_commands(command)
             if subs:
-                lines = [f"`{s.name}`: {fill(s.short_doc, prefix, bot_name)[:90]}" for s in subs[:25]]
+                lines = [f"`{s.name}`: {ui.truncate(fill(s.short_doc, prefix, bot_name), 90)}" for s in subs[:25]]
                 if len(subs) > 25:
                     lines.append(f"…and {len(subs) - 25} more")
                 value = "\n".join(lines)
                 embed.add_field(name=f"Subcommands ({prefix}{command.qualified_name} <subcommand>)",
-                                value=value[:1024], inline=False)
-        embed.set_footer(text=f"{prefix}help <command> for any command · {prefix}butler to ask in plain English")
+                                value=fit(value, 1024), inline=False)
+        embed.set_footer(text=HELP_FOOTER.format(p=prefix))
         links = []
         topic = self.topic_for(command, None)
         if topic:
@@ -330,16 +374,17 @@ class Handbook(commands.Cog):
     async def send_cog_card(self, ctx: commands.Context, cog: commands.Cog):
         prefix, bot_name = ctx.clean_prefix, (ctx.me.display_name if ctx.guild else self.bot.user.name)
         about = fill(getattr(cog, "help", None) or cog.description, prefix, bot_name)
-        lines = [about[:600], ""] if about else []
+        lines = [fit(about, 600), ""] if about else []
         for command in visible_commands(cog):
             who, owner_only = requirement(command)
             if owner_only and not await self.bot.is_owner(ctx.author):
                 continue
             note = "" if who == "everyone" else f" *({who})*"
-            lines.append(f"`{prefix}{command.qualified_name}`: {fill(command.short_doc, prefix, bot_name)[:100]}{note}")
-        embed = discord.Embed(title=f"📂 {cog.qualified_name}", description="\n".join(lines)[:4000] or "No commands.",
-                              color=discord.Color.blurple())
-        embed.set_footer(text=f"{prefix}help <command> for details")
+            lines.append(f"`{prefix}{command.qualified_name}`: "
+                         f"{ui.truncate(fill(command.short_doc, prefix, bot_name), 100)}{note}")
+        embed = discord.Embed(title=f"📖 {friendly_name(cog)}", description=fit("\n".join(lines), 4000) or "No commands.",
+                              color=ui.BRAND)
+        embed.set_footer(text=HELP_FOOTER.format(p=prefix))
         links = []
         topic = self.topic_for(None, cog)
         if topic:
@@ -354,7 +399,7 @@ class Handbook(commands.Cog):
         hint = (" Did you mean " + ", ".join(f"`{ctx.clean_prefix}help {c}`" for c in close) + "?") if close else ""
         await ctx.send(f"❓ There's no command or category called `{text[:80]}`.{hint}\n"
                        f"Or ask me in plain English: `{ctx.clean_prefix}butler {text[:60]}`",
-                       allowed_mentions=discord.AllowedMentions.none())
+                       allowed_mentions=ui.NO_PINGS)
 
     # ==========================================
     #                 COMMANDS
@@ -374,13 +419,13 @@ class Handbook(commands.Cog):
         for path, emoji, title, about, _ in TOPICS:
             haystack = f"{title} {path} {about}".lower()
             score = 1.0 if wanted in haystack else difflib.SequenceMatcher(None, wanted, title.lower()).ratio()
-            scored.append((score, path, emoji, title))
-        score, path, emoji, title = max(scored)
+            scored.append((score, path, emoji, title, about))
+        score, path, emoji, title, about = max(scored)
         if score < 0.5:
             return await ctx.send(f"❓ No handbook topic matches **{topic[:60]}**. `{ctx.clean_prefix}handbook` lists "
-                                  "them all.", allowed_mentions=discord.AllowedMentions.none())
-        url = await self.topic_url(path)
-        await ctx.send(f"{emoji} **{title}**: <{url}>", view=self._links_view([(title, url)]))
+                                  "them all.", allowed_mentions=ui.NO_PINGS)
+        # The link is the button; the text just names the page.
+        await ctx.send(f"{emoji} **{title}**: {about}", view=self._links_view([(title, await self.topic_url(path))]))
 
     @handbook.command(name="seturl")
     @checks.is_owner()
@@ -418,8 +463,8 @@ class Handbook(commands.Cog):
                 for path, text in files.items():
                     archive.writestr(path, text)
             buffer.seek(0)
-        await ctx.send(f"📚 Generated **{len(files)}** reference pages. Unzip them into the repo's `docs/` folder "
-                       "(they go in `docs/reference/`), commit and push.",
+        await ctx.send(f"✅ Generated {ui.plural(len(files), 'reference page')}. Unzip them into the repo's `docs/` "
+                       "folder (they go in `docs/reference/`), commit and push.",
                        file=discord.File(buffer, filename="handbook-reference.zip"))
 
     # ==========================================

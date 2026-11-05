@@ -182,9 +182,10 @@ class StubBot(dcommands.Bot):
 # ==========================================
 
 def custom_cogs():
-    """Package names of our cogs: the ones .gitignore tracks."""
+    """Package names of our cogs: the ones .gitignore tracks (folders without __init__.py, like _shared, aren't cogs)."""
     text = (ROOT / ".gitignore").read_text(encoding="utf-8")
-    return sorted(re.findall(r"^!/data/cogs/CogManager/cogs/([\w-]+)/$", text, re.MULTILINE))
+    names = re.findall(r"^!/data/cogs/CogManager/cogs/([\w-]+)/$", text, re.MULTILINE)
+    return sorted(name for name in names if (COGS / name / "__init__.py").exists())
 
 
 def load_cog(package, bot):

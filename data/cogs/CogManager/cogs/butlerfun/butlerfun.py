@@ -15,13 +15,16 @@ AI-powered extras built on the Claude cog (and Gemini and GameManager where note
 import asyncio
 import contextlib
 import difflib
+import importlib.util
 import io
 import json
 import logging
 import random
 import re
+import sys
 import time
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 import discord
@@ -31,6 +34,22 @@ from redbot.core.bot import Red
 from redbot.core.data_manager import cog_data_path
 
 log = logging.getLogger("red.butlerfun")
+
+
+def _load_butlerui():
+    """The shared style module (../_shared/butlerui.py), re-read when the file changes."""
+    path = Path(__file__).resolve().parent.parent / "_shared" / "butlerui.py"
+    module, mtime = sys.modules.get("butlerui"), path.stat().st_mtime
+    if module is None or getattr(module, "_mtime", None) != mtime:
+        spec = importlib.util.spec_from_file_location("butlerui", path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        module._mtime = mtime
+        sys.modules["butlerui"] = module
+    return module
+
+
+ui = _load_butlerui()
 
 
 # ==========================================
@@ -137,7 +156,7 @@ def hint_for(answer: str, level: int) -> str:
     """Level 1: first letter of each word and the letter count. Level 2: every other letter shown."""
     words = answer.split()
     if level == 1:
-        return " ".join(w[0] + "·" * (len(w) - 1) for w in words) + f"  ({len(words)} word{'s' if len(words) > 1 else ''})"
+        return " ".join(w[0] + "·" * (len(w) - 1) for w in words) + f"  ({ui.plural(len(words), 'word')})"
     return " ".join("".join(c if i % 2 == 0 or not c.isalnum() else "·" for i, c in enumerate(w)) for w in words)
 
 
@@ -178,6 +197,14 @@ def parse_trivia_json(text: str) -> List[Tuple[str, List[str]]]:
         if question and answers and question not in TRIVIA_META_KEYS:
             questions.append((question[:300], answers[:6]))
     return questions
+
+
+def bare(text: str) -> str:
+    """A status line without its leading status symbol, to tuck it into another message."""
+    for symbol in (ui.DONE, ui.FAIL, ui.WARN, ui.WAIT, ui.LOCKED, ui.ASK):
+        if text.startswith(symbol):
+            return text[len(symbol):].strip()
+    return text
 
 
 def trivia_slug(topic: str) -> str:
@@ -238,6 +265,11 @@ class ButlerFun(commands.Cog):
         claude = self.bot.get_cog("ClaudeChat")
         return claude if claude is not None and hasattr(claude, "complete") else None
 
+    def _is_refusal(self, error: Optional[str]) -> bool:
+        """Whether complete()'s error means Claude refused (the Claude cog's REFUSAL text)."""
+        refusal = getattr(self._claude(), "REFUSAL", None)
+        return bool(error) and refusal is not None and error == refusal
+
     async def _ask(self, member: discord.Member, channel, system: str, messages: List[dict], **kwargs
                    ) -> Tuple[Optional[str], Optional[str]]:
         claude = self._claude()
@@ -263,7 +295,7 @@ class ButlerFun(commands.Cog):
         since = history[0].created_at
         text = transcript(history, self.bot.user.id, CATCHUP_MAX_CHARS)
         if not text:
-            return None, "Nothing to catch up on."
+            return None, "✅ You're caught up: there's nothing here to summarize."
         system = (f"Summarize a Discord conversation for {member.display_name}, who missed it. Use at most 8 short "
                   "bullet points (\"- \"), most important first. Say who said what, and call out plans, times, "
                   f"decisions, and anything asked of or about {member.display_name}. Plain and factual; no intro.")
@@ -271,9 +303,9 @@ class ButlerFun(commands.Cog):
                                          fast=True, max_tokens=700, persona=False)
         if summary is None:
             return None, error
-        header = (f"📰 **Catch-up for #{channel.name}**: {len(history)} messages since "
+        header = (f"📰 **Catch-up for {channel.mention}**: {ui.plural(len(history), 'message')} since "
                   f"<t:{int(since.timestamp())}:R>")
-        return f"{header}\n{summary}"[:1950], None
+        return f"{header}\n{summary}", None
 
     @commands.command(name="catchup")
     @commands.guild_only()
@@ -287,7 +319,8 @@ class ButlerFun(commands.Cog):
         async with ctx.channel.typing():
             text, error = await self.build_catchup(ctx.author, ctx.channel, ctx.message)
         try:
-            await ctx.author.send(text or error)
+            for page in ui.split_text(text or error):
+                await ctx.author.send(page)
             await ctx.tick()
         except discord.HTTPException:
             await ctx.send("❌ I couldn't DM you. Use `/catchup` instead, which only you can see.", delete_after=20)
@@ -297,7 +330,8 @@ class ButlerFun(commands.Cog):
     async def slash_catchup(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True, thinking=True)
         text, error = await self.build_catchup(interaction.user, interaction.channel)
-        await interaction.followup.send(text or error, ephemeral=True)
+        for page in ui.split_text(text or error):
+            await interaction.followup.send(page, ephemeral=True)
 
     # ==========================================
     #                   JUDGE
@@ -319,7 +353,7 @@ class ButlerFun(commands.Cog):
                    if not m.author.bot and m.content and not m.content.startswith(ctx.prefix)]
         history.reverse()
         if len({m.author.id for m in history}) < 2:
-            return await ctx.send("⚖️ I need at least two people disagreeing before I can rule on anything.")
+            return await ctx.send("❌ I need at least two people disagreeing before I can rule on anything.")
         system = ("Several people in this Discord channel are arguing, and someone has asked you to judge. Read the "
                   "conversation, then deliver a ruling in your own voice and personality:\n"
                   "1. Sum up each side in one sentence, naming who holds it.\n"
@@ -331,8 +365,8 @@ class ButlerFun(commands.Cog):
             ruling, error = await self._ask(ctx.author, ctx.channel, system, [
                 {"role": "user", "content": f"{ctx.author.display_name} asks you to judge this:\n\n"
                                             + transcript(history, self.bot.user.id, 12000)}], max_tokens=600)
-        await ctx.send(f"⚖️ **The ruling**\n{ruling}"[:2000] if ruling else error,
-                       allowed_mentions=discord.AllowedMentions.none())
+        for page in ui.split_text(f"⚖️ **The ruling**\n{ruling}" if ruling else error):
+            await ctx.send(page, allowed_mentions=ui.NO_PINGS)
 
     # ==========================================
     #               TEXT ADVENTURES
@@ -352,7 +386,7 @@ class ButlerFun(commands.Cog):
         **Example:** `[p]adventure a haunted space station where the AI has gone quiet`
         """
         if isinstance(ctx.channel, discord.Thread):
-            return await ctx.send("Start adventures from a regular channel; I'll make a thread for it.")
+            return await ctx.send("❌ Start adventures from a regular channel; I'll make a thread for it.")
         adventures = await self.config.guild(ctx.guild).adventures()
         live = {tid: a for tid, a in adventures.items() if ctx.guild.get_thread(int(tid))}
         if len(live) >= MAX_ADVENTURES:
@@ -362,7 +396,9 @@ class ButlerFun(commands.Cog):
         try:
             thread = await ctx.message.create_thread(name=f"🗺️ {setting[:90]}", auto_archive_duration=1440)
         except discord.HTTPException as e:
-            return await ctx.send(f"❌ I couldn't create a thread here: {e.text or e}")
+            log.warning("Couldn't create an adventure thread in %s: %s", ctx.channel.id, e)
+            return await ctx.send("❌ I couldn't create a thread here. Check that I'm allowed to create public "
+                                  "threads in this channel.")
         async with self.config.guild(ctx.guild).adventures() as adventures:
             for stale in [tid for tid in adventures if tid not in live]:
                 adventures.pop(stale)   # threads that were deleted or archived
@@ -381,10 +417,10 @@ class ButlerFun(commands.Cog):
         """End the adventure in this thread with a final scene and a picture of it (whoever started it, or a mod)."""
         info = (await self.config.guild(ctx.guild).adventures()).get(str(ctx.channel.id))
         if info is None:
-            return await ctx.send("There's no adventure running in this channel.")
+            return await ctx.send("❓ There's no adventure running in this channel.")
         mod = ctx.channel.permissions_for(ctx.author).manage_threads or await self.bot.is_mod(ctx.author)
         if ctx.author.id != info["started_by"] and not mod:
-            return await ctx.send("Only whoever started the adventure, or a mod, can end it.")
+            return await ctx.send("🔒 Only whoever started the adventure, or a mod, can end it.")
         async with self.config.guild(ctx.guild).adventures() as adventures:
             adventures.pop(str(ctx.channel.id), None)
         if (task := self._timers.pop(ctx.channel.id, None)) is not None:
@@ -428,20 +464,20 @@ class ButlerFun(commands.Cog):
             if mentioned.group(1):
                 mod = ctx.channel.permissions_for(ctx.author).manage_messages or await self.bot.is_mod(ctx.author)
                 if member != ctx.author and not mod:
-                    return await ctx.send("❌ Only mods can clear someone else's bio.")
+                    return await ctx.send("🔒 Only mods can clear someone else's bio.")
                 await self.config.member(member).adventure_bio.clear()
                 return await ctx.send(f"✅ Cleared {member.display_name}'s adventure bio.",
-                                      allowed_mentions=discord.AllowedMentions.none())
+                                      allowed_mentions=ui.NO_PINGS)
             bio = await self.config.member(member).adventure_bio()
             return await ctx.send(f"🧝 **{member.display_name}:** {bio}" if bio else
                                   f"{member.display_name} hasn't set an adventure bio.",
-                                  allowed_mentions=discord.AllowedMentions.none())
+                                  allowed_mentions=ui.NO_PINGS)
         if not text:
             bio = await self.config.member(ctx.author).adventure_bio()
             return await ctx.send(f"🧝 **Your adventure character:** {bio}\n-# `{p}adventure bio <description>` "
                                   f"changes it; `{p}adventure bio clear` removes it." if bio else
                                   f"You haven't set an adventure bio. Try `{p}adventure bio a cheerful elf bard who "
-                                  "is terrible at directions`.", allowed_mentions=discord.AllowedMentions.none())
+                                  "is terrible at directions`.", allowed_mentions=ui.NO_PINGS)
         if text.lower() == "clear":
             await self.config.member(ctx.author).adventure_bio.clear()
             return await ctx.send("✅ Your adventure bio is cleared.")
@@ -452,15 +488,16 @@ class ButlerFun(commands.Cog):
         async with ctx.channel.typing():
             verdict, error = await self._ask(ctx.author, ctx.channel, BIO_CHECK, [{"role": "user", "content": text}],
                                              fast=True, max_tokens=60, persona=False, count_toward_limit=False)
-        if verdict is None and error and not error.startswith("🚫"):
-            return await ctx.send(f"⚠️ I couldn't check your bio right now, so it isn't saved. {error}")
+        if verdict is None and error and not self._is_refusal(error):
+            return await ctx.send(ui.line(ui.WARN, "I couldn't check your bio right now, so it isn't saved.",
+                                          hint=bare(error)), allowed_mentions=ui.NO_PINGS)
         if verdict is None or not verdict.strip().upper().startswith("OK"):
             reason = re.sub(r"^NO\s*:?\s*", "", (verdict or "").strip(), flags=re.I)[:150] or "it doesn't fit the game."
             return await ctx.send(f"❌ That bio can't be used: {reason}\n-# Keep it to who your character is: "
-                                  "looks, skills, quirks, backstory.", allowed_mentions=discord.AllowedMentions.none())
+                                  "looks, skills, quirks, backstory.", allowed_mentions=ui.NO_PINGS)
         await self.config.member(ctx.author).adventure_bio.set(text)
         await ctx.send(f"✅ Saved. Your character in every adventure you join: {text}",
-                       allowed_mentions=discord.AllowedMentions.none())
+                       allowed_mentions=ui.NO_PINGS)
 
     async def _characters(self, guild: discord.Guild, players: List[int]) -> List[str]:
         """'Name: bio' for each player in the adventure who has set one."""
@@ -570,13 +607,27 @@ class ButlerFun(commands.Cog):
                     story[-1]["content"] = merged_into
                 elif story:
                     story.pop()
-                refused = bool(error and error.startswith("🚫"))
-                await thread.send(ADVENTURE_DEFLECT if refused else error)
+                if self._is_refusal(error):
+                    await thread.send(ADVENTURE_DEFLECT)
+                else:
+                    await thread.send(await self._turn_error(member, error), allowed_mentions=ui.NO_PINGS)
                 return None
             story.append({"role": "assistant", "content": text})
-            for i in range(0, len(text), 1990):
-                await thread.send(text[i:i + 1990], allowed_mentions=discord.AllowedMentions.none())
+            for page in ui.split_text(text):
+                await thread.send(page, allowed_mentions=ui.NO_PINGS)
             return text
+
+    async def _turn_error(self, member: discord.Member, error: Optional[str]) -> str:
+        """The notice for a turn that couldn't be narrated; a daily-limit error says whose limit it was."""
+        claude = self._claude()
+        check = getattr(claude, "limit_reached", None)
+        limit = await check(member) if check is not None else None
+        if limit:
+            return ui.line(ui.WAIT, f"{member.display_name} has used all {ui.plural(limit, 'AI message')} for today, "
+                                    "so I couldn't narrate this round.",
+                           hint="Those moves were dropped. Someone else can make the next move; limits reset at "
+                                "midnight UTC.")
+        return error or "❌ I couldn't narrate that round. Try your moves again."
 
     # ==========================================
     #               TRIVIA WRITER
@@ -653,7 +704,8 @@ class ButlerFun(commands.Cog):
         meta, existing = ({}, {}) if replace else read_trivia(path)
         count = min(max(TRIVIA_MIN, min(count or TRIVIA_DEFAULT, TRIVIA_MAX)), TRIVIA_LIST_MAX - len(existing))
         if count <= 0:
-            return await ctx.send(f"❌ `{name}` already has {len(existing)} questions, the most one list can hold. "
+            return await ctx.send(f"❌ `{name}` already has {ui.plural(len(existing), 'question')}, the most one list "
+                                  f"can hold. "
                                   f"Remove some with `{p}maketrivia remove {name} <numbers>`, or start over with "
                                   f"`{p}maketrivia redo {topic}`.")
         status = None
@@ -661,36 +713,36 @@ class ButlerFun(commands.Cog):
         async def reply(text: str):
             if status is not None:
                 with contextlib.suppress(discord.HTTPException):
-                    return await status.edit(content=text, allowed_mentions=discord.AllowedMentions.none())
-            return await ctx.send(text, allowed_mentions=discord.AllowedMentions.none())
+                    return await status.edit(content=text, allowed_mentions=ui.NO_PINGS)
+            return await ctx.send(text, allowed_mentions=ui.NO_PINGS)
 
         async def progress(done: int):
             if status is not None and done < count:
                 with contextlib.suppress(discord.HTTPException):
-                    await status.edit(content=f"✍️ Writing {count} questions about **{topic[:100]}**… {done}/{count}")
+                    await status.edit(content=f"⏳ Writing {count} questions about **{topic[:100]}**… {done}/{count}")
 
         self._trivia_busy.add(name)
         try:
             if count > TRIVIA_BATCH:
-                status = await ctx.send(f"✍️ Writing {count} questions about **{topic[:100]}**…",
-                                        allowed_mentions=discord.AllowedMentions.none())
+                status = await ctx.send(f"⏳ Writing {count} questions about **{topic[:100]}**…",
+                                        allowed_mentions=ui.NO_PINGS)
             async with ctx.channel.typing():
                 new, error = await self._write_trivia(ctx.author, ctx.channel, subject, count, list(existing), progress)
         finally:
             self._trivia_busy.discard(name)
         if len(new) < (1 if existing else 5):
-            return await reply((error or "😶 That didn't come out as a usable trivia list. Try again or reword the topic.")
+            return await reply((error or "❌ That didn't come out as a usable trivia list. Try again or reword the topic.")
                                + ("\n-# The old list is unchanged." if replace and path.exists() else ""))
         questions = {**existing, **{q: a for q, a in new}}
         meta.setdefault("AUTHOR", f"{ctx.guild.me.display_name} (written by Claude for {ctx.author.display_name})")
         meta["DESCRIPTION"] = f"{len(questions)} questions about {topic[:100]}"
         write_trivia(path, meta, questions)
         if existing:
-            text = f"🧠 Added **{len(new)}** questions to `{name}`, which now has **{len(questions)}**."
+            text = f"✅ Added {ui.plural(len(new), 'question')} to `{name}`, which now has {len(questions)}."
         else:
-            text = f"🧠 Wrote **{len(new)}** questions about **{topic[:100]}**."
+            text = f"✅ Wrote {ui.plural(len(new), 'question')} about **{topic[:100]}**."
         if len(new) < count:
-            text += f"\n-# Only {len(new)} of the {count} I asked for came out new." + (f" {error}" if error else "")
+            text += f"\n-# Only {len(new)} of the {count} I asked for came out new." + (f" {bare(error)}" if error else "")
         text += ("\n" + (f"Start the quiz with `{p}trivia {name}`." if self.bot.get_cog("Trivia") is not None else
                          f"Load Red's trivia cog (`{p}load trivia`), then `{p}trivia {name}`.")
                  + f"\n-# `{p}maketrivia {topic[:60]}` again adds more. `{p}maketrivia show {name}` lists them, "
@@ -742,18 +794,19 @@ class ButlerFun(commands.Cog):
         if not name:
             lists = self._trivia_lists()
             if not lists:
-                return await ctx.send(f"I haven't written any trivia lists yet. Try `{ctx.clean_prefix}maketrivia <topic>`.")
-            lines = [f"`{n}`: {len(read_trivia(self._trivia_path(n))[1])} questions" for n in lists]
-            return await ctx.send(("🧠 **Trivia lists I've written**\n" + "\n".join(lines))[:2000])
+                return await ctx.send(f"❓ I haven't written any trivia lists yet. Try "
+                                      f"`{ctx.clean_prefix}maketrivia <topic>`.")
+            lines = [f"`{n}`: {ui.plural(len(read_trivia(self._trivia_path(n))[1]), 'question')}" for n in lists]
+            return await ctx.send(ui.truncate("🧠 **Trivia lists I've written**\n" + "\n".join(lines), 2000))
         name = trivia_name(name)
         _, questions = read_trivia(self._trivia_path(name))
         if not questions:
             return await ctx.send(self._no_list(name))
         answers = [", ".join(map(str, a)) if isinstance(a, list) else str(a) for a in questions.values()]
-        header = f"🧠 **{name}**: {len(questions)} questions"
+        header = f"🧠 **{name}**: {ui.plural(len(questions), 'question')}"
         body = "\n".join(f"{i}. {q} ||{a}||" for i, (q, a) in enumerate(zip(questions, answers), 1))
         if len(header) + len(body) < 1990:
-            return await ctx.send(f"{header}\n{body}", allowed_mentions=discord.AllowedMentions.none())
+            return await ctx.send(f"{header}\n{body}", allowed_mentions=ui.NO_PINGS)
         plain = "\n".join(f"{i}. {q}\n   Answer: {a}" for i, (q, a) in enumerate(zip(questions, answers), 1))
         await ctx.send(f"{header}. Answers are in the file.",
                        file=discord.File(io.BytesIO(plain.encode("utf-8")), filename=f"{name}.txt"))
@@ -796,20 +849,20 @@ class ButlerFun(commands.Cog):
                                       f"`{p}maketrivia show {name}` lists them with numbers.")
             if len(doomed) > 1:
                 lines = [f"{keys.index(k) + 1}. {k}" for k in doomed[:8]]
-                return await ctx.send(f"That matches {len(doomed)} questions. Use the number instead:\n"
-                                      + "\n".join(lines), allowed_mentions=discord.AllowedMentions.none())
+                return await ctx.send(f"❓ That matches {len(doomed)} questions. Use the number instead:\n"
+                                      + "\n".join(lines), allowed_mentions=ui.NO_PINGS)
         for key in doomed:
             questions.pop(key)
         shown = "\n".join(f"- {k}" for k in doomed[:10]) + (f"\n- …and {len(doomed) - 10} more" if len(doomed) > 10 else "")
         if not questions:
             path.unlink()
-            return await ctx.send(f"🗑️ Removed the last question, so `{name}` is gone:\n{shown}",
-                                  allowed_mentions=discord.AllowedMentions.none())
+            return await ctx.send(f"✅ Removed the last question, so `{name}` is gone:\n{shown}",
+                                  allowed_mentions=ui.NO_PINGS)
         if re.match(r"\d+ questions", str(meta.get("DESCRIPTION", ""))):
             meta["DESCRIPTION"] = re.sub(r"^\d+", str(len(questions)), meta["DESCRIPTION"])
         write_trivia(path, meta, questions)
-        await ctx.send(f"🗑️ Removed {len(doomed)} from `{name}` ({len(questions)} left):\n{shown}",
-                       allowed_mentions=discord.AllowedMentions.none())
+        await ctx.send(f"✅ Removed {len(doomed)} from `{name}` ({len(questions)} left):\n{shown}",
+                       allowed_mentions=ui.NO_PINGS)
 
     # ==========================================
     #              GUESS THE GAME
@@ -825,7 +878,7 @@ class ButlerFun(commands.Cog):
         Hints appear after a minute. `[p]guessgame top` shows the leaderboard.
         """
         if ctx.channel.id in self._guessing:
-            return await ctx.send("A round is already running here!")
+            return await ctx.send("⏳ A round is already running here.")
         gm, gemini = self.bot.get_cog("GameManager"), self.bot.get_cog("GeminiChat")
         if gm is None or gemini is None or not hasattr(gemini, "generate_image"):
             return await ctx.send("❌ This needs the GameManager and Gemini cogs loaded.")
@@ -849,7 +902,7 @@ class ButlerFun(commands.Cog):
                 count_toward_limit=False)
             if scene is None or simplify(answer) in simplify(scene):
                 self._guessing.pop(ctx.channel.id, None)
-                return await ctx.send(error or "😶 I couldn't come up with a picture for that one. Try again.")
+                return await ctx.send(error or "❌ I couldn't come up with a picture for that one. Try again.")
             prompt = f"{scene.strip()} Rendered as {style}. No text, letters, logos or titles anywhere in the image."
             posted = await gemini.generate_image(prompt, f"GUESS_{ctx.channel.id}", ctx.message, channel=ctx.channel,
                                                  user=ctx.author, new=True)
@@ -883,8 +936,9 @@ class ButlerFun(commands.Cog):
                     continue
                 wins = await self.config.member(message.author).guess_wins() + 1
                 await self.config.member(message.author).guess_wins.set(wins)
-                await message.reply(f"🏆 {message.author.mention} got it: **{answer}**! ({wins} win"
-                                    f"{'s' if wins != 1 else ''})", mention_author=False)
+                # The winner's name is highlighted but nobody is pinged.
+                await message.reply(f"🏆 {message.author.mention} got it: **{answer}**! ({ui.plural(wins, 'win')})",
+                                    mention_author=False, allowed_mentions=ui.NO_PINGS)
                 return
         finally:
             self._guessing.pop(channel.id, None)
@@ -896,11 +950,11 @@ class ButlerFun(commands.Cog):
         ranked = sorted(((d["guess_wins"], uid) for uid, d in members.items()
                          if d.get("guess_wins") and ctx.guild.get_member(uid)), reverse=True)[:15]
         if not ranked:
-            return await ctx.send(f"No winners yet. Start a round with `{ctx.clean_prefix}guessgame`.")
+            return await ctx.send(f"❓ No winners yet. Start a round with `{ctx.clean_prefix}guessgame`.")
         medals = ["🥇", "🥈", "🥉"]
         lines = [f"{medals[i] if i < 3 else f'`{i + 1}.`'} <@{uid}>: **{wins}**" for i, (wins, uid) in enumerate(ranked)]
         await ctx.send(embed=discord.Embed(title="🎨 Guess the game: top players", description="\n".join(lines),
-                                           color=discord.Color.gold()))
+                                           color=ui.HIGHLIGHT))
 
     @guessgame.command(name="stop")
     @checks.mod_or_permissions(manage_messages=True)
@@ -908,7 +962,7 @@ class ButlerFun(commands.Cog):
         """End the running round here and reveal the answer (mods)."""
         round_ = self._guessing.pop(ctx.channel.id, None)
         if round_ is None:
-            return await ctx.send("No round is running here.")
+            return await ctx.send("❓ No round is running here.")
         if round_["task"] is not None:
             round_["task"].cancel()
-        await ctx.send(f"🛑 Round stopped. It was **{round_['answer']}**.")
+        await ctx.send(f"✅ Round stopped. It was **{round_['answer']}**.")

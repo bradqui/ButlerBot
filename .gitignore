@@ -11,6 +11,9 @@
 !/data/cogs/CogManager/cogs/
 /data/cogs/CogManager/cogs/*
 
+# Shared style module for our cogs (not a cog itself: no __init__.py)
+!/data/cogs/CogManager/cogs/_shared/
+
 # Custom cogs (add a line here for each new one)
 !/data/cogs/CogManager/cogs/activitystats/
 !/data/cogs/CogManager/cogs/butlerfun/

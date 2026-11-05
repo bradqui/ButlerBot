@@ -1,15 +1,18 @@
 import asyncio
 import base64
+import importlib.util
 import io
 import contextlib
 import logging
 import os
 import re
+import sys
 import time
 from collections import OrderedDict
 from copy import copy
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 import anthropic
@@ -19,6 +22,22 @@ from redbot.core.bot import Red
 from redbot.core.utils.chat_formatting import box, humanize_number, pagify
 
 log = logging.getLogger("red.claude")
+
+
+def _load_butlerui():
+    """The shared style module (../_shared/butlerui.py), re-read when the file changes."""
+    path = Path(__file__).resolve().parent.parent / "_shared" / "butlerui.py"
+    module, mtime = sys.modules.get("butlerui"), path.stat().st_mtime
+    if module is None or getattr(module, "_mtime", None) != mtime:
+        spec = importlib.util.spec_from_file_location("butlerui", path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        module._mtime = mtime
+        sys.modules["butlerui"] = module
+    return module
+
+
+ui = _load_butlerui()
 
 
 # ==========================================
@@ -256,45 +275,25 @@ def utc_today() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
 
-def split_for_discord(text: str, limit: int = 1900) -> List[str]:
-    """Pagify, closing and reopening ``` code fences that get cut across pages."""
-    pages = []
-    reopen = ""
-    for page in pagify(text, page_length=limit):
-        page = reopen + page
-        open_lang = None
-        for match in re.finditer(r"```(\w*)", page):
-            open_lang = match.group(1) if open_lang is None else None
-        if open_lang is not None:
-            page += "\n```"
-            reopen = f"```{open_lang}\n"
-        else:
-            reopen = ""
-        pages.append(page)
-    return pages or [text]
-
-
-class ActionConfirmView(discord.ui.View):
+class ActionConfirmView(ui.ExpiringView):
     """Run / Cancel buttons for guide actions that need elevated permissions. Only the asker can press them."""
 
+    not_yours = f"{ui.LOCKED} Only the person who asked can confirm this."
+
     def __init__(self, user_id: int):
-        super().__init__(timeout=ACTION_CONFIRM_TIMEOUT)
+        super().__init__(user_id, timeout=ACTION_CONFIRM_TIMEOUT)
         self.user_id = user_id
         self.approved: Optional[bool] = None
-        self.message: Optional[discord.Message] = None
-
-    async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        if interaction.user.id != self.user_id:
-            await interaction.response.send_message("Only the person who asked can confirm this.", ephemeral=True)
-            return False
-        return True
+        self.final_content: Optional[str] = None
 
     async def _finish(self, interaction: discord.Interaction, approved: bool, note: str):
         self.approved = approved
         self.stop()
-        await interaction.response.edit_message(content=f"{interaction.message.content}\n-# {note}", view=None)
+        self.message = interaction.message
+        self.final_content = f"{interaction.message.content}\n{ui.hint(note)}"
+        await interaction.response.edit_message(content=self.final_content, view=None)
 
-    @discord.ui.button(label="Run", emoji="▶️", style=discord.ButtonStyle.success)
+    @discord.ui.button(label="Run", style=discord.ButtonStyle.primary)
     async def run(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self._finish(interaction, True, "Running…")
 
@@ -302,12 +301,14 @@ class ActionConfirmView(discord.ui.View):
     async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self._finish(interaction, False, "Cancelled. Nothing was run.")
 
+    async def mark_done(self):
+        """After the commands ran: "Running…" becomes "Done." (their own output follows in the channel)."""
+        if self.message is not None and self.final_content:
+            await ui.edit_quietly(self.message, content=self.final_content.replace("Running…", "Done."))
+
     async def on_timeout(self):
         if self.message is not None:
-            try:
-                await self.message.edit(content=f"{self.message.content}\n-# Timed out. Nothing was run.", view=None)
-            except discord.HTTPException:
-                pass
+            await ui.edit_quietly(self.message, add_note="Timed out. Nothing was run.", view=None)
 
 
 def sniff_image_type(data: bytes) -> Optional[str]:
@@ -363,6 +364,12 @@ class ClaudeChat(commands.Cog):
 
     `[p]butler` answers questions about the bot itself, like "how do I start a game vote?"
     """
+
+    # What complete() and the AI chat say when Claude refuses. Other cogs compare errors against this exact text
+    # (ButlerFun deflects a refused adventure move in character), so keep it a class attribute.
+    REFUSAL = "❌ I can't help with that one."
+    NO_REPLY = "❌ I didn't come up with a reply. Try rephrasing?"
+    NO_ANSWER = "❌ I didn't come up with an answer. Try rephrasing?"   # the butler's version
 
     def __init__(self, bot: Red):
         self.bot = bot
@@ -511,6 +518,24 @@ class ClaudeChat(commands.Cog):
             or member.guild_permissions.administrator
             or await self.bot.is_mod(member)
         )
+
+    async def _not_set_up(self, member: discord.Member) -> str:
+        """The missing-API-key notice. Only the bot owner is shown how to set it up."""
+        if await self.bot.is_owner(member):
+            prefix = await self._prefix(member.guild)
+            return ui.line(ui.WARN, "AI chat isn't set up yet.",
+                           hint=f"Add an Anthropic API key with `{prefix}set api anthropic api_key,<key>`.")
+        return ui.line(ui.WARN, "AI chat isn't set up yet. Ask the bot owner to add an API key.")
+
+    @staticmethod
+    def limit_text(limit: int) -> str:
+        """The one wording for a reached daily limit."""
+        return ui.line(ui.WAIT, f"You've used all {ui.plural(limit, 'AI message')} for today. "
+                                "The limit resets at midnight UTC.")
+
+    async def limit_reached(self, member: discord.Member) -> Optional[int]:
+        """For other cogs: the daily AI limit `member` has reached, or None (no limit, exempt, or not reached)."""
+        return await self._limit_reached(member)
 
     async def _limit_reached(self, member: discord.Member) -> Optional[int]:
         limit = await self.config.guild(member.guild).daily_limit()
@@ -738,14 +763,12 @@ class ClaudeChat(commands.Cog):
 
         client = await self._get_client()
         if client is None:
-            await self._send(message, channel, f"⚠️ No Anthropic API key is set. The bot owner can add one with "
-                                               f"`{prefix}set api anthropic api_key,<key>`.")
+            await self._send(message, channel, await self._not_set_up(message.author))
             return
 
         limit = await self._limit_reached(message.author)
         if limit:
-            await self._send(message, channel, f"⏳ You've used all {limit} of today's AI messages. "
-                                               "The limit resets at midnight UTC.")
+            await self._send(message, channel, self.limit_text(limit))
             return
 
         session = self._get_session(key)
@@ -778,16 +801,14 @@ class ClaudeChat(commands.Cog):
 
             if stop_reason == "refusal" or not (text or image_calls):
                 session.messages.pop()
-                reply = ("🚫 I can't help with that one." if stop_reason == "refusal"
-                         else "😶 I didn't come up with a reply. Try rephrasing?")
-                await self._send(message, channel, reply)
+                await self._send(message, channel, self.REFUSAL if stop_reason == "refusal" else self.NO_REPLY)
                 return
 
             sent = []
             if text or notes:
                 reply = text + sources
                 if stop_reason == "max_tokens":
-                    reply += "\n\n*(My reply was cut off. Ask me to continue.)*"
+                    reply += "\n" + ui.hint("My reply was cut off. Ask me to continue.")
                 if notes:
                     reply += "\n-# Skipped: " + "; ".join(notes)
                 sent += await self._send(message, channel, reply.strip())
@@ -945,42 +966,54 @@ class ClaudeChat(commands.Cog):
             session.messages.pop(0)
 
     def _describe_error(self, e: Exception, prefix: str) -> Tuple[str, bool]:
-        """Map an exception to (user-facing message, whether to reset the conversation)."""
+        """
+        Map an exception to (user-facing message, whether to reset the conversation). The API's own error text is
+        logged, never posted: it can be long, technical, or quote the request back.
+        """
         if isinstance(e, anthropic.AuthenticationError):
-            return f"🔑 The Anthropic API key was rejected. The bot owner can update it with `{prefix}set api anthropic api_key,<key>`.", False
+            log.warning("Anthropic rejected the API key: %s", e)
+            return "⚠️ The AI's API key was rejected, so the bot owner needs to update it.", False
         if isinstance(e, anthropic.PermissionDeniedError):
-            return "🔒 The Anthropic API key isn't allowed to use this model.", False
+            log.warning("Anthropic denied a request: %s", e)
+            return (ui.line(ui.WARN, "The AI's API key isn't allowed to use this model.",
+                            hint=f"A mod can pick another with `{prefix}claude channelmodel`."), False)
         if isinstance(e, anthropic.NotFoundError):
-            return f"❓ That model wasn't found. Pick another with `{prefix}claude channelmodel` or `{prefix}claude mymodel`.", False
+            log.warning("Anthropic model not found: %s", e)
+            return (ui.line(ui.FAIL, "That model wasn't found.",
+                            hint=f"Pick another with `{prefix}claude channelmodel` or `{prefix}claude mymodel`."), False)
         if isinstance(e, anthropic.RateLimitError):
             return "⏳ Claude is getting too many requests right now. Try again in a minute.", False
         if isinstance(e, anthropic.BadRequestError):
             msg = e.message or ""
             if "credit balance" in msg.lower():
-                return "💳 The Anthropic account is out of credits. The bot owner needs to top it up.", False
+                log.warning("Anthropic account is out of credits")
+                return "⚠️ The AI account is out of credits, so the bot owner needs to top it up.", False
             if "too long" in msg.lower():
-                return "🧹 This conversation got too long, so I've started a fresh one. Please ask again.", True
+                return "⚠️ This conversation got too long, so I started a fresh one. Ask again.", True
             log.warning("Claude rejected a request: %s", msg)
-            return f"⚠️ Claude couldn't process that request:{box(msg[:500])}", False
+            return "❌ Claude couldn't process that request. Try rewording it, or leave out the attachments.", False
         if isinstance(e, anthropic.APIStatusError):
-            if e.status_code >= 500:
-                return "🛑 Claude is overloaded or having trouble right now. Try again shortly.", False
             log.warning("Anthropic API error %s: %s", e.status_code, e.message)
-            return f"⚠️ Anthropic API error ({e.status_code}).", False
+            if e.status_code >= 500:
+                return "⏳ Claude is overloaded or having trouble right now. Try again in a minute.", False
+            return "❌ The AI service returned an error. Try again shortly; the error was logged.", False
         if isinstance(e, anthropic.APITimeoutError):
-            return "⌛ Claude took too long to respond. Try again.", False
+            return "⏳ Claude took too long to answer. Try again.", False
         if isinstance(e, anthropic.APIConnectionError):
-            return "📡 I couldn't reach the Anthropic API. Try again shortly.", False
+            log.warning("Couldn't reach the Anthropic API: %s", e)
+            return "❌ I couldn't reach Claude. Try again shortly.", False
         log.exception("Unexpected error in Claude cog", exc_info=e)
         return "❌ Something went wrong while talking to Claude. The error was logged.", False
 
     async def _send(self, message: discord.Message, channel, text: str,
-                    view: Optional[discord.ui.View] = None) -> List[discord.Message]:
-        """Send a possibly long reply. `view` goes on the last page."""
+                    view: Optional[discord.ui.View] = None, *, suppress_embeds: bool = False) -> List[discord.Message]:
+        """Send a possibly long reply. `view` goes on the last page. `suppress_embeds` hides link previews."""
         sent = []
-        pages = split_for_discord(text)
+        pages = ui.split_text(text, 1900)
         for i, page in enumerate(pages):
             kwargs = {"allowed_mentions": NO_MENTIONS}
+            if suppress_embeds:
+                kwargs["suppress_embeds"] = True
             if view is not None and i == len(pages) - 1:
                 kwargs["view"] = view
             if i == 0 and channel == message.channel:
@@ -1196,7 +1229,7 @@ class ClaudeChat(commands.Cog):
 
     def _guide_intro(self, prefix: str, actions: bool) -> str:
         lines = [
-            "📖 Ask me how to do anything with this bot, in plain English. For example:",
+            "🤵 Ask me how to do anything with this bot, in plain English. For example:",
             f"- `{prefix}butler how do I find a game everyone owns?`",
             f"- `{prefix}butler how do I start a vote on what to play?`",
         ]
@@ -1350,11 +1383,11 @@ class ClaudeChat(commands.Cog):
         prefix = await self._prefix(guild)
         client = await self._get_client()
         if client is None:
-            return None, f"⚠️ No Anthropic API key is set. The bot owner can add one with `{prefix}set api anthropic api_key,<key>`."
+            return None, await self._not_set_up(member)
         if count_toward_limit:
             limit = await self._limit_reached(member)
             if limit:
-                return None, f"⏳ You've used your {limit} AI messages for today. The limit resets at midnight UTC."
+                return None, self.limit_text(limit)
         if fast:
             model = await self.config.guide_model()
         else:
@@ -1379,8 +1412,10 @@ class ClaudeChat(commands.Cog):
         if count_toward_limit:
             await self._count_request(member)
         text = "".join(b.text for b in response.content if b.type == "text").strip()
-        if response.stop_reason == "refusal" or not text:
-            return None, "🚫 I can't help with that one."
+        if response.stop_reason == "refusal":
+            return None, self.REFUSAL
+        if not text:
+            return None, self.NO_REPLY
         return text, None
 
     # ---------- public API: link summaries and command suggestions (SpeakUp) ----------
@@ -1565,8 +1600,7 @@ class ClaudeChat(commands.Cog):
 
         client = await self._get_client()
         if client is None:
-            await self._send(message, channel, f"⚠️ No Anthropic API key is set. The bot owner can add one with "
-                                               f"`{prefix}set api anthropic api_key,<key>`.")
+            await self._send(message, channel, await self._not_set_up(message.author))
             return
 
         key = f"GUIDE_{message.author.id}"
@@ -1632,18 +1666,17 @@ class ClaudeChat(commands.Cog):
                 if await self._can_hand_off(message):
                     await self._respond(message, prompt, self._channel_key(message.channel))
                 else:
-                    await self._send(message, channel, f"🤵 That's not about the bot, so it's outside my remit. "
+                    await self._send(message, channel, f"❓ That's not about the bot, so it's outside my remit. "
                                                        f"Try `{prefix}ai {prompt[:80]}`.")
                 return
             if text == GUIDE_SILENT and action is None:
                 session.messages.pop()  # a reply that wasn't for us: leave no trace
                 if not may_stay_silent:
-                    await self._send(message, channel, "😶 I didn't come up with an answer. Try rephrasing?")
+                    await self._send(message, channel, self.NO_ANSWER)
                 return
             if response.stop_reason == "refusal" or not (text or action):
                 session.messages.pop()
-                await self._send(message, channel, "🚫 I can't help with that one." if response.stop_reason == "refusal"
-                                 else "😶 I didn't come up with an answer. Try rephrasing?")
+                await self._send(message, channel, self.REFUSAL if response.stop_reason == "refusal" else self.NO_ANSWER)
                 return
 
             view = None
@@ -1652,7 +1685,7 @@ class ClaudeChat(commands.Cog):
                 # and history records a plain-text note instead.
                 planned, problems, confirm = await self._plan_actions(message, action["commands"], prefix)
                 summary = action["message"] or text or "Here's what I can do."
-                lines = [f"🛠️ {summary}" if planned else summary]
+                lines = [summary]
                 if planned and confirm:
                     lines.append("These need extra permissions, so press **Run** to go ahead:")
                     lines.extend(f"`{c}`" for c in planned)
@@ -1671,10 +1704,11 @@ class ClaudeChat(commands.Cog):
             else:
                 reply = record = text
                 if response.stop_reason == "max_tokens":
-                    reply += "\n\n*(My answer was cut off. Ask me to continue.)*"
+                    reply += "\n" + ui.hint("My answer was cut off. Ask me to continue.")
             if notes:
                 reply += "\n-# Skipped attachments: " + "; ".join(notes)
-            sent = await self._send(message, channel, reply, view=view)
+            # Answers often end with a handbook link; without this, Discord adds a preview card under each one.
+            sent = await self._send(message, channel, reply, view=view, suppress_embeds=True)
             if view is not None:
                 view.message = sent[-1]
 
@@ -1691,6 +1725,8 @@ class ClaudeChat(commands.Cog):
                 if not view.approved:
                     return
             await self._run_actions(message, planned)
+            if view is not None:
+                await view.mark_done()
 
     # ==========================================
     #              CHAT COMMANDS
@@ -1725,7 +1761,7 @@ class ClaudeChat(commands.Cog):
     async def ai_reset(self, ctx: commands.Context):
         """Wipe this channel's shared conversation memory."""
         self._get_session(self._session_key(ctx, private=False)).reset()
-        await ctx.send("🧹 Shared conversation for this channel wiped.")
+        await ctx.send("✅ This channel's shared AI conversation is cleared, so the next message starts fresh.")
 
     @commands.group(name="myai", invoke_without_command=True)
     @commands.guild_only()
@@ -1746,7 +1782,7 @@ class ClaudeChat(commands.Cog):
     async def myai_reset(self, ctx: commands.Context):
         """Wipe your private conversation memory."""
         self._get_session(self._session_key(ctx, private=True)).reset()
-        await ctx.send("🧹 Your private conversation wiped.")
+        await ctx.send("✅ Your private AI conversation is cleared, so the next message starts fresh.")
 
     @commands.command(name="aithread")
     @commands.guild_only()
@@ -1758,12 +1794,14 @@ class ClaudeChat(commands.Cog):
         Inside the thread, @mention me or reply to my messages to keep talking.
         """
         if isinstance(ctx.channel, discord.Thread):
-            return await ctx.send("We're already in a thread. Just @mention me or reply to my messages here.")
+            return await ctx.send("❌ We're already in a thread. @mention me or reply to my messages to keep talking here.")
         name = "🤖 " + (prompt[:80] + "…" if len(prompt) > 80 else prompt)
         try:
             thread = await ctx.message.create_thread(name=name, auto_archive_duration=1440)
         except discord.HTTPException as e:
-            return await ctx.send(f"❌ I couldn't create a thread here: {e.text or e}")
+            log.warning("Couldn't create an AI thread in %s: %s", ctx.channel.id, e)
+            return await ctx.send("❌ I couldn't create a thread here. Check that I'm allowed to create public "
+                                  "threads in this channel.")
         await self._register_thread(thread.id)
 
         model = await self._model_for(f"THREAD_{thread.id}", ctx.author, ctx.channel)
@@ -1872,7 +1910,7 @@ class ClaudeChat(commands.Cog):
         if len(persona) > 300:
             persona = persona[:300] + "…"
         channel = ctx.channel.parent if isinstance(ctx.channel, discord.Thread) and ctx.channel.parent else ctx.channel
-        embed = discord.Embed(title="🤖 Claude Settings", color=discord.Color.orange())
+        embed = discord.Embed(title="🤖 AI chat settings", color=ui.BRAND)
         embed.add_field(name="Models", value=(
             f"**Your private chats:** {self._model_label(await self._model_for(f'USER_{ctx.author.id}', ctx.author, ctx.channel))}\n"
             f"**This channel:** {self._model_label(await self._model_for('CHANNEL', ctx.author, channel))}\n"
@@ -1901,13 +1939,13 @@ class ClaudeChat(commands.Cog):
         alias_for = {v: k for k, v in MODEL_ALIASES.items()}
         lines = []
         for model, info in MODELS.items():
-            status = "✅" if model in allowed else "🚫"
+            status = ui.TICK if model in allowed else ui.UNTICK
             lines.append(
                 f"{status} **{info.name}** (`{alias_for.get(model, model)}`): ${info.input:g} in / ${info.output:g} out "
                 f"per 1M tokens{'' if info.web_search else ', no web search'}"
             )
-        lines.append("\n✅ = admins (for their private chats) and channel managers can choose it. "
-                     "The bot owner manages the list.")
+        lines.append(ui.hint(f"{ui.TICK} = admins (for their private chats) and channel managers can choose it. "
+                             "The bot owner manages the list."))
         await ctx.send("\n".join(lines))
 
     @claude.command(name="mymodel")
@@ -1975,10 +2013,18 @@ class ClaudeChat(commands.Cog):
         until a channel manager changes it.
         """
         resolved = self._resolve_model(model)
+        if resolved is None:
+            names = ", ".join(f"`{alias}`" for alias in MODEL_ALIASES)
+            return await ctx.send(ui.line(ui.FAIL, f"There's no model called `{model[:60]}`.",
+                                          hint=f"Use one of {names}, or a full model ID from "
+                                               f"`{ctx.clean_prefix}claude models`."))
         async with self.config.allowed_models() as allowed:
-            if resolved in allowed:
+            was_allowed = resolved in allowed
+            if was_allowed:
                 allowed.remove(resolved)
-        await ctx.send(f"✅ {self._model_label(resolved or model)} can no longer be chosen. Private chats using it "
+        if not was_allowed:
+            return await ctx.send(f"✅ {self._model_label(resolved)} already can't be chosen.")
+        await ctx.send(f"✅ {self._model_label(resolved)} can no longer be chosen. Private chats using it "
                        "now use the default model.")
 
     @claude.command(name="effort")
@@ -2160,7 +2206,7 @@ class ClaudeChat(commands.Cog):
             return await ctx.send("❌ Use 0 or more.")
         await self.config.guild(ctx.guild).daily_limit.set(messages_per_day)
         await ctx.send("✅ Daily limit removed." if messages_per_day == 0
-                       else f"✅ Users can now send {messages_per_day} AI messages per day.")
+                       else f"✅ Members can now send {ui.plural(messages_per_day, 'AI message')} a day.")
 
     @claude.command(name="usage")
     async def claude_usage(self, ctx: commands.Context, member: discord.Member = None):
@@ -2172,7 +2218,7 @@ class ClaudeChat(commands.Cog):
         """
         is_admin = await self._is_exempt(ctx.author) or ctx.author.guild_permissions.manage_guild
         if member is not None and member != ctx.author and not is_admin:
-            return await ctx.send("❌ You can only view your own usage.")
+            return await ctx.send("🔒 You can only view your own usage.")
 
         def describe(u: dict) -> str:
             return (
@@ -2187,12 +2233,12 @@ class ClaudeChat(commands.Cog):
             usage = await self.config.member(target).usage()
             daily = await self.config.member(target).daily()
             today = daily["count"] if daily["date"] == utc_today() else 0
-            embed = discord.Embed(title=f"Claude usage: {target.display_name}", color=discord.Color.orange())
+            embed = discord.Embed(title=f"🤖 AI usage: {target.display_name}", color=ui.BRAND)
             embed.description = describe(usage) + f"\n**Messages today:** {today}"
             return await ctx.send(embed=embed)
 
         g = await self.config.guild(ctx.guild).all()
-        embed = discord.Embed(title=f"Claude usage: {ctx.guild.name}", color=discord.Color.orange())
+        embed = discord.Embed(title=f"🤖 AI usage: {ctx.guild.name}", color=ui.BRAND)
         embed.description = describe(g["usage"])
         members = await self.config.all_members(ctx.guild)
         top = sorted(members.items(), key=lambda kv: kv[1]["usage"]["cost"], reverse=True)[:10]
@@ -2202,7 +2248,7 @@ class ClaudeChat(commands.Cog):
                 continue
             m = ctx.guild.get_member(user_id)
             name = m.display_name if m else f"User {user_id}"
-            lines.append(f"{name}: ${data['usage']['cost']:.2f} ({data['usage']['requests']} requests)")
+            lines.append(f"{name}: ${data['usage']['cost']:.2f} ({ui.plural(data['usage']['requests'], 'request')})")
         if lines:
             embed.add_field(name="Top users", value="\n".join(lines), inline=False)
         embed.set_footer(text=f"Since {g['usage_since'] or 'n/a'} · Estimates from published API prices")
@@ -2222,8 +2268,8 @@ class ClaudeChat(commands.Cog):
     async def claude_key(self, ctx: commands.Context):
         """Show how to set the Anthropic API key."""
         is_set = bool((await self.bot.get_shared_api_tokens("anthropic")).get("api_key"))
-        await ctx.send(
-            f"API key is **{'set' if is_set else 'not set'}**.\n"
-            f"Set it with `{ctx.clean_prefix}set api anthropic api_key,<your key>` "
-            "(get one at <https://console.anthropic.com/settings/keys>). Delete your message afterwards."
-        )
+        await ctx.send(ui.line(
+            ui.DONE if is_set else ui.WARN,
+            "The Anthropic API key is set." if is_set else "The Anthropic API key isn't set yet.",
+            hint=f"Set it with `{ctx.clean_prefix}set api anthropic api_key,<your key>` (get one at "
+                 "<https://console.anthropic.com/settings/keys>), then delete your message."))

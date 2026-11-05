@@ -7,8 +7,7 @@ permalink: /reference/buttongreeter/
 
 # ButtonGreeter
 
-A welcome system that greets users with buttons to self-assign a role/nickname, 
-followed by a mandatory rules agreement check.
+Welcome buttons for new members: pick a group (role and nickname tag), then agree to the rules.
 
 For a task-by-task guide, see [Server setup]({{ '/admin/' | relative_url }}).
 
@@ -20,7 +19,7 @@ For a task-by-task guide, see [Server setup]({{ '/admin/' | relative_url }}).
 
 **Who:** admins, or anyone with the manage roles permission · **Also:** `!bg`
 
-Admin configuration commands for the Welcome/Role system.
+Admin settings for the welcome flow: channels, group buttons and the rules role.
 
 <a id="buttongreeter-addmodrole"></a>
 ### !buttongreeter addmodrole
@@ -29,7 +28,7 @@ Admin configuration commands for the Welcome/Role system.
 
 **Who:** admins, or anyone with the manage roles permission
 
-Authorize a role to use the 'forceclass' and 'forcerulesremove' commands.
+Let a role use `!forceclass` and `!forcerulesremove`.
 
 <a id="buttongreeter-addrole"></a>
 ### !buttongreeter addrole
@@ -38,7 +37,7 @@ Authorize a role to use the 'forceclass' and 'forcerulesremove' commands.
 
 **Who:** admins, or anyone with the manage roles permission
 
-Add a button to the welcome message that assigns a specific role.
+Add a group button to the welcome message. Its label becomes the nickname tag.
 
 <a id="buttongreeter-removemodrole"></a>
 ### !buttongreeter removemodrole
@@ -47,7 +46,7 @@ Add a button to the welcome message that assigns a specific role.
 
 **Who:** admins, or anyone with the manage roles permission
 
-Remove a role's authorization to use force commands.
+Stop a role from using the force commands.
 
 <a id="buttongreeter-removerole"></a>
 ### !buttongreeter removerole
@@ -56,7 +55,7 @@ Remove a role's authorization to use force commands.
 
 **Who:** admins, or anyone with the manage roles permission
 
-Remove a button from the configuration.
+Remove a group button.
 
 <a id="buttongreeter-setadminchannel"></a>
 ### !buttongreeter setadminchannel
@@ -65,7 +64,7 @@ Remove a button from the configuration.
 
 **Who:** admins, or anyone with the manage roles permission
 
-Set the channel where error logs should be sent.
+Set the channel where problems with the welcome flow are reported.
 
 <a id="buttongreeter-setchannel"></a>
 ### !buttongreeter setchannel
@@ -83,7 +82,7 @@ Set the channel where new members are greeted.
 
 **Who:** admins, or anyone with the manage roles permission
 
-Set the channel that contains your server rules.
+Set the channel that has your server rules.
 
 <a id="buttongreeter-setrulesrole"></a>
 ### !buttongreeter setrulesrole
@@ -92,7 +91,7 @@ Set the channel that contains your server rules.
 
 **Who:** admins, or anyone with the manage roles permission
 
-Set the role given to a user when they click 'Yes' to accept rules.
+Set the role members get when they agree to the rules.
 
 <a id="buttongreeter-settings"></a>
 ### !buttongreeter settings
@@ -101,7 +100,7 @@ Set the role given to a user when they click 'Yes' to accept rules.
 
 **Who:** admins, or anyone with the manage roles permission
 
-Show the current configuration for channels, roles, and buttons.
+Show the current channels, roles and buttons.
 
 <a id="changerole"></a>
 ### !changerole
@@ -110,7 +109,7 @@ Show the current configuration for channels, roles, and buttons.
 
 **Who:** everyone
 
-Self-service command to change your role if you clicked the wrong button.
+Switch your group if you clicked the wrong button. Use the button's exact label.
 
 <a id="forceclass"></a>
 ### !forceclass
@@ -119,7 +118,7 @@ Self-service command to change your role if you clicked the wrong button.
 
 **Who:** everyone
 
-(Authorized Mod Roles Only) Force assign a specific class role to a user.
+(Admins and welcome mod roles) Put a member in a group: its role and nickname tag.
 
 <a id="forcerulesremove"></a>
 ### !forcerulesremove
@@ -128,6 +127,6 @@ Self-service command to change your role if you clicked the wrong button.
 
 **Who:** everyone
 
-(Authorized Mod Roles Only) Remove the 'Rules Agreed' role from a user.
+(Admins and welcome mod roles) Take the rules role away from a member.
 
 {% endraw %}

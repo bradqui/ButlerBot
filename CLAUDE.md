@@ -77,7 +77,12 @@ Quirks to know:
       - The AI chat (`_call_claude`) is offered the same lookups, through the same `_run_lookups`, alongside web search and image calls. Text written before a lookup is dropped, the same way as for web searches.
   - When Claude calls `generate_image` (strict schema: `prompt`, `edit`), the cog runs it through Gemini and **does not send a tool_result back**. This saves a second API call. History records a text note such as `[Generated an image: "…"]` instead of tool blocks, so it stays text-only. Pricing for the usage estimates is in the `MODELS` table in `claude.py`; update it if prices change.
 - **Command name conflicts:** the old chat Gemini and the Claude cog both define `ai`/`myai`/`aithread`. Only the image-only Gemini can be loaded alongside Claude.
-- `buttongreeter` views use `timeout=None` but aren't registered as persistent views, so buttons on welcome messages sent before a restart or reload stop working.
+- **ButtonGreeter buttons** are persistent `DynamicItem`s (since 2026-11-04), with the member's ID in each custom ID so "not for you" survives restarts: `bg:role:<role_id>:<member_id>`, `bg:custom:<member_id>`, `bg:none:<member_id>`, `bg:rules:yes|no:<member_id>`. Server settings are read at click time. Welcome messages posted before that change stay dead.
+  - Only the welcome message pings, and only the newcomer.
+  - `tagged_nick` is the one nickname rule: it replaces any leading `[TAG]`.
+  - `report()` sends a short ⚠️ line to the admin channel; tracebacks only go to the log.
+  - Without a rules role, the rules step is skipped and admins get a note.
+  - Saying No keeps the rules prompt up so the member can change their mind.
 - **GameManager internals:**
   - **Persistent buttons:** session, vote, request and install buttons are discord.py `DynamicItem`s (custom IDs `gm:s:<action>:<sid>`, `gm:v:<vid>:<gid>`, `gm:r:<action>:<rid>`, `gm:i:<rid>`), registered in `cog_load`. They keep working after restarts. Buttons posted by the pre-2026-11 version used static IDs and are dead.
   - **Vote timers:** they live in `self.vote_tasks`. `_resume_votes` reschedules them from each vote's `ends_at` on load.
@@ -104,11 +109,17 @@ Quirks to know:
     - Games and requests store `steam_appid` when one is known.
   - **`find_game_title`** (Claude cog) tries Haiku with `web_search_20260209`, then Haiku with `web_search_20250305`, then Sonnet (`TITLE_SEARCHERS`). It remembers the first option the API accepts, and it reports through a strict `report_title` client tool without sending a tool_result back.
 - **Other public Claude cog helpers:**
-  - `complete(member, channel, *, system, messages, fast=False, max_tokens, persona=True, count_toward_limit=True)` is used by ButlerFun. It returns `(text, None)` or `(None, a user-facing error)`. `fast` uses the guide model and otherwise the channel model. It puts the persona first, records usage, respects the daily limit, and turns on top-level caching. On models with `fallback` it uses the beta endpoint with `fallbacks: "default"`, like the AI chat. A refusal returns an error starting with 🚫.
+  - `complete(member, channel, *, system, messages, fast=False, max_tokens, persona=True, count_toward_limit=True)` is used by ButlerFun. It returns `(text, None)` or `(None, a user-facing error)`. `fast` uses the guide model and otherwise the channel model. It puts the persona first, records usage, respects the daily limit, and turns on top-level caching. On models with `fallback` it uses the beta endpoint with `fallbacks: "default"`, like the AI chat.
+    - A refusal returns exactly `ClaudeChat.REFUSAL` (`"❌ I can't help with that one."`), and callers compare `error == claude.REFUSAL`. An empty reply returns `NO_REPLY`, which isn't a refusal.
+    - Other public helpers: `limit_reached(member) -> Optional[int]`, which ButlerFun uses to name whose limit stopped an adventure round, and `limit_text(limit)`, the single wording for the daily limit.
+    - A missing API key shows "⚠️ AI chat isn't set up yet…", with the setup command shown to the bot owner only.
+    - Butler answers are sent with `suppress_embeds=True` so the handbook link doesn't add a preview.
+    - `ActionConfirmView` is an `ExpiringView`; after running, its "Running…" note changes to "Done.".
+    - Long replies use `ui.split_text`; `split_for_discord` is gone.
   - `summarize_link(url, member)` reads the page with Anthropic's **web fetch** server tool, so the bot never requests user-posted URLs itself (no SSRF into the Docker host's network). It follows the same fallback pattern (`LINK_READERS`: Haiku `web_fetch_20260209`, then `_20250910`, then Sonnet, with `max_content_tokens` 12000) and keeps only the text after the last tool block.
   - `suggest_command(message, typed)` sends the guide's exact system prompt and tools with `tool_choice: none`, so it hits the guide's prompt cache. It accepts the reply only if it starts with the prefix and names a real, non-hidden command.
 - `censord` reads guild and channel Config on every message.
-- `data/cogs/ButtonGreeter/` holds an **older, stale copy** of `buttongreeter.py`, `__init__.py` and `info.json` next to its `settings.json`. That copy isn't loaded; the live code is in `CogManager/cogs/buttongreeter/`. Don't edit the stale copy by mistake.
+- `data/cogs/ButtonGreeter/` holds an **older, stale copy** (far behind since the 2026-11-04 rewrite) of `buttongreeter.py`, `__init__.py` and `info.json` next to its `settings.json`. That copy isn't loaded; the live code is in `CogManager/cogs/buttongreeter/`. Don't edit the stale copy by mistake.
 - The `info.json` files have placeholder authors (`"YourName"`, `"Claude"`); the real author is Quillshot.
 
 ## Handbook site (`docs/`)
@@ -139,11 +150,100 @@ Loaded packages, from `core/settings.json`: admin, alias, cleanup, customcom, do
 
 - Use Red's `Config` for all persistence: `Config.get_conf(self, identifier=<int>, force_registration=True)`, then `register_guild/channel/user/global`, and `async with self.config.guild(g).thing() as x:` for mutations. **Never change an existing cog's identifier**, because that orphans all of its saved data. For non-Config files, use `redbot.core.data_manager.cog_data_path(self)` (as Censord does).
 - Permission checks use `redbot.core.checks` / `commands` decorators (`admin_or_permissions`, `mod_or_permissions`, `is_owner`, `guild_only`), plus each cog's own configurable admin/mod role.
-- UI is built with `discord.ui.View` / `Button` / `Modal`; interaction errors are reported ephemerally.
-- Match the existing style: section-divider comments, emoji-prefixed status messages (✅ ❌ ⚠️), embeds for settings displays.
+- UI is built with `discord.ui` views, modals and (from the 2026-11 overhaul) Components V2 layouts; interaction errors are reported ephemerally. Follow **Message style** below.
+- Match the existing code style: section-divider comments.
 - Prefer `logging.getLogger("red.<cogname>")` over `print`. Output lands in `core/logs/`.
 - Clean up background tasks in `cog_unload`.
 - When adding a dependency, list it in the cog's `info.json` `requirements`. Packages land in `data/cogs/Downloader/lib/`.
+
+## Message style (all of our cogs)
+
+The approved design is the proposal at https://claude.ai/artifact/6SZSwTsiqe2gxeyKE1Dorq (2026-11-04). The rollout is in four phases:
+1. The shared module and the audit's bug fixes.
+2. Cards: sessions, votes, requests, Steam, the time answer, help, settings.
+3. Boards: paged lists, stats reports.
+4. Less noise: a game night as one card, offers that clean up, personal numbers private.
+
+**Shared module:** `CogManager/cogs/_shared/butlerui.py`. It isn't a cog: the folder has no `__init__.py`, so Red doesn't list it. Red doesn't put the cogs folder on `sys.path`, so every cog loads it with the `_load_butlerui()` snippet from that file's docstring, which re-reads the file when it changes. It provides:
+- the colors and status symbols;
+- `line()`, `hint()`, `plural()`, `truncate()` and `split_text()`;
+- `ExpiringView`, a one-person menu that greys out and says "Expired.";
+- `edit_quietly()` and `respond()`, which are private and ping-free by default.
+
+Use it instead of local copies.
+
+**Colors.** Six, each with one meaning:
+- `BRAND` is Discord blurple: info, lists, settings, help.
+- `SUCCESS`: done, joined, live.
+- `HIGHLIGHT`: winners, results, sales.
+- `ATTENTION`: needs someone to act.
+- `DANGER`: denied, removed, failed.
+- `MUTED`: ended, cancelled, expired.
+
+Staff-only cards keep these colors and add a "Staff only" hint, rather than using an admin color.
+
+**Status symbols.** Put one at the start of a line, with these meanings only:
+- ✅ done
+- ❌ couldn't do it (say what went wrong and what to do)
+- ⚠️ heads-up, or something needs setting up
+- ⏳ working, busy or a limit was reached
+- 🔒 not allowed for you
+- ❓ didn't understand, not found, or did you mean
+
+Rules for using them:
+- Don't use 🛑 ⌛ 😶 🚫 💳 🔑 📡, "Error:" or Title Case labels as status markers. Game moments such as 🏆, ⌛ "Time's up" and 🏁 are fine.
+- Picker checkboxes are ☑️/⬜.
+- Each feature keeps one topic emoji for titles: 🎮 games, 🗳️ votes, 🤖 AI chat, 🎨 images, 🤵 butler, 📊 stats, 🗣️ SpeakUp, 🗺️ adventures, 🧠 trivia, 🛡️ filters, 👋 welcome, 📖 help.
+- At most one emoji per line.
+
+**Message sizes:**
+- **Line:** one sentence, with an optional `-#` hint under it. It's private when there's an interaction. Text-command errors stay in the channel (the user's choice, so don't auto-delete them).
+- **Card:** a V2 container with an accent color, a short title, the details, its buttons inside, and a `-#` footer hint.
+- **Board:** a card that pages, 15 rows with ◀ ▶.
+
+AI answers, adventure narration and butler replies stay plain text, split with `split_text()` (never by slicing).
+
+**Buttons:**
+- Labels are a verb of three words or fewer. Put emoji on every button in a row or on none; icon-only buttons are fine for 🗑️ and ◀ ▶.
+- Blurple (primary) is for the one main action. Grey is for everything else, Cancel and Keep included. Red is only for the confirm step of something destructive, and green isn't used for ordinary buttons.
+- More than five choices means a select menu.
+- Menus that expire disable their items and add "Expired." (`ExpiringView`).
+
+**Words:**
+- Sentence case. Display names, never usernames.
+- Feature names people know ("AI chat", not "ClaudeChat").
+- Discord timestamps for times. Timestamps don't render in embed titles, so only use them in text.
+- Command hints always use the real prefix; never show a literal `[p]` to users.
+- Use `plural()`, never "(s)".
+- Never post raw API or exception text: log it and show a short sentence instead.
+
+**Pings:** only on purpose, for reminders, sessions, LFG, sale alerts, and the welcome greeting. Everything else uses `ui.NO_PINGS`, or `mention_author=False` on replies. **Gotcha:** `discord.AllowedMentions(users=[m])` leaves `everyone` and `roles` on, so pass `everyone=False, roles=False` too.
+
+**Phase 1 per-cog notes (2026-11-04):**
+- **GameManager:**
+  - `OwnerOnlyView` subclasses `ui.ExpiringView`, and each menu sets its own `expired_note` (for example "Expired. Nothing was saved.").
+  - Installed games are marked 💾 (`INSTALLED`). `prefix(guild)` feeds `cmd()`.
+  - Host and admin refusals, including `game_admin()`, are 🔒. ⚠️ means "already that way", and ➖ only means removed.
+  - Session buttons: Join is primary and the rest are grey. Vote options are grey, and Approve is primary.
+- **SpeakUp:**
+  - 📄 goes on every summarizable link, with no cooldown (the user's choice, 2026-11-05). Only 🕘 has a per-channel cooldown.
+  - `summary_text()` shortens summaries to fit one message. A failed post leaves the offer clickable again.
+  - `ConfirmRemoveView` is an `ExpiringView`. Run it expires after 5 minutes, but its Remove button keeps working.
+  - The Steam card is `HIGHLIGHT` when on sale and `BRAND` otherwise, with grey 📚/⭐ buttons.
+- **ActivityStats:**
+  - Every report uses `BRAND`. Admin reports add a "Staff only" footer (`STAFF_HINT`).
+  - The digest title uses plain dates (`short_date`), since embed titles can't show timestamps.
+  - `daily_chart(colors=…)`: joins are green and leaves red.
+  - People who left the server are counted, not mentioned (`_names_or_departed`).
+- **Gemini:** the public `image_models()` lists the image models. `!gemini model` and `channelmodel` check names against it: aliases always pass, and a ⚠️ hint appears when the list can't be fetched.
+- **Handbook:**
+  - Cards use friendly cog names (`COG_NAMES`, `friendly_name()`), and `!help <friendly name>` finds the cog.
+  - Every card uses 📖 and one footer (`HELP_FOOTER`); `fit()` shortens long text.
+  - Topic emoji: filters 🛡️, moderation 🔨.
+- **Censord:**
+  - `addword`/`delword` delete the command when they can, never repeat the word, and report honestly; `_update_csv` returns whether the list changed.
+  - `threshold` values must be at least 1.
+  - The "watch your language" warning mentions the person without pinging them.
 
 ## Secrets (never print, log, or copy out)
 

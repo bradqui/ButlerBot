@@ -44,6 +44,8 @@ Arguments:
 
 Adds a word or phrase to the censorship list.
 
+Your command message is deleted (when I can), and the reply doesn't repeat the word.
+
 Arguments:
 - level: 'low' or 'high'.
 - word: The word to censor. Supports wildcards (e.g. *bad*).
@@ -73,6 +75,8 @@ Shows:
 **Who:** everyone
 
 Removes a word or phrase from the censorship list.
+
+Your command message is deleted (when I can), and the reply doesn't repeat the word.
 
 Arguments:
 - level: 'low' or 'high'.
@@ -162,6 +166,7 @@ Options:
 Sets the violation threshold for punishments.
 
 The bot punishes a user if they send [count] violating messages within [seconds].
+Both numbers must be at least 1.
 
 Example: !censor threshold 5 10
 (Punishes if 5 bad messages are sent in 10 seconds).

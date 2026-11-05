@@ -23,7 +23,7 @@ You can also use `/games newprofile` (only you see it), or say "@ButlerBot set u
 4. **Favorites:** your #1, #2 and #3. These break ties in votes.
 5. **Wishlist:** games you want but don't own. You get a ping when one goes on sale.
 
-Run it again any time to update things.
+Run it again any time to update things. Menus like this expire after a while: their buttons grey out and say **Expired**, and anything you didn't save isn't kept.
 
 ## Adding and removing games
 
@@ -33,7 +33,7 @@ Run it again any time to update things.
 | `!games unown [games]` | Remove games from your library. |
 | `!games install [games]` | Mark games installed. Installing a game also means you own it. |
 | `!games uninstall [games]` | Mark games not installed. They stay in your library. |
-| `!games mygames` | Your library, favorites first (✅ = installed). |
+| `!games mygames` | Your library, favorites first (💾 = installed). |
 | `!games usergames <member>` | Someone else's library. |
 | `!games list` / `!games search <text>` | The whole server library. |
 

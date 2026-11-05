@@ -1,15 +1,37 @@
-import discord
 import csv
+import importlib.util
+import logging
 import os
 import re
+import sys
 import time
-import logging
 from collections import defaultdict, deque
+from pathlib import Path
 from typing import List, Optional
 
+import discord
 from redbot.core import commands, checks, Config, data_manager
 
+
+def _load_butlerui():
+    """The shared style module (../_shared/butlerui.py), re-read when the file changes."""
+    path = Path(__file__).resolve().parent.parent / "_shared" / "butlerui.py"
+    module, mtime = sys.modules.get("butlerui"), path.stat().st_mtime
+    if module is None or getattr(module, "_mtime", None) != mtime:
+        spec = importlib.util.spec_from_file_location("butlerui", path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        module._mtime = mtime
+        sys.modules["butlerui"] = module
+    return module
+
+
+ui = _load_butlerui()
 log = logging.getLogger("red.censord")
+
+LEVELS = ("off", "low", "high")
+ACTIONS = ("delete", "kick", "ban")
+STRATEGIES = ("include", "exclude")
 
 class Censord(commands.Cog):
     """
@@ -100,8 +122,12 @@ class Censord(commands.Cog):
                                 log.error(f"Failed to compile regex for: {pattern_str}")
         return count
 
-    def _update_csv(self, level: str, word: str, add: bool = True):
-        """Updates the CSV, preserving the single-line format."""
+    def _update_csv(self, level: str, word: str, add: bool = True) -> bool:
+        """
+        Add or remove one entry, keeping the single-line format. Returns whether the list changed (False when the
+        word was already on it, or wasn't there to remove).
+        """
+        word = word.strip()
         file_path = self.data_path / f"{level}.csv"
         all_words = []
 
@@ -115,12 +141,12 @@ class Censord(commands.Cog):
                             all_words.append(cell.strip())
 
         # 2. Modify list
+        if add == (word in all_words):
+            return False
         if add:
-            if word not in all_words:
-                all_words.append(word)
+            all_words.append(word)
         else:
-            if word in all_words:
-                all_words.remove(word)
+            all_words.remove(word)
 
         # 3. Write back as ONE horizontal row
         with open(file_path, "w", newline='', encoding='utf-8') as f:
@@ -130,6 +156,7 @@ class Censord(commands.Cog):
         
         # 4. Reload memory
         self._load_words()
+        return True
 
     async def _check_content(self, text: str, level: str) -> bool:
         patterns_to_check = []
@@ -151,10 +178,12 @@ class Censord(commands.Cog):
         try:
             if action == "kick":
                 await guild.kick(user, reason=reason)
-                await message.channel.send(f"👢 **{user}** has been kicked for repeated offensive language.")
+                await message.channel.send(f"👢 **{user.display_name}** was kicked for repeated offensive language.",
+                                           allowed_mentions=ui.NO_PINGS)
             elif action == "ban":
                 await guild.ban(user, reason=reason, delete_message_days=1)
-                await message.channel.send(f"🔨 **{user}** has been banned for repeated offensive language.")
+                await message.channel.send(f"🔨 **{user.display_name}** was banned for repeated offensive language.",
+                                           allowed_mentions=ui.NO_PINGS)
         except discord.Forbidden:
             log.warning(f"Failed to execute {action} on {user} in {guild}.")
 
@@ -228,7 +257,9 @@ class Censord(commands.Cog):
                 await self._execute_punishment(message, action)
                 self.violations[message.guild.id][message.author.id].clear()
             else:
-                await message.channel.send(f"{message.author.mention} Watch your language.", delete_after=3)
+                # Mention without a ping: the warning disappears after 3 seconds, so a ping would leave a ghost.
+                await message.channel.send(f"⚠️ {message.author.mention}, watch your language.", delete_after=3,
+                                           allowed_mentions=ui.NO_PINGS)
 
     # --------------------------------------------------------------------------
     # COMMANDS
@@ -253,20 +284,23 @@ class Censord(commands.Cog):
         """
         # Only someone with Manage Guild can assign the Censor Role initially
         if not ctx.author.guild_permissions.manage_guild and not await self.bot.is_owner(ctx.author):
-            return await ctx.send("❌ You need `Manage Server` permissions to change the Censor Admin Role.")
+            return await ctx.send("🔒 You need the Manage Server permission to change the filter admin role.")
 
         if role:
             await self.config.guild(ctx.guild).admin_role.set(role.id)
-            await ctx.send(f"✅ The role **{role.name}** can now configure the Censor bot.")
+            await ctx.send(f"✅ **{role.name}** can now change the word filter settings.")
         else:
             await self.config.guild(ctx.guild).admin_role.set(None)
-            await ctx.send(f"✅ Censor admin role cleared. Only users with `Manage Server` can configure the bot.")
+            await ctx.send("✅ Filter admin role cleared. Only people with Manage Server can change the settings.")
 
     async def cog_check(self, ctx):
         """Global check for the cog's commands (except setrole which has its own logic)."""
         if ctx.command.name == "setrole":
-            return True 
-        return await self._has_permission(ctx)
+            return True
+        if await self._has_permission(ctx):
+            return True
+        raise commands.UserFeedbackCheckFailure(
+            "🔒 Only people with Manage Server or the filter admin role can change the word filter.")
 
     @censord.command()
     async def reload(self, ctx):
@@ -277,13 +311,13 @@ class Censord(commands.Cog):
         to apply changes immediately without reloading the entire cog.
         """
         count = self._load_words()
-        await ctx.send(f"✅ Reloaded {count} censored patterns from CSV files.")
+        await ctx.send(f"✅ Reloaded {ui.plural(count, 'pattern')} from the word lists.")
 
     @censord.command()
     async def config(self, ctx):
         """
         Displays a dashboard of the current censorship configuration.
-        
+
         Shows:
         - Current global level (Off/Low/High)
         - Current punishment action
@@ -293,26 +327,29 @@ class Censord(commands.Cog):
         - Configured Admin Role
         """
         settings = await self.config.guild(ctx.guild).all()
-        
-        embed = discord.Embed(title="🛡️ Censord Configuration", color=discord.Color.red())
-        
-        embed.add_field(name="Global Level", value=settings["global_level"].capitalize(), inline=True)
+
+        embed = discord.Embed(title="🛡️ Censord settings", color=ui.BRAND)
+
+        embed.add_field(name="Server level", value=settings["global_level"].capitalize(), inline=True)
         embed.add_field(name="Action", value=settings["action"].capitalize(), inline=True)
         embed.add_field(name="Strategy", value=settings["strategy"].capitalize(), inline=True)
-        
-        embed.add_field(name="Threshold", value=f"{settings['threshold_count']} msgs in {settings['threshold_time']}s", inline=False)
-        
+
+        embed.add_field(name="Threshold", inline=False,
+                        value=f"{ui.plural(settings['threshold_count'], 'message')} in "
+                              f"{ui.plural(settings['threshold_time'], 'second')}")
+
         inc = len(settings["included_channels"])
         exc = len(settings["excluded_channels"])
         embed.add_field(name="Channels", value=f"Included: {inc}\nExcluded: {exc}", inline=True)
-        
-        embed.add_field(name="Word Lists", value=f"Low: {len(self.word_lists['low'])}\nHigh: {len(self.word_lists['high'])}", inline=True)
+
+        embed.add_field(name="Word lists", inline=True,
+                        value=f"Low: {len(self.word_lists['low'])}\nHigh: {len(self.word_lists['high'])}")
 
         role_id = settings["admin_role"]
         role_name = ctx.guild.get_role(role_id).mention if role_id and ctx.guild.get_role(role_id) else "None"
-        embed.add_field(name="Admin Role", value=role_name, inline=False)
+        embed.add_field(name="Admin role", value=role_name, inline=False)
 
-        await ctx.send(embed=embed)
+        await ctx.send(embed=embed, allowed_mentions=ui.NO_PINGS)
 
     @censord.command()
     async def level(self, ctx, level: str, channel: discord.TextChannel = None):
@@ -325,15 +362,15 @@ class Censord(commands.Cog):
                               If omitted, it sets the global server level.
         """
         level = level.lower()
-        if level not in ["off", "low", "high"]: 
-            return await ctx.send("Level must be: off, low, or high.")
-        
+        if level not in LEVELS:
+            return await ctx.send("❓ The level can be `off`, `low` or `high`.")
+
         if channel:
             await self.config.channel(channel).override_level.set(level)
-            await ctx.send(f"Level for {channel.mention} set to **{level}**.")
+            await ctx.send(f"✅ The level in {channel.mention} is now **{level}**.")
         else:
             await self.config.guild(ctx.guild).global_level.set(level)
-            await ctx.send(f"Global server level set to **{level}**.")
+            await ctx.send(f"✅ The server level is now **{level}**.")
 
     @censord.command()
     async def action(self, ctx, action: str, channel: discord.TextChannel = None):
@@ -346,29 +383,34 @@ class Censord(commands.Cog):
                               If omitted, it sets the global server action.
         """
         action = action.lower()
-        if action not in ["delete", "kick", "ban"]: 
-            return await ctx.send("Action must be: delete, kick, or ban.")
-        
+        if action not in ACTIONS:
+            return await ctx.send("❓ The action can be `delete`, `kick` or `ban`.")
+
         if channel:
             await self.config.channel(channel).override_action.set(action)
-            await ctx.send(f"Action for {channel.mention} set to **{action}**.")
+            await ctx.send(f"✅ The action in {channel.mention} is now **{action}**.")
         else:
             await self.config.guild(ctx.guild).action.set(action)
-            await ctx.send(f"Global action set to **{action}**.")
+            await ctx.send(f"✅ The server action is now **{action}**.")
 
     @censord.command()
     async def threshold(self, ctx, count: int, seconds: int):
         """
         Sets the violation threshold for punishments.
-        
+
         The bot punishes a user if they send [count] violating messages within [seconds].
-        
+        Both numbers must be at least 1.
+
         Example: [p]censor threshold 5 10
         (Punishes if 5 bad messages are sent in 10 seconds).
         """
+        if count < 1 or seconds < 1:
+            return await ctx.send("❓ Both numbers need to be at least 1, like "
+                                  f"`{await self._prefix(ctx)}censor threshold 3 60`.")
         await self.config.guild(ctx.guild).threshold_count.set(count)
         await self.config.guild(ctx.guild).threshold_time.set(seconds)
-        await ctx.send(f"Threshold set: {count} violations in {seconds} seconds.")
+        await ctx.send(f"✅ The punishment now comes after {ui.plural(count, 'violation')} within "
+                       f"{ui.plural(seconds, 'second')}.")
 
     @censord.command()
     async def strategy(self, ctx, mode: str):
@@ -380,72 +422,102 @@ class Censord(commands.Cog):
         - exclude: Blacklist mode. The bot monitors ALL channels EXCEPT those added via `[p]censor exceptchan`.
         """
         mode = mode.lower()
-        if mode not in ["include", "exclude"]: 
-            return await ctx.send("Strategy must be 'include' or 'exclude'.")
-        
+        if mode not in STRATEGIES:
+            return await ctx.send("❓ The strategy can be `include` or `exclude`.")
+
         await self.config.guild(ctx.guild).strategy.set(mode)
-        await ctx.send(f"Strategy set to **{mode}**.")
+        await ctx.send(f"✅ The strategy is now **{mode}**.")
 
     @censord.command()
     async def exceptchan(self, ctx, channel: discord.TextChannel):
         """
         Toggles a channel for the 'Exclude' strategy.
-        
+
         If the strategy is 'exclude', adding a channel here stops the bot from monitoring it.
         Running the command again removes it from the list.
         """
         async with self.config.guild(ctx.guild).excluded_channels() as chans:
             if channel.id in chans:
                 chans.remove(channel.id)
-                await ctx.send(f"{channel.mention} removed from exceptions (Now monitored).")
+                await ctx.send(f"✅ {channel.mention} is off the exceptions list, so it's watched again.")
             else:
                 chans.append(channel.id)
-                await ctx.send(f"{channel.mention} added to exceptions (Now ignored).")
+                await ctx.send(f"✅ {channel.mention} is on the exceptions list, so it's ignored.")
 
     @censord.command()
     async def includechan(self, ctx, channel: discord.TextChannel):
         """
         Toggles a channel for the 'Include' strategy.
-        
+
         If the strategy is 'include', adding a channel here makes the bot monitor it.
         Running the command again removes it from the list.
         """
         async with self.config.guild(ctx.guild).included_channels() as chans:
             if channel.id in chans:
                 chans.remove(channel.id)
-                await ctx.send(f"{channel.mention} removed from inclusion list (Now ignored).")
+                await ctx.send(f"✅ {channel.mention} is off the include list, so it's ignored.")
             else:
                 chans.append(channel.id)
-                await ctx.send(f"{channel.mention} added to inclusion list (Now monitored).")
+                await ctx.send(f"✅ {channel.mention} is on the include list, so it's watched.")
+
+    # ---------- word lists ----------
+
+    async def _prefix(self, ctx) -> str:
+        """The server's real text prefix (not a bot mention), for hints."""
+        for prefix in await self.bot.get_valid_prefixes(ctx.guild):
+            if not prefix.startswith("<@"):
+                return prefix
+        return "!"
+
+    async def _hide_command(self, ctx) -> bool:
+        """Delete the command message so the word isn't left in chat. Returns whether that worked."""
+        try:
+            await ctx.message.delete()
+            return True
+        except (discord.HTTPException, AttributeError):
+            return False
+
+    async def _change_word(self, ctx, level: str, word: str, add: bool):
+        """addword/delword. The replies are public, so they never repeat the word."""
+        hidden = await self._hide_command(ctx)
+        note = "I deleted your command so the word isn't left in chat." if hidden else None
+        level = level.lower()
+        if level not in ("low", "high"):
+            return await ctx.send(ui.line(ui.ASK, "The list can be `low` or `high`.", note))
+        if not word.strip():
+            return await ctx.send(ui.line(ui.ASK, "Give a word or phrase.", note))
+        changed = self._update_csv(level, word, add=add)
+        if add:
+            text = (ui.line(ui.DONE, f"Added that word to the **{level}** list.", note) if changed
+                    else ui.line(ui.WARN, f"That word is already on the **{level}** list.", note))
+        else:
+            text = (ui.line(ui.DONE, f"Removed that word from the **{level}** list.", note) if changed
+                    else ui.line(ui.ASK, f"That word wasn't on the **{level}** list. It has to match the entry "
+                                         "exactly.", note))
+        await ctx.send(text)
 
     @censord.command()
     async def addword(self, ctx, level: str, *, word: str):
         """
         Adds a word or phrase to the censorship list.
-        
+
+        Your command message is deleted (when I can), and the reply doesn't repeat the word.
+
         Arguments:
         - level: 'low' or 'high'.
         - word: The word to censor. Supports wildcards (e.g. *bad*).
         """
-        level = level.lower()
-        if level not in ["low", "high"]: 
-            return await ctx.send("Level must be 'low' or 'high'.")
-        
-        self._update_csv(level, word, add=True)
-        await ctx.send(f"Added `{word}` to **{level}** list.")
+        await self._change_word(ctx, level, word, add=True)
 
     @censord.command()
     async def delword(self, ctx, level: str, *, word: str):
         """
         Removes a word or phrase from the censorship list.
-        
+
+        Your command message is deleted (when I can), and the reply doesn't repeat the word.
+
         Arguments:
         - level: 'low' or 'high'.
         - word: The word to remove. Must match the existing entry exactly.
         """
-        level = level.lower()
-        if level not in ["low", "high"]: 
-            return await ctx.send("Level must be 'low' or 'high'.")
-        
-        self._update_csv(level, word, add=False)
-        await ctx.send(f"Removed `{word}` from **{level}** list.")
+        await self._change_word(ctx, level, word, add=False)

@@ -9,13 +9,16 @@ running votes resume after a reload.
 
 import asyncio
 import difflib
+import importlib.util
 import logging
 import random
 import re
 import string
+import sys
 import time
 from collections import Counter
 from datetime import date, datetime, timedelta, timezone, tzinfo
+from pathlib import Path
 from typing import Awaitable, Callable, Dict, List, Optional, Set, Tuple, Union
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError, available_timezones
 
@@ -25,6 +28,21 @@ from discord.ext import tasks
 from redbot.core import Config, app_commands, checks, commands
 from redbot.core.bot import Red
 
+
+def _load_butlerui():
+    """The shared style module (../_shared/butlerui.py), re-read when the file changes."""
+    path = Path(__file__).resolve().parent.parent / "_shared" / "butlerui.py"
+    module, mtime = sys.modules.get("butlerui"), path.stat().st_mtime
+    if module is None or getattr(module, "_mtime", None) != mtime:
+        spec = importlib.util.spec_from_file_location("butlerui", path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        module._mtime = mtime
+        sys.modules["butlerui"] = module
+    return module
+
+
+ui = _load_butlerui()
 log = logging.getLogger("red.gamemanager")
 
 Target = Union[commands.Context, discord.Interaction]
@@ -44,8 +62,9 @@ LFG_COOLDOWN_SECONDS = 300
 PICKER_PAGE_SIZE = 25           # Discord's limit for one select menu
 LIST_PAGE_SIZE = 40             # lines per embed in long lists
 
-PING = discord.AllowedMentions(everyone=False, roles=False, users=True)
-NO_PING = discord.AllowedMentions.none()
+PING = discord.AllowedMentions(everyone=False, roles=False, users=True)   # reminders, sessions, LFG, sale alerts
+NO_PING = ui.NO_PINGS
+INSTALLED = "💾"                # marks installed games in lists
 
 TZ_ALIASES = {
     "utc": "UTC", "gmt": "UTC", "z": "UTC",
@@ -66,12 +85,14 @@ WEEKDAYS = {
 }
 LIBRARY_ACTIONS = {
     # action: (changed label, unchanged label, embed color)
-    "own": ("Added to your library", "Already in your library", discord.Color.green()),
-    "unown": ("Removed from your library", "Not in your library", discord.Color.orange()),
-    "install": ("Marked installed", "Already installed", discord.Color.blurple()),
-    "uninstall": ("Marked uninstalled", "Wasn't marked installed", discord.Color.orange()),
+    "own": ("Added to your library", "Already in your library", ui.SUCCESS),
+    "unown": ("Removed from your library", "Not in your library", ui.DANGER),
+    "install": ("Marked installed", "Already installed", ui.SUCCESS),
+    "uninstall": ("Marked uninstalled", "Wasn't marked installed", ui.DANGER),
 }
 MEDALS = ["🥇", "🥈", "🥉"]
+NOT_IN_LIBRARY = "❌ **Not in the server's library:** "
+NOTHING_TO_CHANGE = "⚠️ Nothing to change."
 
 RECURRING_POST_HOURS = 24       # a recurring session is posted this long before it starts
 MAX_RECURRING = 10              # recurring schedules per server
@@ -557,7 +578,7 @@ def game_admin():
             return False
         if await cog.is_game_admin(ctx.author):
             return True
-        raise commands.UserFeedbackCheckFailure("❌ Only game admins can do that (server admins or the game admin role).")
+        raise commands.UserFeedbackCheckFailure("🔒 Only game admins can do that (server admins or the game admin role).")
 
     predicate.requirement = "game admin"  # read by the Claude cog's bot guide
     return commands.check(predicate)
@@ -569,11 +590,11 @@ def game_admin():
 
 class SessionButton(discord.ui.DynamicItem[discord.ui.Button],
                     template=r"gm:s:(?P<action>join|leave|vote|end):(?P<sid>[a-z0-9]+)"):
-    LOOKS = {
-        "join": ("Join", "➕", discord.ButtonStyle.success),
-        "leave": ("Leave", None, discord.ButtonStyle.secondary),
-        "vote": ("Start vote", "🗳️", discord.ButtonStyle.primary),
-        "end": ("End session", None, discord.ButtonStyle.danger),
+    LOOKS = {   # one main action (Join); everything else grey
+        "join": ("Join", "➕", discord.ButtonStyle.primary),
+        "leave": ("Leave", "➖", discord.ButtonStyle.secondary),
+        "vote": ("Start vote", "🗳️", discord.ButtonStyle.secondary),
+        "end": ("End session", "🏁", discord.ButtonStyle.secondary),
     }
 
     def __init__(self, action: str, sid: str):
@@ -594,7 +615,8 @@ class SessionButton(discord.ui.DynamicItem[discord.ui.Button],
 class VoteButton(discord.ui.DynamicItem[discord.ui.Button],
                  template=r"gm:v:(?P<vid>[a-z0-9]+):(?P<gid>[a-z0-9]+)"):
     def __init__(self, vid: str, gid: str, label: str = "Vote"):
-        super().__init__(discord.ui.Button(label=label[:80], style=discord.ButtonStyle.primary,
+        # Every option weighs the same, so none of them is the blurple "main" button.
+        super().__init__(discord.ui.Button(label=label[:80], style=discord.ButtonStyle.secondary,
                                            custom_id=f"gm:v:{vid}:{gid}"))
         self.vid, self.gid = vid, gid
 
@@ -614,7 +636,7 @@ class RequestButton(discord.ui.DynamicItem[discord.ui.Button],
         approve = action == "approve"
         super().__init__(discord.ui.Button(
             label="Approve" if approve else "Deny",
-            style=discord.ButtonStyle.success if approve else discord.ButtonStyle.danger,
+            style=discord.ButtonStyle.primary if approve else discord.ButtonStyle.secondary,
             custom_id=f"gm:r:{action}:{rid}",
         ))
         self.action, self.rid = action, rid
@@ -631,7 +653,7 @@ class RequestButton(discord.ui.DynamicItem[discord.ui.Button],
 
 class InstallButton(discord.ui.DynamicItem[discord.ui.Button], template=r"gm:i:(?P<rid>[a-z0-9]+)"):
     def __init__(self, rid: str):
-        super().__init__(discord.ui.Button(label="I've installed it", emoji="💾", style=discord.ButtonStyle.success,
+        super().__init__(discord.ui.Button(label="I've installed it", emoji="💾", style=discord.ButtonStyle.primary,
                                            custom_id=f"gm:i:{rid}"))
         self.rid = rid
 
@@ -670,30 +692,22 @@ def request_view(rid: str) -> discord.ui.View:
 #            SHORT-LIVED MENUS
 # ==========================================
 
-class OwnerOnlyView(discord.ui.View):
-    """A menu only the person who opened it can use."""
+class OwnerOnlyView(ui.ExpiringView):
+    """
+    A menu only the person who opened it can use. When it times out its buttons grey out and the message says
+    "Expired." plus `expired_note`'s detail (what did or didn't happen), so nobody clicks a dead menu.
+    """
+
+    expired_note = "Expired."
 
     def __init__(self, user_id: int, timeout: float):
-        super().__init__(timeout=timeout)
+        super().__init__(user_id, timeout=timeout)
         self.user_id = user_id
-        self.message: Optional[discord.Message] = None
-
-    async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        if interaction.user.id != self.user_id:
-            await interaction.response.send_message("This menu isn't yours. Run the command yourself to get one.",
-                                                    ephemeral=True)
-            return False
-        return True
-
-    async def on_timeout(self):
-        if self.message is not None:
-            try:
-                await self.message.edit(view=None)
-            except discord.HTTPException:
-                pass
 
 
 class ConfirmView(OwnerOnlyView):
+    expired_note = "Expired. Nothing happened."
+
     def __init__(self, user_id: int, label: str = "Confirm", timeout: float = 60):
         super().__init__(user_id, timeout)
         self.value: Optional[bool] = None
@@ -717,14 +731,16 @@ class ConfirmView(OwnerOnlyView):
 class NameCheckView(OwnerOnlyView):
     """Accept the corrected game names, keep what was typed, or cancel."""
 
+    expired_note = "Expired. Nothing was added or requested."
+
     def __init__(self, user_id: int, plural: bool):
         super().__init__(user_id, timeout=180)
         self.choice: Optional[str] = None
         for label, style, value in (
-            ("Use the suggested names" if plural else "Use the suggested name", discord.ButtonStyle.success,
+            ("Use the suggested names" if plural else "Use the suggested name", discord.ButtonStyle.primary,
              "suggested"),
             ("Use what I typed", discord.ButtonStyle.secondary, "typed"),
-            ("Cancel", discord.ButtonStyle.danger, "cancel"),
+            ("Cancel", discord.ButtonStyle.secondary, "cancel"),
         ):
             button = discord.ui.Button(label=label, style=style)
             button.callback = self._choose(value)
@@ -735,8 +751,9 @@ class NameCheckView(OwnerOnlyView):
             self.choice = value
             self.stop()
             note = {"suggested": "Using the suggested name.", "typed": "Using the name as typed.",
-                    "cancel": "Cancelled."}[value]
-            await interaction.response.edit_message(content=f"{interaction.message.content}\n-# {note}", view=None)
+                    "cancel": "Cancelled. Nothing was added or requested."}[value]
+            await interaction.response.edit_message(content=f"{interaction.message.content}\n{ui.hint(note)}",
+                                                    view=None)
         return callback
 
 
@@ -758,9 +775,11 @@ class GamePickerView(OwnerOnlyView):
     """
     Tick-box editor for a set of games, 25 per page with page buttons and a search box.
 
-    The embed lists the page with ✅/⬜ marks. The dropdown has no pre-selected options (Discord would
+    The embed lists the page with ☑️/⬜ marks. The dropdown has no pre-selected options (Discord would
     draw every one as a chip and crowd the menu); choosing games toggles them. Save applies the changes.
     """
+
+    expired_note = "Expired. Nothing was saved."
 
     def __init__(self, user: discord.abc.User, games: List[dict], selected: Set[str], title: str, hint: str,
                  on_save: Callable[[discord.Interaction, Set[str], Set[str]], Awaitable[None]],
@@ -803,7 +822,7 @@ class GamePickerView(OwnerOnlyView):
             ticked = g["id"] in self.selected
             changed = ticked != (g["id"] in self.initial)
             name = f"**{g['name']}**" if changed else g["name"]
-            lines.append(f"{'✅' if ticked else '⬜'} {name}" + (" *(unsaved)*" if changed else ""))
+            lines.append(f"{ui.TICK if ticked else ui.UNTICK} {name}" + (" *(unsaved)*" if changed else ""))
         if not visible:
             lines.append("No games match. Use **Search** to try another name.")
         changes = []
@@ -814,7 +833,7 @@ class GamePickerView(OwnerOnlyView):
         lines.append("")
         lines.append(f"**Ticked in total:** {len(self.selected)}"
                      + (f" ({', '.join(changes)} unsaved, press **Save**)" if changes else ""))
-        embed = discord.Embed(title=self.title, description="\n".join(lines), color=discord.Color.blurple())
+        embed = discord.Embed(title=self.title, description="\n".join(lines), color=ui.BRAND)
         embed.set_footer(text=f"Page {self.page + 1}/{self.page_count()} · Only {self.user_name} can use this menu")
         return embed
 
@@ -828,7 +847,8 @@ class GamePickerView(OwnerOnlyView):
                 max_values=len(page),
                 options=[
                     discord.SelectOption(
-                        label=g["name"][:100], value=g["id"], emoji="✅" if g["id"] in self.selected else "⬜",
+                        label=g["name"][:100], value=g["id"],
+                        emoji=ui.TICK if g["id"] in self.selected else ui.UNTICK,
                         description="Ticked · choose to untick" if g["id"] in self.selected else "Choose to tick",
                     )
                     for g in page
@@ -848,13 +868,14 @@ class GamePickerView(OwnerOnlyView):
             b.callback = callback
             self.add_item(b)
 
+        # Row 1: paging and search, all with icons. Row 2: Save is the one main action.
         button("Prev", discord.ButtonStyle.secondary, 1, self._prev, disabled=self.page == 0, emoji="◀️")
         button("Next", discord.ButtonStyle.secondary, 1, self._next, disabled=self.page >= self.page_count() - 1,
                emoji="▶️")
-        button("Search", discord.ButtonStyle.primary, 1, self._search, emoji="🔍")
+        button("Search", discord.ButtonStyle.secondary, 1, self._search, emoji="🔍")
         if self.filter:
-            button("Show all", discord.ButtonStyle.secondary, 1, self._clear)
-        button("Save", discord.ButtonStyle.success, 2, self._save, emoji="💾")
+            button("Show all", discord.ButtonStyle.secondary, 1, self._clear, emoji="📋")
+        button("Save", discord.ButtonStyle.primary, 2, self._save)
         button("Cancel", discord.ButtonStyle.secondary, 2, self._cancel)
 
     async def refresh(self, interaction: discord.Interaction):
@@ -885,7 +906,7 @@ class GamePickerView(OwnerOnlyView):
         if self.on_cancel is not None:
             return await self.on_cancel(interaction)
         await interaction.response.edit_message(embed=discord.Embed(title="Cancelled. Nothing was changed.",
-                                                                    color=discord.Color.light_grey()), view=None)
+                                                                    color=ui.MUTED), view=None)
 
 
 class UnknownGamesView(OwnerOnlyView):
@@ -898,7 +919,7 @@ class UnknownGamesView(OwnerOnlyView):
         go = discord.ui.Button(
             label=f"Add {them} to the library" if can_add else f"Request {them}",
             emoji="➕" if can_add else "📨",
-            style=discord.ButtonStyle.success if can_add else discord.ButtonStyle.primary,
+            style=discord.ButtonStyle.primary,
         )
         go.callback = self._go
         self.add_item(go)
@@ -915,6 +936,8 @@ class UnknownGamesView(OwnerOnlyView):
 
 class SteamPickView(OwnerOnlyView):
     """Choose which Steam game was meant when the name isn't an exact match."""
+
+    expired_note = "Expired. That game was skipped."
 
     def __init__(self, user_id: int, options: List[Tuple[str, int]]):
         super().__init__(user_id, timeout=180)
@@ -934,7 +957,8 @@ class SteamPickView(OwnerOnlyView):
 
         async def on_cancel(interaction: discord.Interaction):
             self.stop()
-            await interaction.response.edit_message(content="Cancelled.", view=None)
+            await interaction.response.edit_message(
+                content=ui.line(ui.DONE, "Skipped. Nothing was added for that name."), view=None)
 
         cancel.callback = on_cancel
         self.add_item(select)
@@ -969,6 +993,8 @@ class ProfileWizard(OwnerOnlyView):
     over the message and hand back to the wizard when they're saved or cancelled. `state` carries everything
     between screens: cog, guild, member, ephemeral, step and the note about the last change.
     """
+
+    expired_note = "Expired. Everything you saved is kept."
 
     def __init__(self, state: dict):
         super().__init__(state["member"].id, timeout=900)
@@ -1020,7 +1046,7 @@ class ProfileWizard(OwnerOnlyView):
             self.add_item(select)
             self._button("Other timezone…", discord.ButtonStyle.secondary, 1, self._other_timezone, emoji="🌐")
         elif name == "owned":
-            lines += [f"You have **{len(owned)}** game{'s' if len(owned) != 1 else ''} in your library.",
+            lines += [f"You have **{ui.plural(len(owned), 'game')}** in your library.",
                       "Tick them from the server's list, or type their names. Games the server doesn't have yet can "
                       "be requested (or added) from there."]
             self._button("Pick from the server's games", discord.ButtonStyle.primary, 1, self._picker("owned"),
@@ -1062,12 +1088,11 @@ class ProfileWizard(OwnerOnlyView):
             lines += ["", state["note"]]
         self._button("Back", discord.ButtonStyle.secondary, 4, lambda i: self.move(i, step - 1), disabled=step == 0)
         last = step == len(PROFILE_STEPS) - 1
-        self._button("Finish" if last else "Next", discord.ButtonStyle.success, 4, lambda i: self.move(i, step + 1),
-                     emoji="✅" if last else "➡️")
-        self._button("Stop", discord.ButtonStyle.danger, 4, self._stop)
+        self._button("Finish" if last else "Next", discord.ButtonStyle.primary, 4, lambda i: self.move(i, step + 1))
+        self._button("Stop", discord.ButtonStyle.secondary, 4, self._stop)
         embed = discord.Embed(title=f"🧭 Profile setup · {step + 1} of {len(PROFILE_STEPS)}: {PROFILE_TITLES[name]}",
                               description="\n".join(l for l in lines if l is not None)[:4000],
-                              color=discord.Color.blurple())
+                              color=ui.BRAND)
         embed.set_footer(text=f"Every step is optional · Only {member.display_name} can use this")
         return embed
 
@@ -1085,8 +1110,7 @@ class ProfileWizard(OwnerOnlyView):
                  f"Change things any time with {await cmd(guild, 'games own')}, {await cmd(guild, 'games install')}, "
                  f"{await cmd(guild, 'games rank')} or {await cmd(guild, 'games want')}, or run "
                  f"{await cmd(guild, 'games newprofile')} again."]
-        return discord.Embed(title="✅ Your profile is set up", description="\n".join(lines),
-                             color=discord.Color.green())
+        return discord.Embed(title="✅ Your profile is set up", description="\n".join(lines), color=ui.SUCCESS)
 
     # ---------- step actions ----------
 
@@ -1094,7 +1118,7 @@ class ProfileWizard(OwnerOnlyView):
         self.stop()
         await interaction.response.edit_message(
             embed=discord.Embed(title="Profile setup stopped", description="Everything you saved is kept.",
-                                color=discord.Color.light_grey()), view=None)
+                                color=ui.MUTED), view=None)
 
     async def _set_timezone(self, interaction: discord.Interaction, zone: str):
         await self.cog.config.user(self.state["member"]).timezone.set(zone)
@@ -1169,7 +1193,7 @@ class ProfileWizard(OwnerOnlyView):
                     ranks.pop(other)
                 ranks[gid] = rank
             name = (await self.cog.config.guild(guild).games()).get(gid, {}).get("name", "that game")
-            await self.move(interaction, self.state["step"], f"🏅 **{name}** is your #{rank}.")
+            await self.move(interaction, self.state["step"], ui.line(ui.DONE, f"**{name}** is your #{rank}."))
         return callback
 
     async def _type_wanted(self, interaction: discord.Interaction):
@@ -1368,15 +1392,19 @@ class GameManager(commands.Cog):
     async def can_manage(self, member: discord.Member, owner_id: Optional[str]) -> bool:
         return str(member.id) == owner_id or await self.is_game_admin(member)
 
-    async def cmd(self, guild: discord.Guild, command: str) -> str:
-        """A command formatted with this server's prefix, for hints."""
+    async def prefix(self, guild: Optional[discord.Guild]) -> str:
+        """This server's real text prefix (not a bot mention), for hints."""
         for prefix in await self.bot.get_valid_prefixes(guild):
             if not prefix.startswith("<@"):
-                return f"`{prefix}{command}`"
-        return f"`!{command}`"
+                return prefix
+        return "!"
+
+    async def cmd(self, guild: Optional[discord.Guild], command: str) -> str:
+        """A command formatted with this server's prefix, for hints: `!games own`."""
+        return f"`{await self.prefix(guild)}{command}`"
 
     async def reply(self, target: Target, *, ephemeral: bool = False, **kwargs) -> Optional[discord.Message]:
-        """Answer a command or an interaction the same way."""
+        """Answer a command or an interaction the same way (ping-free unless `allowed_mentions` says otherwise)."""
         kwargs = {k: v for k, v in kwargs.items() if v is not None}
         kwargs.setdefault("allowed_mentions", NO_PING)
         if isinstance(target, discord.Interaction):
@@ -1389,12 +1417,12 @@ class GameManager(commands.Cog):
     async def send_list(self, target: Target, items: List[str], title: str, footer: Optional[str] = None,
                         ephemeral: bool = False):
         if not items:
-            await self.reply(target, content="Nothing to show.", ephemeral=ephemeral)
+            await self.reply(target, content=ui.line(ui.ASK, "Nothing to show."), ephemeral=ephemeral)
             return
         embeds = []
         for i in range(0, len(items), LIST_PAGE_SIZE):
             embed = discord.Embed(title=title if i == 0 else f"{title} (continued)",
-                                  description="\n".join(items[i:i + LIST_PAGE_SIZE]), color=discord.Color.blue())
+                                  description="\n".join(items[i:i + LIST_PAGE_SIZE]), color=ui.BRAND)
             if i + LIST_PAGE_SIZE >= len(items):
                 embed.set_footer(text=footer or f"Total: {len(items)}")
             embeds.append(embed)
@@ -1407,9 +1435,9 @@ class GameManager(commands.Cog):
         game, candidates = resolve_game(games, name)
         if game is None:
             if candidates:
-                text = f"❓ Which one did you mean? " + ", ".join(f"**{g['name']}**" for g in candidates)
+                text = "❓ Which one did you mean? " + ", ".join(f"**{g['name']}**" for g in candidates)
             else:
-                text = f"❌ There's no game called **{name}** in the library."
+                text = f"❓ There's no game called **{name}** in the library."
             await self.reply(target, content=text, ephemeral=ephemeral)
         return game
 
@@ -1439,7 +1467,7 @@ class GameManager(commands.Cog):
             member, candidates = self.find_member(guild, name)
             if member is None:
                 hint = (" Did you mean " + ", ".join(m.display_name for m in candidates) + "?") if candidates else ""
-                await self.reply(target, content=f"❌ Couldn't find a member called **{name}**.{hint}")
+                await self.reply(target, content=f"❓ Couldn't find a member called **{name}**.{hint}")
                 return None
             if member not in found:
                 found.append(member)
@@ -1503,15 +1531,15 @@ class GameManager(commands.Cog):
         if changed:
             lines.append(f"✅ **{changed_label}:** " + ", ".join(changed))
         if unchanged:
-            lines.append(f"➖ **{unchanged_label}:** " + ", ".join(unchanged))
+            lines.append(f"⚠️ **{unchanged_label}:** " + ", ".join(unchanged))
         if unsure:
             lines.append("❓ **Which one?** " + "; ".join(unsure) + ". Try again with the full name.")
         if unknown:
-            lines.append("❌ **Not in the server's library:** " + ", ".join(unknown))
+            lines.append(NOT_IN_LIBRARY + ", ".join(unknown))
         if changed and action == "install":
             lines.append("-# Installed games also count as owned.")
-        embed = discord.Embed(description="\n".join(lines) or "Nothing to change.",
-                              color=color if changed else discord.Color.light_grey())
+        embed = discord.Embed(description="\n".join(lines) or NOTHING_TO_CHANGE,
+                              color=color if changed else ui.MUTED)
         return embed, unknown
 
     async def library_command(self, target: Target, text: Optional[str], action: str, ephemeral: bool = False):
@@ -1521,7 +1549,7 @@ class GameManager(commands.Cog):
             return await self.open_picker(target, kind, ephemeral)
         names = parse_game_names(text)
         if not names:
-            return await self.reply(target, content="Name at least one game.", ephemeral=ephemeral)
+            return await self.reply(target, content=ui.line(ui.ASK, "Name at least one game."), ephemeral=ephemeral)
         embed, unknown = await self.change_library(guild, member, names, action)
         view = None
         if unknown and action in ("own", "install"):
@@ -1537,7 +1565,7 @@ class GameManager(commands.Cog):
         guild, member, _ = who(target)
         games = await self.config.guild(guild).games()
         if not games:
-            return await self.reply(target, content=f"No games have been added yet. Request one with "
+            return await self.reply(target, content=f"⚠️ No games have been added yet. Request one with "
                                                     f"{await self.cmd(guild, 'games request <game>')}.",
                                     ephemeral=ephemeral)
         data = (await self.config.guild(guild).users()).get(str(member.id), {})
@@ -1572,7 +1600,7 @@ class GameManager(commands.Cog):
                 lines.append(f"➖ **{LIBRARY_ACTIONS[remove_action][0]} ({len(removed)}):** {listing(removed)}")
             embed = discord.Embed(title=f"{title}: saved" if lines else "No changes",
                                   description="\n".join(lines) or None,
-                                  color=discord.Color.green() if lines else discord.Color.light_grey())
+                                  color=ui.SUCCESS if lines else ui.MUTED)
             await interaction.response.edit_message(embed=embed, view=None)
 
         view = GamePickerView(member, list(games.values()), selected, title, hint, on_save)
@@ -1615,7 +1643,7 @@ class GameManager(commands.Cog):
         added, _ = await self.add_games(guild, member, names, appids)
         embed, _ = await self.change_library(guild, member, names, action)
         if added:
-            embed.description = f"➕ **Added to the server library:** {', '.join(added)}\n" + embed.description
+            embed.description = f"✅ **Added to the server library:** {', '.join(added)}\n" + embed.description
         return embed
 
     # ---------- checking new game names ----------
@@ -1687,7 +1715,7 @@ class GameManager(commands.Cog):
         view = NameCheckView(member.id, plural)
         view.message = await self.reply(
             target, view=view, ephemeral=ephemeral,
-            content=f"🔎 I checked {'those names' if plural else 'that name'}:\n" + "\n".join(lines)
+            content=f"❓ I checked {'those names' if plural else 'that name'}:\n" + "\n".join(lines)
                     + f"\nUse {'these' if plural else 'it'} instead?",
         )
         await view.wait()
@@ -1706,23 +1734,23 @@ class GameManager(commands.Cog):
         ranks = data.get("ranks", {})
         if not owned:
             mine = member == who(target)[1]
-            text = (f"Your library is empty. Add games with {await self.cmd(guild, 'games own')}." if mine
-                    else f"{member.display_name}'s library is empty.")
+            text = (f"⚠️ Your library is empty. Add games with {await self.cmd(guild, 'games own')}." if mine
+                    else f"❓ {member.display_name}'s library is empty.")
             return await self.reply(target, content=text, ephemeral=ephemeral)
         owned.sort(key=lambda gid: (ranks.get(gid) is None, ranks.get(gid) or 0, games[gid]["name"].lower()))
         items = []
         for gid in owned:
-            name = games[gid]["name"] + (" ✅" if gid in installed else "")
+            name = games[gid]["name"] + (f" {INSTALLED}" if gid in installed else "")
             items.append(f"{ranks[gid]}. {name}" if ranks.get(gid) else f"- {name}")
         count = len([g for g in owned if g in installed])
         await self.send_list(target, items, f"{member.display_name}'s library",
-                             f"{len(owned)} owned · {count} installed · ✅ = installed", ephemeral)
+                             f"{len(owned)} owned · {count} installed · {INSTALLED} = installed", ephemeral)
 
     async def set_rank(self, target: Target, rank: int, name: str, ephemeral: bool = False):
         guild, member, _ = who(target)
         if rank < 0:
-            return await self.reply(target, content="Use 1 for your favorite, 2 for the next, and so on (0 clears it).",
-                                    ephemeral=ephemeral)
+            return await self.reply(target, ephemeral=ephemeral, content=ui.line(
+                ui.ASK, "Use 1 for your favorite, 2 for the next, and so on (0 clears it)."))
         game = await self.find_game(target, name, ephemeral)
         if game is None:
             return
@@ -1733,8 +1761,8 @@ class GameManager(commands.Cog):
                 data["ranks"].pop(game["id"], None)
             else:
                 data["ranks"][game["id"]] = rank
-        text = (f"🧹 Cleared your rank for **{game['name']}**." if rank == 0
-                else f"🏅 **{game['name']}** is now your #{rank}.")
+        text = (f"✅ Cleared your rank for **{game['name']}**." if rank == 0
+                else f"✅ **{game['name']}** is now your #{rank}.")
         if newly_owned:
             text += " (Also added it to your library.)"
         await self.reply(target, content=text, ephemeral=ephemeral)
@@ -1752,26 +1780,28 @@ class GameManager(commands.Cog):
                 continue
             member = guild.get_member(int(uid))
             if member is not None:
-                rows.append((member.display_name.lower(), f"- {member.display_name}" + (" ✅" if has_installed and not installed_only else "")))
+                mark = f" {INSTALLED}" if has_installed and not installed_only else ""
+                rows.append((member.display_name.lower(), f"- {member.display_name}{mark}"))
         if not rows:
             verb = "has it installed" if installed_only else "owns it"
-            return await self.reply(target, content=f"Nobody {verb} yet: **{game['name']}**.")
+            return await self.reply(target, content=f"❓ Nobody {verb} yet: **{game['name']}**.")
         rows.sort()
         if installed_only:
-            await self.send_list(target, [r[1] for r in rows], f"Installed {game['name']}", f"{len(rows)} player(s)")
+            await self.send_list(target, [r[1] for r in rows], f"Installed {game['name']}",
+                                 ui.plural(len(rows), "player"))
         else:
             await self.send_list(target, [r[1] for r in rows], f"Own {game['name']}",
-                                 f"{len(rows)} owner(s) · ✅ = installed")
+                                 f"{ui.plural(len(rows), 'owner')} · {INSTALLED} = installed")
 
     async def shared_games(self, target: Target, members: List[discord.Member], installed: bool):
         guild, author, channel = who(target)
         if not members:
             members = await self.channel_members_with_games(channel)
         if len(members) < 2:
-            return await self.reply(target, content="I need at least 2 people with games in their library. Name them, "
-                                                    "e.g. " + await self.cmd(guild, "games shared Alex Sam") + ".")
+            return await self.reply(target, content="❓ I need at least 2 people with games in their library. Name "
+                                                    "them, e.g. " + await self.cmd(guild, "games shared Alex Sam") + ".")
         if len(members) > 25:
-            return await self.reply(target, content="That's too many people at once. Name up to 25.")
+            return await self.reply(target, content="❌ That's too many people at once. Name up to 25.")
         games = await self.config.guild(guild).games()
         users = await self.config.guild(guild).users()
         field = "installed" if installed else "owned"
@@ -1783,19 +1813,19 @@ class GameManager(commands.Cog):
         common = [games[g] for g in (common or set()) if g in games]
         names = ", ".join(m.display_name for m in members)
         if not common:
-            return await self.reply(target, content=f"No game is {field} by all of: {names}.")
+            return await self.reply(target, content=f"❓ No game is {field} by all of: {names}.")
         mine = set(users.get(str(author.id), {}).get("installed", []))
         common.sort(key=lambda g: g["name"].lower())
-        items = [f"- {g['name']}" + (" ✅" if g["id"] in mine and not installed else "") for g in common]
+        items = [f"- {g['name']}" + (f" {INSTALLED}" if g["id"] in mine and not installed else "") for g in common]
         title = "Installed by everyone" if installed else "Owned by everyone"
-        footer = f"{names}" + ("" if installed else " · ✅ = you have it installed")
+        footer = f"{names}" + ("" if installed else f" · {INSTALLED} = you have it installed")
         await self.send_list(target, items, title, footer[:2000])
 
     async def top_games(self, target: Target, installed_only: bool, shared_only: bool):
         guild, author, channel = who(target)
         members = await self.channel_members_with_games(channel)
         if not members:
-            return await self.reply(target, content="Nobody who can see this channel has games in their library yet.")
+            return await self.reply(target, content="❓ Nobody who can see this channel has games in their library yet.")
         games = await self.config.guild(guild).games()
         users = await self.config.guild(guild).users()
         member_ids = [str(m.id) for m in members]
@@ -1814,13 +1844,14 @@ class GameManager(commands.Cog):
             rows.append((-rank_score(users, member_ids, gid), -len(owners), game["name"].lower(),
                          game["name"], len(owners), len(installers), gid in mine))
         if not rows:
-            return await self.reply(target, content="No games match those filters.")
+            return await self.reply(target, content="❓ No games match those filters.")
         rows.sort()
-        items = [f"**{i}.** {name}{' ✅' if is_mine else ''} (owned by {owners}/{len(member_ids)}, installed by {inst})"
-                 for i, (_, _, _, name, owners, inst, is_mine) in enumerate(rows, 1)]
+        items = [f"**{i}.** {name}{f' {INSTALLED}' if is_mine else ''} (owned by {owners}/{len(member_ids)}, "
+                 f"installed by {inst})" for i, (_, _, _, name, owners, inst, is_mine) in enumerate(rows, 1)]
         title = "Top games" + (" (installed by all owners)" if installed_only else "") + (" (owned by everyone)" if shared_only else "")
         await self.send_list(target, items, title,
-                             f"Ranked by {len(members)} players' rankings · ✅ = you have it installed")
+                             f"Ranked by the rankings of {ui.plural(len(members), 'player')} · "
+                             f"{INSTALLED} = you have it installed")
 
     async def lfg(self, target: Target, name: str):
         guild, member, _ = who(target)
@@ -1845,7 +1876,7 @@ class GameManager(commands.Cog):
             elif game["id"] in data.get("owned", []):
                 owners_only.append(other)
         if not ready:
-            text = f"Nobody else has **{game['name']}** installed."
+            text = f"❓ Nobody else has **{game['name']}** installed."
             if owners_only:
                 text += f" These people own it: {', '.join(m.display_name for m in owners_only)}."
             return await self.reply(target, content=text, ephemeral=True)
@@ -1889,7 +1920,7 @@ class GameManager(commands.Cog):
         then = {"own": " and add it to their library", "install": " and mark it installed for them"}.get(action, "")
         for rid, name in created:
             store = f"\n[Steam store page](https://store.steampowered.com/app/{appids[name]})" if appids.get(name) else ""
-            embed = discord.Embed(title=f"📨 Game request: {name}", color=discord.Color.blue(),
+            embed = discord.Embed(title=f"📨 Game request: {name}", color=ui.ATTENTION,
                                   description=f"{member.mention} asked to add **{name}** to the server library. "
                                               f"Approving will add it{then}.{store}")
             embed.set_footer(text="Game admins can approve or deny")
@@ -1903,13 +1934,13 @@ class GameManager(commands.Cog):
 
         lines = []
         if created:
-            lines.append("📨 **Requested:** " + ", ".join(n for _, n in created) + ". A game admin needs to approve.")
+            lines.append("✅ **Requested:** " + ", ".join(n for _, n in created) + ". A game admin needs to approve.")
         if pending:
             lines.append("⏳ **Already requested:** " + ", ".join(pending))
         if exists:
-            lines.append("✅ **Already in the library:** " + ", ".join(exists))
-        return discord.Embed(description="\n".join(lines) or "Nothing to request.",
-                             color=discord.Color.blue() if created else discord.Color.light_grey())
+            lines.append("⚠️ **Already in the library:** " + ", ".join(exists))
+        return discord.Embed(description="\n".join(lines) or "⚠️ Nothing to request.",
+                             color=ui.SUCCESS if created else ui.MUTED)
 
     async def resolve_request(self, guild: discord.Guild, rid: str, approver: discord.Member, approve: bool) -> Optional[str]:
         """Approve or deny a request. Returns the game name, or None if the request is gone."""
@@ -1926,10 +1957,10 @@ class GameManager(commands.Cog):
             if game is not None and action in ("own", "install"):
                 async with self.config.guild(guild).users() as users:
                     apply_change(user_entry(users, requester), game["id"], action)
-            embed = discord.Embed(title=f"✅ Approved: {name}", color=discord.Color.green(),
+            embed = discord.Embed(title=f"✅ Approved: {name}", color=ui.SUCCESS,
                                   description=f"Requested by <@{requester}>, approved by {approver.mention}.")
         else:
-            embed = discord.Embed(title=f"❌ Denied: {name}", color=discord.Color.red(),
+            embed = discord.Embed(title=f"❌ Denied: {name}", color=ui.DANGER,
                                   description=f"Requested by <@{requester}>, denied by {approver.mention}.")
         await self._edit_message(guild, request.get("channel_id"), request.get("message_id"), embed=embed, view=None)
         channel = guild.get_channel_or_thread(request.get("channel_id") or 0)
@@ -1949,8 +1980,7 @@ class GameManager(commands.Cog):
 
     async def on_request_button(self, interaction: discord.Interaction, action: str, rid: str):
         if not await self.is_game_admin(interaction.user):
-            return await interaction.response.send_message("Only game admins can approve or deny requests.",
-                                                           ephemeral=True)
+            return await ui.respond(interaction, "🔒 Only game admins can approve or deny requests.")
         await interaction.response.defer()
         name = await self.resolve_request(interaction.guild, rid, interaction.user, approve=action == "approve")
         if name is None:
@@ -1958,22 +1988,21 @@ class GameManager(commands.Cog):
                 await interaction.message.edit(view=None)
             except discord.HTTPException:
                 pass
-            await interaction.followup.send("That request was already handled.", ephemeral=True)
+            await ui.respond(interaction, "⚠️ That request was already handled.")
 
     async def on_install_button(self, interaction: discord.Interaction, rid: str):
         guild = interaction.guild
         request = (await self.config.guild(guild).install_requests()).get(rid)
         games = await self.config.guild(guild).games()
         if request is None or request["game_id"] not in games:
-            return await interaction.response.send_message("This install request is closed.", ephemeral=True)
+            return await ui.respond(interaction, "⚠️ This install request is closed.")
         uid = str(interaction.user.id)
         async with self.config.guild(guild).users() as users:
             apply_change(user_entry(users, uid), request["game_id"], "install")
         async with self.config.guild(guild).install_requests() as requests:
             if rid in requests and uid not in requests[rid]["installed_by"]:
                 requests[rid]["installed_by"].append(uid)
-        await interaction.response.send_message(f"💾 Marked **{games[request['game_id']]['name']}** installed.",
-                                                ephemeral=True)
+        await ui.respond(interaction, f"✅ Marked **{games[request['game_id']]['name']}** installed.")
 
     # ==========================================
     #           WISHLIST & SALE ALERTS
@@ -2034,14 +2063,14 @@ class GameManager(commands.Cog):
         names = parse_game_names(text or "")
         if not names:
             return await self.reply(target, ephemeral=ephemeral,
-                                    content=f"Name a game, like {await self.cmd(guild, 'games want Elden Ring')}.")
+                                    content=f"❓ Name a game, like {await self.cmd(guild, 'games want Elden Ring')}.")
         picks, missing = [], []
         for name in names[:10]:
             match, options = await self.steam_game_for(guild, name)
             if match is None and options:
                 view = SteamPickView(member.id, options)
                 view.message = await self.reply(target, view=view, ephemeral=ephemeral,
-                                                content=f"🔎 Which game on Steam did you mean by **{name}**?")
+                                                content=f"❓ Which game on Steam did you mean by **{name}**?")
                 await view.wait()
                 match = view.choice
             if match is not None:
@@ -2055,11 +2084,11 @@ class GameManager(commands.Cog):
         for name in added:
             entry = by_name.get(name, {})
             price = f": {price_text(entry['price'])}" if entry.get("checked_at") else ""
-            lines.append(f"⭐ Added **{name}** to your wishlist{price}")
+            lines.append(f"✅ Added **{name}** to your wishlist{price}")
         if already:
-            lines.append("Already on your wishlist: " + ", ".join(already))
+            lines.append("⚠️ Already on your wishlist: " + ", ".join(already))
         if have:
-            lines.append("You already own: " + ", ".join(have))
+            lines.append("⚠️ You already own: " + ", ".join(have))
         if missing:
             lines.append("❓ Not found on Steam: " + ", ".join(missing) + ". Sale alerts only work for Steam games.")
         if added:
@@ -2082,13 +2111,13 @@ class GameManager(commands.Cog):
             else:
                 missing.append(name)
         added, already, have = await self.add_wants(guild, member, picks)
-        lines = [f"⭐ **Added:** {', '.join(added)}" if added else None,
-                 f"Closest Steam matches: {', '.join(notes)}. Remove a wrong one with "
+        lines = [f"✅ **Added:** {', '.join(added)}" if added else None,
+                 f"⚠️ Closest Steam matches: {', '.join(notes)}. Remove a wrong one with "
                  f"{await self.cmd(guild, 'games unwant <game>')}." if notes else None,
-                 f"Already on your wishlist: {', '.join(already)}" if already else None,
-                 f"You already own: {', '.join(have)}" if have else None,
+                 f"⚠️ Already on your wishlist: {', '.join(already)}" if already else None,
+                 f"⚠️ You already own: {', '.join(have)}" if have else None,
                  f"❓ Not found on Steam: {', '.join(missing)}" if missing else None]
-        return "\n".join(l for l in lines if l) or "Nothing added."
+        return "\n".join(l for l in lines if l) or "⚠️ Nothing added."
 
     async def add_typed_games(self, interaction: discord.Interaction, member: discord.Member, text: str,
                               ephemeral: bool = False) -> str:
@@ -2096,25 +2125,25 @@ class GameManager(commands.Cog):
         guild, _, channel = who(interaction)
         names = parse_game_names(text)
         if not names:
-            return "Name at least one game."
+            return ui.line(ui.ASK, "Name at least one game.")
         embed, unknown = await self.change_library(guild, member, names, "own")
-        lines = [l for l in (embed.description or "").split("\n") if not l.startswith("❌")]
+        lines = [l for l in (embed.description or "").split("\n") if not l.startswith(NOT_IN_LIBRARY)]
         if unknown:
             checked = await self.checked_names(interaction, member, unknown, ephemeral=ephemeral)
             if checked is None:
-                lines.append("Skipped: " + ", ".join(unknown))
+                lines.append("⚠️ Skipped: " + ", ".join(unknown))
             elif await self.can_add_games(member):
                 names, appids = checked
                 added, _ = await self.add_games(guild, member, names, appids)
                 more, _ = await self.change_library(guild, member, names, "own")
                 if added:
-                    lines.append(f"➕ **Added to the server library:** {', '.join(added)}")
+                    lines.append(f"✅ **Added to the server library:** {', '.join(added)}")
                 lines.append(more.description or "")
             else:
                 names, appids = checked
                 requested = await self.request_games(guild, channel, member, names, "own", appids=appids)
                 lines.append(requested.description or "")
-        return "\n".join(l for l in lines if l and l != "Nothing to change.")[:1500]
+        return ui.truncate("\n".join(l for l in lines if l and l != NOTHING_TO_CHANGE), 1500)
 
     async def remove_want(self, target: Target, name: str, ephemeral: bool = False):
         guild, member, _ = who(target)
@@ -2124,7 +2153,7 @@ class GameManager(commands.Cog):
                    or [e for e in mine if key and key in normalize(e["name"])])
         if len(matches) != 1:
             text = (f"❓ Which one? " + ", ".join(f"**{e['name']}**" for e in matches) if matches
-                    else f"**{name}** isn't on your wishlist.")
+                    else f"❓ **{name}** isn't on your wishlist.")
             return await self.reply(target, content=text, ephemeral=ephemeral)
         async with self.config.guild(guild).wishlist() as wishlist:
             entry = wishlist.get(str(matches[0]["appid"]))
@@ -2132,7 +2161,7 @@ class GameManager(commands.Cog):
                 entry["users"].remove(str(member.id))
                 if not entry["users"]:
                     wishlist.pop(str(matches[0]["appid"]))
-        await self.reply(target, content=f"🗑️ Removed **{matches[0]['name']}** from your wishlist.",
+        await self.reply(target, content=f"✅ Removed **{matches[0]['name']}** from your wishlist.",
                          ephemeral=ephemeral)
 
     async def show_wishlist(self, target: Target, member: discord.Member, ephemeral: bool = False):
@@ -2141,8 +2170,8 @@ class GameManager(commands.Cog):
         if not wanted:
             mine = member == who(target)[1]
             return await self.reply(target, ephemeral=ephemeral, content=(
-                f"Your wishlist is empty. Add a game with {await self.cmd(guild, 'games want <game>')}." if mine
-                else f"{member.display_name}'s wishlist is empty."))
+                f"⚠️ Your wishlist is empty. Add a game with {await self.cmd(guild, 'games want <game>')}." if mine
+                else f"❓ {member.display_name}'s wishlist is empty."))
         items = [f"- [{e['name']}]({STEAM_APP_URL.format(e['appid'])})"
                  + (f": {price_text(e['price'])}" if e.get("checked_at") else "") for e in wanted]
         channel_id = await self.config.guild(guild).sale_channel()
@@ -2161,7 +2190,7 @@ class GameManager(commands.Cog):
             if fans:
                 rows.append((-len(fans), entry["name"].lower(), entry, fans))
         if not rows:
-            return await self.reply(target, content=f"Nobody has a wishlist yet. Add a game with "
+            return await self.reply(target, content=f"❓ Nobody has a wishlist yet. Add a game with "
                                                     f"{await self.cmd(guild, 'games want <game>')}.")
         items = []
         for _, _, entry, fans in sorted(rows)[:40]:
@@ -2203,9 +2232,10 @@ class GameManager(commands.Cog):
                          f"\n-# Wanted by {', '.join(f'<@{u}>' for u in fans)}")
         if not lines:
             return 0
-        embed = discord.Embed(title="💸 On sale on Steam", description="\n".join(lines)[:4000],
-                              color=discord.Color.gold())
-        embed.set_footer(text="From your wishlists · games want / unwant")
+        embed = discord.Embed(title="💸 On sale on Steam", description=ui.truncate("\n".join(lines), 4000),
+                              color=ui.HIGHLIGHT)
+        prefix = await self.prefix(guild)
+        embed.set_footer(text=f"From your wishlists · {prefix}games want / {prefix}games unwant")
         try:
             await channel.send(" ".join(f"<@{u}>" for u in pinged)[:2000], embed=embed, allowed_mentions=PING)
         except discord.HTTPException as e:
@@ -2224,8 +2254,8 @@ class GameManager(commands.Cog):
         for game in new:
             ends = parse_iso(game.get("ends"))
             lines.append(f"**[{game['title']}]({game['url']})**" + (f": free until {stamp(ends, 'f')}" if ends else ""))
-        embed = discord.Embed(title="🆓 Free to keep on the Epic Games Store", description="\n".join(lines),
-                              color=discord.Color.dark_grey())
+        embed = discord.Embed(title="🆓 Free to keep on the Epic Games Store",
+                              description=ui.truncate("\n".join(lines), 4000), color=ui.HIGHLIGHT)
         try:
             await channel.send(embed=embed)
         except discord.HTTPException as e:
@@ -2289,7 +2319,7 @@ class GameManager(commands.Cog):
             players = players[:25] + [f"…and {len(players) - 25} more"]
         embed = discord.Embed(title=f"🎮 {session['title']}" + (" (ended)" if ended else ""),
                               description="\n".join(lines),
-                              color=discord.Color.light_grey() if ended else discord.Color.green())
+                              color=ui.MUTED if ended else ui.SUCCESS)
         embed.add_field(name=f"Players ({len(session['participants'])})", value="\n".join(players) or "Nobody yet",
                         inline=False)
         embed.set_footer(text=f"Session ID: {session['id']}")
@@ -2320,7 +2350,7 @@ class GameManager(commands.Cog):
         await self.post_session(guild, channel, member, title, starts_at)
         note = None
         if starts_at and not personal:
-            note = (f"🕘 I read that time as **{tz_name}**. If that's wrong, set your timezone with "
+            note = (f"⚠️ I read that time as **{tz_name}**. If that's wrong, set your timezone with "
                     f"{await self.cmd(guild, 'games timezone <zone>')} and start the session again.")
         if isinstance(target, discord.Interaction):
             await self.reply(target, content=note or "✅ Session posted.", ephemeral=True)
@@ -2445,7 +2475,7 @@ class GameManager(commands.Cog):
         schedules = await self.config.guild(guild).recurring()
         if len(schedules) >= MAX_RECURRING:
             return await self.reply(target, ephemeral=True, content=(
-                f"⚠️ This server already has {MAX_RECURRING} repeating sessions. Stop one first with "
+                f"⏳ This server already has {MAX_RECURRING} repeating sessions. Stop one first with "
                 f"{await self.cmd(guild, 'games recurring stop <id>')}."))
         rid = generate_id()
         schedule = {"id": rid, "title": (parsed["title"].strip() or f"{member.display_name}'s game night")[:200],
@@ -2455,7 +2485,7 @@ class GameManager(commands.Cog):
         async with self.config.guild(guild).recurring() as recurring:
             recurring[rid] = schedule
         posted = await self._tick_recurring(guild, rid, schedule, utcnow())
-        lines = [f"🔁 **{schedule['title']}**: {repeat_label(schedule)}.",
+        lines = [f"✅ **{schedule['title']}** repeats: {repeat_label(schedule)}.",
                  f"Each one is posted here {RECURRING_POST_HOURS} hours before it starts, with the usual reminders."
                  + (" The first one is posted above." if posted else
                     f" The first is {stamp(parsed['first'])}."),
@@ -2512,7 +2542,7 @@ class GameManager(commands.Cog):
         sessions_conf = self.config.guild(guild).play_sessions
         session = (await sessions_conf()).get(sid)
         if session is None:
-            await interaction.response.send_message("This session has ended.", ephemeral=True)
+            await ui.respond(interaction, "⚠️ This session has ended.")
             try:
                 await interaction.message.edit(view=None)
             except discord.HTTPException:
@@ -2523,25 +2553,25 @@ class GameManager(commands.Cog):
             async with sessions_conf() as sessions:
                 session = sessions.get(sid)
                 if session is None:
-                    return await interaction.response.send_message("This session has ended.", ephemeral=True)
+                    return await ui.respond(interaction, "⚠️ This session has ended.")
                 players = session["participants"]
                 if action == "join":
                     if uid in players:
-                        return await interaction.response.send_message("You're already in.", ephemeral=True)
+                        return await ui.respond(interaction, "⚠️ You're already in.")
                     players.append(uid)
                 else:
                     if uid == session["host_id"]:
-                        return await interaction.response.send_message(
-                            "You're the host, so you can't leave. Press **End session** instead.", ephemeral=True)
+                        return await ui.respond(interaction,
+                                                "❌ You're the host, so you can't leave. Press **End session** instead.")
                     if uid not in players:
-                        return await interaction.response.send_message("You haven't joined.", ephemeral=True)
+                        return await ui.respond(interaction, "⚠️ You haven't joined.")
                     players.remove(uid)
                 session = dict(session)
             await interaction.response.edit_message(embed=self.session_embed(session), view=session_view(sid))
             return
 
         if not await self.can_manage(member, session["host_id"]):
-            return await interaction.response.send_message("Only the host or a game admin can do that.", ephemeral=True)
+            return await ui.respond(interaction, "🔒 Only the host or a game admin can do that.")
         if action == "vote":
             await self.start_vote(interaction, session_id=sid)
         else:
@@ -2642,7 +2672,7 @@ class GameManager(commands.Cog):
         if vote.get("basis"):
             lines.append(f"-# Options: {vote['basis']}.")
         embed = discord.Embed(title=f"🗳️ What should we play? {vote.get('title', '')}".strip(),
-                              description="\n".join(lines), color=discord.Color.purple())
+                              description="\n".join(lines), color=ui.BRAND)
         embed.add_field(name=f"Voted ({len(vote['user_votes'])}/{len(vote['allowed_voters'])})", value=voted_names,
                         inline=False)
         embed.set_footer(text=f"Vote ID: {vote['id']} · Only session players can vote")
@@ -2655,27 +2685,27 @@ class GameManager(commands.Cog):
         if session_id:
             session = sessions.get(session_id)
             if session is None:
-                return await self.reply(target, content="That session doesn't exist anymore.", ephemeral=True)
+                return await self.reply(target, content="❓ That session doesn't exist anymore.", ephemeral=True)
         else:
             session = await self.latest_session(guild, channel.id)
             if session is None:
-                return await self.reply(target, content="There's no session in this channel. Start one with "
+                return await self.reply(target, content="❓ There's no session in this channel. Start one with "
                                                         f"{await self.cmd(guild, 'games session')}.", ephemeral=True)
         if not await self.can_manage(member, session["host_id"]):
-            return await self.reply(target, content="Only the session host or a game admin can start the vote.",
+            return await self.reply(target, content="🔒 Only the session host or a game admin can start the vote.",
                                     ephemeral=True)
         votes = await self.config.guild(guild).votes()
         if session.get("vote_id") in votes:
-            return await self.reply(target, content="A vote is already running for this session.", ephemeral=True)
+            return await self.reply(target, content="⚠️ A vote is already running for this session.", ephemeral=True)
         players = session["participants"]
         if len(players) < 2:
-            return await self.reply(target, content="A vote needs at least 2 players. Others can press **Join** on "
-                                                    "the session first.", ephemeral=True)
+            return await self.reply(target, content="⚠️ A vote needs at least 2 players. Others can press **Join** "
+                                                    "on the session first.", ephemeral=True)
         games = await self.config.guild(guild).games()
         users = await self.config.guild(guild).users()
         candidates, basis, counts = self.vote_candidates(games, users, players)
         if not candidates:
-            return await self.reply(target, content="These players don't have any games in common yet. Everyone can "
+            return await self.reply(target, content="⚠️ These players don't have any games in common yet. Everyone can "
                                                     f"mark theirs with {await self.cmd(guild, 'games install')}.",
                                     ephemeral=True)
         options = candidates[:MAX_VOTE_OPTIONS]
@@ -2709,7 +2739,7 @@ class GameManager(commands.Cog):
         await self.refresh_session_message(guild, session)
         self.schedule_vote(guild.id, vid, ends_at)
         if isinstance(target, discord.Interaction):
-            await self.reply(target, content="🗳️ Vote started.", ephemeral=True)
+            await self.reply(target, content="✅ Vote started.", ephemeral=True)
 
     async def on_vote_button(self, interaction: discord.Interaction, vid: str, gid: str):
         guild, uid = interaction.guild, str(interaction.user.id)
@@ -2717,9 +2747,9 @@ class GameManager(commands.Cog):
         async with self.config.guild(guild).votes() as votes:
             vote = votes.get(vid)
             if vote is None:
-                feedback = "This vote has ended."
+                feedback = "⚠️ This vote has ended."
             elif uid not in vote["allowed_voters"]:
-                feedback = "Only players who joined the session can vote."
+                feedback = "🔒 Only players who joined the session can vote."
                 vote = None
             else:
                 name = vote.get("names", {}).get(gid, "that game")
@@ -2730,19 +2760,19 @@ class GameManager(commands.Cog):
                     tallies[gid] = tallies.get(gid, 1) - 1
                     if tallies[gid] <= 0:
                         del tallies[gid]
-                    feedback = f"Took back your vote for **{name}**."
+                    feedback = f"✅ Took back your vote for **{name}**."
                 elif len(mine) >= vote["max_choices"]:
-                    feedback = (f"You can pick {vote['max_choices']}. Press one of your picks again to take it back "
-                                "first.")
+                    feedback = (f"⏳ You can pick {vote['max_choices']}. Press one of your picks again to take it "
+                                "back first.")
                 else:
                     mine.append(gid)
                     tallies[gid] = tallies.get(gid, 0) + 1
-                    feedback = f"Voted for **{name}**."
+                    feedback = f"✅ Voted for **{name}**."
                 if not mine:
                     del vote["user_votes"][uid]
                 everyone_voted = len(vote["user_votes"]) >= len(vote["allowed_voters"])
                 vote = dict(vote)
-        await interaction.response.send_message(feedback, ephemeral=True)
+        await ui.respond(interaction, feedback)
         if vote is None:
             return
         try:
@@ -2833,10 +2863,10 @@ class GameManager(commands.Cog):
         lines = []
         for i, (gid, count) in enumerate(results):
             medal = MEDALS[i] if i < len(MEDALS) else "▫️"
-            lines.append(f"{medal} **{names.get(gid, 'Unknown game')}**: {count} vote{'s' if count != 1 else ''} "
+            lines.append(f"{medal} **{names.get(gid, 'Unknown game')}**: {ui.plural(count, 'vote')} "
                          f"({count / total * 100:.0f}%)")
         embed = discord.Embed(title=f"🗳️ Results: {vote.get('title', 'Vote')}",
-                              description="\n".join(lines) or "No votes were cast.", color=discord.Color.gold())
+                              description="\n".join(lines) or "No votes were cast.", color=ui.HIGHLIGHT)
         embed.set_footer(text=f"{len(vote['user_votes'])} of {len(voters)} voted" + (f" · {reason}" if reason else ""))
         await self._edit_message(guild, vote["channel_id"], vote.get("message_id"), embed=embed, view=None)
 
@@ -2871,7 +2901,7 @@ class GameManager(commands.Cog):
         self._stop_timer(vid)
         if vote is not None:
             await self._edit_message(guild, vote["channel_id"], vote.get("message_id"), view=None,
-                                     embed=discord.Embed(title="🗳️ Vote cancelled", color=discord.Color.light_grey()))
+                                     embed=discord.Embed(title="🗳️ Vote cancelled", color=ui.MUTED))
 
     async def pick_vote(self, ctx: commands.Context, vote_id: Optional[str]) -> Optional[dict]:
         votes = await self.config.guild(ctx.guild).votes()
@@ -2881,7 +2911,7 @@ class GameManager(commands.Cog):
             here = [v for v in votes.values() if v["channel_id"] == ctx.channel.id] or list(votes.values())
             vote = max(here, key=lambda v: v["created_at"]) if here else None
         if vote is None:
-            await ctx.send("There's no running vote" + (" with that ID." if vote_id else "."))
+            await ctx.send("❓ There's no running vote" + (" with that ID." if vote_id else "."))
         return vote
 
     # ==========================================
@@ -2899,15 +2929,16 @@ class GameManager(commands.Cog):
 
     @games.command(name="list")
     async def games_list(self, ctx: commands.Context):
-        """Show every game in the server's library (✅ = you have it installed)."""
+        """Show every game in the server's library (💾 = you have it installed)."""
         games = await self.config.guild(ctx.guild).games()
         if not games:
-            return await ctx.send(f"No games have been added yet. Request one with "
-                                  f"`{ctx.clean_prefix}games request <game>`.")
+            return await ctx.send(f"⚠️ No games have been added yet. Request one with "
+                                  f"{await self.cmd(ctx.guild, 'games request <game>')}.")
         mine = set((await self.config.guild(ctx.guild).users()).get(str(ctx.author.id), {}).get("installed", []))
-        items = [f"- {g['name']}" + (" ✅" if g["id"] in mine else "")
+        items = [f"- {g['name']}" + (f" {INSTALLED}" if g["id"] in mine else "")
                  for g in sorted(games.values(), key=lambda g: g["name"].lower())]
-        await self.send_list(ctx, items, "Server game library", f"{len(items)} games · ✅ = you have it installed")
+        await self.send_list(ctx, items, "Server game library",
+                             f"{ui.plural(len(items), 'game')} · {INSTALLED} = you have it installed")
 
     @games.command(name="search")
     async def games_search(self, ctx: commands.Context, *, query: str):
@@ -2917,10 +2948,11 @@ class GameManager(commands.Cog):
         matches = sorted((g for g in games.values() if key and key in normalize(g["name"])),
                          key=lambda g: g["name"].lower())
         if not matches:
-            return await ctx.send(f"No games match **{query}**.")
+            return await ctx.send(f"❓ No games match **{query}**.", allowed_mentions=NO_PING)
         mine = set((await self.config.guild(ctx.guild).users()).get(str(ctx.author.id), {}).get("installed", []))
-        await self.send_list(ctx, [f"- {g['name']}" + (" ✅" if g["id"] in mine else "") for g in matches],
-                             f"Games matching '{query}'")
+        await self.send_list(ctx, [f"- {g['name']}" + (f" {INSTALLED}" if g["id"] in mine else "") for g in matches],
+                             f"Games matching '{query}'", f"{ui.plural(len(matches), 'game')} · "
+                                                          f"{INSTALLED} = you have it installed")
 
     @games.command(name="own", aliases=["ownadd", "addowned", "iown"])
     async def games_own(self, ctx: commands.Context, *, game_names: str = None):
@@ -2974,7 +3006,7 @@ class GameManager(commands.Cog):
 
     @games.command(name="mygames", aliases=["library", "mylibrary"])
     async def games_mygames(self, ctx: commands.Context):
-        """Show your library, favorites first (✅ = installed)."""
+        """Show your library, favorites first (💾 = installed)."""
         await self.show_library(ctx, ctx.author)
 
     @games.command(name="usergames", aliases=["userlibrary"])
@@ -2990,7 +3022,7 @@ class GameManager(commands.Cog):
 
     @games.command(name="whoowns", aliases=["whohas"])
     async def games_whoowns(self, ctx: commands.Context, *, game_name: str):
-        """List who owns a game (✅ = has it installed)."""
+        """List who owns a game (💾 = has it installed)."""
         await self.who_has(ctx, game_name, installed_only=False)
 
     @games.command(name="whoinstalled", aliases=["whohasinstalled"])
@@ -3027,10 +3059,10 @@ class GameManager(commands.Cog):
         """Show pending game requests."""
         requests = await self.config.guild(ctx.guild).game_requests()
         if not requests:
-            return await ctx.send("No pending requests.")
+            return await ctx.send("❓ No pending requests.")
         items = [f"- **{r['name']}** (requested by <@{r['requested_by']}>)" for r in requests.values()]
         await self.send_list(ctx, items, "Pending game requests",
-                             f"Approve with {ctx.clean_prefix}games admin approve <game>")
+                             f"Game admins: approve with {await self.prefix(ctx.guild)}games admin approve <game>")
 
     @games.command(name="shared")
     async def games_shared(self, ctx: commands.Context, *members: str):
@@ -3115,7 +3147,8 @@ class GameManager(commands.Cog):
             elif parse_duration(opt) is not None:
                 seconds = parse_duration(opt)
             else:
-                return await ctx.send(f"❓ I don't understand `{opt}`. Example: `{ctx.clean_prefix}games vote 2 3m`.")
+                return await ctx.send(f"❓ I don't understand `{opt}`. Example: "
+                                      f"{await self.cmd(ctx.guild, 'games vote 2 3m')}.")
         # Bare numbers: a small one is the number of picks; a larger one is seconds (the old syntax).
         for n in numbers:
             if n <= 10:
@@ -3129,7 +3162,7 @@ class GameManager(commands.Cog):
         """Show active game sessions."""
         sessions = await self.config.guild(ctx.guild).play_sessions()
         if not sessions:
-            return await ctx.send(f"No active sessions. Start one with `{ctx.clean_prefix}games session`.")
+            return await ctx.send(f"❓ No active sessions. Start one with {await self.cmd(ctx.guild, 'games session')}.")
         items = []
         for s in sorted(sessions.values(), key=lambda s: s.get("starts_at") or s["created_at"]):
             starts = parse_iso(s.get("starts_at"))
@@ -3152,11 +3185,11 @@ class GameManager(commands.Cog):
                        or (await self.latest_session(ctx.guild, ctx.channel.id)
                            if await self.is_game_admin(ctx.author) else None))
         if session is None:
-            return await ctx.send("No matching session found.")
+            return await ctx.send("❓ No matching session found.")
         if not await self.can_manage(ctx.author, session["host_id"]):
-            return await ctx.send("Only the host or a game admin can end that session.")
+            return await ctx.send("🔒 Only the host or a game admin can end that session.")
         await self.end_session(ctx.guild, session["id"])
-        await ctx.send(f"🛑 Ended **{session['title']}**.")
+        await ctx.send(f"✅ Ended **{session['title']}**.", allowed_mentions=NO_PING)
 
     @games.command(name="results")
     async def games_results(self, ctx: commands.Context, vote_id: str = None):
@@ -3181,7 +3214,7 @@ class GameManager(commands.Cog):
         allowed = (str(ctx.author.id) in (vote["created_by"], session.get("host_id"))
                    or await self.is_game_admin(ctx.author))
         if not allowed:
-            return await ctx.send("Only whoever started the vote, the session host, or a game admin can end it.")
+            return await ctx.send("🔒 Only whoever started the vote, the session host, or a game admin can end it.")
         await self.finish_vote(ctx.guild, vote["id"], f"Ended early by {ctx.author.display_name}")
 
     @games.command(name="installrequests")
@@ -3192,7 +3225,7 @@ class GameManager(commands.Cog):
         items = [f"- **{games[r['game_id']]['name']}**: {len(r['installed_by'])}/{len(r['target_users'])} installed"
                  for r in requests.values() if r["game_id"] in games]
         if not items:
-            return await ctx.send("No install requests.")
+            return await ctx.send("❓ No install requests.")
         await self.send_list(ctx, items, "Install requests")
 
     @games.command(name="timezone", aliases=["tz"])
@@ -3261,7 +3294,8 @@ class GameManager(commands.Cog):
             found, candidates = self.find_member(ctx.guild, member)
             if found is None:
                 hint = (" Did you mean " + ", ".join(m.display_name for m in candidates) + "?") if candidates else ""
-                return await ctx.send(f"❌ Couldn't find a member called **{member}**.{hint}")
+                return await ctx.send(f"❓ Couldn't find a member called **{member}**.{hint}",
+                                      allowed_mentions=NO_PING)
             target = found
         await self.show_wishlist(ctx, target)
 
@@ -3280,23 +3314,24 @@ class GameManager(commands.Cog):
         """
         schedules = await self.config.guild(ctx.guild).recurring()
         if not schedules:
-            return await ctx.send(f"No repeating sessions. Start one with "
-                                  f"`{ctx.clean_prefix}games session every friday 9pm Raid night`.")
+            return await ctx.send(f"❓ No repeating sessions. Start one with "
+                                  f"{await self.cmd(ctx.guild, 'games session every friday 9pm Raid night')}.")
         items = []
         for s in sorted(schedules.values(), key=lambda s: s["next_start"]):
             nxt = parse_iso(s["next_start"])
             items.append(f"- **{s['title']}** · {repeat_label(s)} · next {stamp(nxt, 'R')} · host <@{s['host_id']}> "
                          f"· <#{s['channel_id']}> · `{s['id']}`")
         await self.send_list(ctx, items, "🔁 Repeating sessions",
-                             f"Manage with {ctx.clean_prefix}games recurring skip/stop <id>")
+                             f"Manage with {await self.prefix(ctx.guild)}games recurring skip <id> or stop <id>")
 
     async def _schedule_for(self, ctx: commands.Context, schedule_id: str) -> Optional[dict]:
         schedule = (await self.config.guild(ctx.guild).recurring()).get(schedule_id)
         if schedule is None:
-            await ctx.send(f"❌ No repeating session with ID `{schedule_id}`. See `{ctx.clean_prefix}games recurring`.")
+            await ctx.send(f"❓ No repeating session with ID `{schedule_id}`. See "
+                           f"{await self.cmd(ctx.guild, 'games recurring')}.")
             return None
         if not await self.can_manage(ctx.author, schedule["host_id"]):
-            await ctx.send("❌ Only the host or a game admin can change that.")
+            await ctx.send("🔒 Only the host or a game admin can change that.")
             return None
         return schedule
 
@@ -3308,7 +3343,7 @@ class GameManager(commands.Cog):
             return
         async with self.config.guild(ctx.guild).recurring() as recurring:
             recurring.pop(schedule_id, None)
-        await ctx.send(f"🛑 **{schedule['title']}** won't repeat any more.")
+        await ctx.send(f"✅ **{schedule['title']}** won't repeat any more.", allowed_mentions=NO_PING)
 
     @games_recurring.command(name="skip")
     async def recurring_skip(self, ctx: commands.Context, schedule_id: str):
@@ -3321,9 +3356,9 @@ class GameManager(commands.Cog):
         async with self.config.guild(ctx.guild).recurring() as recurring:
             if schedule_id in recurring:
                 recurring[schedule_id]["next_start"] = following.isoformat()
-        await ctx.send(f"⏭️ Skipping **{schedule['title']}** on {stamp(skipped, 'D')}. The next one is "
+        await ctx.send(f"✅ Skipping **{schedule['title']}** on {stamp(skipped, 'D')}. The next one is "
                        f"{stamp(following, 'F')}.\n-# If that one was already posted, end it with "
-                       f"`{ctx.clean_prefix}games endsession <id>`.")
+                       f"{await self.cmd(ctx.guild, 'games endsession <id>')}.", allowed_mentions=NO_PING)
 
     # ---------- admin ----------
 
@@ -3338,7 +3373,7 @@ class GameManager(commands.Cog):
         """Show the game manager's settings for this server."""
         conf = await self.config.guild(ctx.guild).all()
         role = ctx.guild.get_role(conf["admin_role"]) if conf["admin_role"] else None
-        embed = discord.Embed(title="🎮 Game manager settings", color=discord.Color.blue())
+        embed = discord.Embed(title="🎮 Game manager settings", color=ui.BRAND)
         embed.add_field(name="Game admin role", value=role.mention if role else "None (server admins only)")
         embed.add_field(name="Members can add games", value="Yes" if conf["member_add"] else "No (they request)")
         embed.add_field(name="Default timezone", value=conf["timezone"] or "UTC")
@@ -3387,7 +3422,7 @@ class GameManager(commands.Cog):
     async def admin_freegames(self, ctx: commands.Context, enabled: bool):
         """Also announce games that are free to keep on the Epic Games Store (in the sale alerts channel)."""
         if enabled and not await self.config.guild(ctx.guild).sale_channel():
-            return await ctx.send(f"⚠️ Pick a channel first: `{ctx.clean_prefix}games admin sales #channel`")
+            return await ctx.send(f"⚠️ Pick a channel first: {await self.cmd(ctx.guild, 'games admin sales #channel')}")
         await self.config.guild(ctx.guild).free_games.set(enabled)
         await ctx.send(f"✅ Free Epic games announcements are {'on' if enabled else 'off'}.")
 
@@ -3432,9 +3467,9 @@ class GameManager(commands.Cog):
         if added:
             lines.append(f"✅ **Added ({len(added)}):** " + ", ".join(added))
         if existing:
-            lines.append(f"➖ **Already in the library:** " + ", ".join(existing))
-        await ctx.send(embed=discord.Embed(description="\n".join(lines) or "Nothing to add.",
-                                           color=discord.Color.green() if added else discord.Color.light_grey()))
+            lines.append("⚠️ **Already in the library:** " + ", ".join(existing))
+        await ctx.send(embed=discord.Embed(description="\n".join(lines) or "⚠️ Nothing to add.",
+                                           color=ui.SUCCESS if added else ui.MUTED))
 
     @games_admin.command(name="remove")
     async def admin_remove(self, ctx: commands.Context, *, game_names: str):
@@ -3453,15 +3488,15 @@ class GameManager(commands.Cog):
                 problems.append(describe_unresolved(name, candidates) + (" (be more specific)" if candidates else " (not found)"))
         note = ("\n-# Skipped: " + "; ".join(problems)) if problems else ""
         if not targets:
-            return await ctx.send("❌ Nothing to remove." + note)
+            return await ctx.send("❓ Nothing to remove." + note)
         view = ConfirmView(ctx.author.id, label="Remove")
         listing = ", ".join(f"**{n}**" for n in targets.values())
-        view.message = await ctx.send(f"🗑️ Remove {listing} from the library? This also removes "
+        view.message = await ctx.send(f"⚠️ Remove {listing} from the library? This also removes "
                                       f"{'it' if len(targets) == 1 else 'them'} from everyone's lists.{note}", view=view)
         await view.wait()
         if not view.value:
             if view.interaction is not None:
-                await view.interaction.response.edit_message(content="Cancelled. Nothing was removed.", view=None)
+                await view.interaction.response.edit_message(content="✅ Cancelled. Nothing was removed.", view=None)
             return
         async with self.config.guild(ctx.guild).games() as all_games:
             for gid in targets:
@@ -3473,7 +3508,7 @@ class GameManager(commands.Cog):
                         if gid in data.get(field, []):
                             data[field].remove(gid)
                     data.get("ranks", {}).pop(gid, None)
-        await view.interaction.response.edit_message(content=f"🗑️ Removed {listing}.", view=None)
+        await view.interaction.response.edit_message(content=f"✅ Removed {listing}.", view=None)
 
     @games_admin.command(name="rename")
     async def admin_rename(self, ctx: commands.Context, *, names: str):
@@ -3487,7 +3522,7 @@ class GameManager(commands.Cog):
             m = re.fullmatch(r'\s*"([^"]+)"\s+(.+)', names)
             parts = [m.group(1), m.group(2)] if m else parts
         if len(parts) != 2 or not parts[1].strip():
-            return await ctx.send(f"Use `{ctx.clean_prefix}games admin rename Old name -> New name`.")
+            return await ctx.send(f"❓ Use {await self.cmd(ctx.guild, 'games admin rename Old name -> New name')}.")
         game = await self.find_game(ctx, parts[0])
         if game is None:
             return
@@ -3495,7 +3530,7 @@ class GameManager(commands.Cog):
         async with self.config.guild(ctx.guild).games() as games:
             if game["id"] in games:
                 games[game["id"]]["name"] = new_name
-        await ctx.send(f"✏️ Renamed **{game['name']}** to **{new_name}**.")
+        await ctx.send(f"✅ Renamed **{game['name']}** to **{new_name}**.", allowed_mentions=NO_PING)
 
     @games_admin.command(name="approve")
     async def admin_approve(self, ctx: commands.Context, *, game_name: str):
@@ -3511,7 +3546,7 @@ class GameManager(commands.Cog):
         requests = await self.config.guild(ctx.guild).game_requests()
         rid = next((rid for rid, r in requests.items() if normalize(r["name"]) == normalize(name)), None)
         if rid is None:
-            return await ctx.send(f"No pending request for **{name}**.")
+            return await ctx.send(f"❓ No pending request for **{name}**.", allowed_mentions=NO_PING)
         await self.resolve_request(ctx.guild, rid, ctx.author, approve)
         await ctx.tick()
 
@@ -3535,7 +3570,8 @@ class GameManager(commands.Cog):
             targets = await self.channel_members_with_games(ctx.channel)
         targets = [m for m in targets if not m.bot]
         if not targets:
-            return await ctx.send("Nobody to ask.")
+            return await ctx.send("❓ Nobody to ask. Name the members, or run it in a channel where people have "
+                                  "game libraries.")
         rid = generate_id()
         async with self.config.guild(ctx.guild).install_requests() as requests:
             requests[rid] = {"id": rid, "game_id": game["id"], "requested_by": str(ctx.author.id),
@@ -3543,7 +3579,7 @@ class GameManager(commands.Cog):
                              "created_at": utcnow().isoformat()}
         view = discord.ui.View(timeout=None)
         view.add_item(InstallButton(rid))
-        embed = discord.Embed(title=f"💾 Please install {game['name']}", color=discord.Color.blue(),
+        embed = discord.Embed(title=f"💾 Please install {game['name']}", color=ui.ATTENTION,
                               description="Press the button once it's installed.")
         await ctx.send(" ".join(m.mention for m in targets), embed=embed, view=view, allowed_mentions=PING)
 
@@ -3553,7 +3589,7 @@ class GameManager(commands.Cog):
         sessions = await self.config.guild(ctx.guild).play_sessions()
         for sid in list(sessions):
             await self.end_session(ctx.guild, sid)
-        await ctx.send(f"🧹 Ended {len(sessions)} session(s).")
+        await ctx.send(f"✅ Ended {ui.plural(len(sessions), 'session')}.")
 
     @games_admin.command(name="clearvotes")
     async def admin_clearvotes(self, ctx: commands.Context):
@@ -3565,7 +3601,7 @@ class GameManager(commands.Cog):
             for session in sessions.values():
                 if session.get("vote_id") in votes:
                     session["vote_id"] = None
-        await ctx.send(f"🧹 Cancelled {len(votes)} vote(s).")
+        await ctx.send(f"✅ Cancelled {ui.plural(len(votes), 'vote')}.")
 
     # ==========================================
     #       SLASH COMMANDS (with autocomplete)
@@ -3652,9 +3688,9 @@ class GameManager(commands.Cog):
         if session is None and await self.is_game_admin(member):
             session = await self.latest_session(guild, channel.id)
         if session is None:
-            return await self.reply(interaction, content="You don't have a session in this channel.", ephemeral=True)
+            return await self.reply(interaction, content="❓ You don't have a session in this channel.", ephemeral=True)
         await self.end_session(guild, session["id"])
-        await self.reply(interaction, content=f"🛑 Ended **{session['title']}**.", ephemeral=True)
+        await self.reply(interaction, content=f"✅ Ended **{session['title']}**.", ephemeral=True)
 
     @slash.command(name="request", description="Ask for a game to be added to the server library")
     async def slash_request(self, interaction: discord.Interaction, game: str):

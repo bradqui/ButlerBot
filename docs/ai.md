@@ -76,6 +76,6 @@ ButlerBot's personality (a slightly put-upon robot butler) is set by the server'
 >
 > **Mods:** `!claude channelmodel <model|reset>` picks the model for a channel and its threads.
 >
-> **Gemini:** `!gemini channelmodel` sets a channel's image model. `!gemini model` sets your own; see `!gemini list` and `!gemini settings`.
+> **Gemini:** `!gemini channelmodel` sets a channel's image model. `!gemini model` sets your own; see `!gemini list` and `!gemini settings`. Use `image`, `3image` or a name from `!gemini list`; other names are turned down.
 >
 > The bot owner sets the default model, effort and memory length, and the API keys.

@@ -9,16 +9,19 @@ questions through `guide_tools`.
 """
 
 import asyncio
+import importlib.util
 import io
 import json
 import logging
 import re
 import sqlite3
+import sys
 import threading
 import time
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone, tzinfo
+from pathlib import Path
 from typing import Callable, Dict, Iterable, List, Optional, Set, Tuple, Union
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -28,6 +31,21 @@ from redbot.core import Config, checks, commands
 from redbot.core.bot import Red
 from redbot.core.data_manager import cog_data_path
 
+
+def _load_butlerui():
+    """The shared style module (../_shared/butlerui.py), re-read when the file changes."""
+    path = Path(__file__).resolve().parent.parent / "_shared" / "butlerui.py"
+    module, mtime = sys.modules.get("butlerui"), path.stat().st_mtime
+    if module is None or getattr(module, "_mtime", None) != mtime:
+        spec = importlib.util.spec_from_file_location("butlerui", path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        module._mtime = mtime
+        sys.modules["butlerui"] = module
+    return module
+
+
+ui = _load_butlerui()
 log = logging.getLogger("red.activitystats")
 
 ChannelArg = Union[discord.TextChannel, discord.VoiceChannel, discord.ForumChannel, discord.StageChannel,
@@ -55,13 +73,13 @@ WEEKDAY_INPUT = {"mon": 0, "monday": 0, "tue": 1, "tues": 1, "tuesday": 1, "wed"
                  "thu": 3, "thur": 3, "thurs": 3, "thursday": 3, "fri": 4, "friday": 4,
                  "sat": 5, "saturday": 5, "sun": 6, "sunday": 6}
 MEDALS = ["🥇", "🥈", "🥉"]
-MEMBER_COLOR = discord.Color.blurple()
-ADMIN_COLOR = discord.Color.dark_teal()
+STAFF_HINT = "Staff only"       # footer on admin reports (they keep the normal colors)
 
 CHART_BG = "#313338"
 CHART_FG = "#dbdee1"
 CHART_GRID = "#4e5058"
 CHART_COLORS = ["#5865f2", "#57f287", "#fee75c", "#eb459e", "#ed4245", "#3ba55c"]
+CHART_GOOD, CHART_BAD = "#57f287", "#ed4245"   # e.g. joined / left
 
 MEMBER_REPORTS = ("overview", "channels", "channel", "top", "heatmap", "voice", "me", "games")
 ADMIN_REPORTS = ("active", "retention", "quiet", "joins", "dead_channels", "attendance", "commands", "unmet",
@@ -158,6 +176,11 @@ def split_by_day(start: float, end: float, tz: tzinfo) -> Iterable[Tuple[date, f
         start = piece_end
 
 
+def short_date(day: date) -> str:
+    """A date like "Nov 7", for embed titles, where Discord timestamps don't render."""
+    return f"{day:%b} {day.day}"
+
+
 def hour_label(hour: int) -> str:
     return f"{hour % 12 or 12} {'AM' if hour < 12 else 'PM'}"
 
@@ -210,7 +233,8 @@ class Period(commands.Converter):
     async def convert(self, ctx: commands.Context, argument: str) -> int:
         days = parse_period(argument)
         if days is None:
-            raise commands.BadArgument(f"`{argument}` isn't a time period. Try `week`, `month`, `90d` or `all`.")
+            raise commands.BadArgument(ui.line(ui.ASK, f"`{ui.truncate(argument, 40)}` isn't a time period. Try "
+                                                       "`week`, `month`, `90d` or `all`."))
         return days
 
 
@@ -280,14 +304,19 @@ def _png(fig) -> bytes:
     return buf.getvalue()
 
 
-def daily_chart(days: List[date], series: Dict[str, List[float]], ylabel: str) -> bytes:
-    """One line per series over days. The first series is drawn thickest (usually the total)."""
+def daily_chart(days: List[date], series: Dict[str, List[float]], ylabel: str,
+                colors: Optional[List[str]] = None) -> bytes:
+    """
+    One line per series over days. The first series is drawn thickest (usually the total). `colors` overrides the
+    default palette when the colors mean something (green for joins, red for leaves).
+    """
     from matplotlib.dates import AutoDateLocator, DateFormatter
+    palette = colors or CHART_COLORS
     with _chart_lock:
         fig, ax = _figure()
         ax.grid(axis="y", color=CHART_GRID, linewidth=0.5, alpha=0.6)
         for i, (name, values) in enumerate(series.items()):
-            ax.plot(days, values, label=name, color=CHART_COLORS[i % len(CHART_COLORS)],
+            ax.plot(days, values, label=name, color=palette[i % len(palette)],
                     linewidth=2.4 if i == 0 else 1.4, marker="o" if len(days) <= 14 else None, markersize=3)
         ax.set_ylabel(ylabel, color=CHART_FG, fontsize=9)
         ax.set_ylim(bottom=0)
@@ -705,9 +734,8 @@ class ActivityStats(commands.Cog):
             posters[uid] += n
             hours[datetime.fromtimestamp(hour, tz).hour] += n
         total = sum(daily.values())
-        name = self._channel_name(guild, channel_id)
         report = Report(f"💬 #{getattr(guild.get_channel(channel_id), 'name', 'deleted')}: {period_label(days)}")
-        report.lines.append(f"{name}: **{total:,}** messages from **{len(posters)}** members, "
+        report.lines.append(f"**{total:,}** messages from **{len(posters)}** members, "
                             f"about **{total / days:,.1f}** a day.")
         if daily:
             best_day, best = daily.most_common(1)[0]
@@ -897,7 +925,7 @@ class ActivityStats(commands.Cog):
         for i, (game, total) in enumerate(seconds.most_common(15)):
             count = len(players[game])
             report.lines.append(f"{MEDALS[i] if i < 3 else f'`{i + 1}.`'} **{game}**: {fmt_hours(total)}, "
-                                f"{count} player{'s' if count != 1 else ''}")
+                                f"{ui.plural(count, 'player')}")
         if note := await self._coverage_note(guild, since):
             report.lines.append(note)
         return report
@@ -929,7 +957,7 @@ class ActivityStats(commands.Cog):
         dau = [len(active.get(d, ())) for d in days_list]
         wau = [window(d, 7) for d in days_list]
         mau = [window(d, 30) for d in days_list]
-        report = Report(f"📈 Active members: last {days} days", admin=True)
+        report = Report(f"📈 Active members: {period_label(days)}", admin=True)
         report.lines.append(f"Active means they posted or joined voice. Right now: **{sum(dau[-7:]) / 7:.1f}** a day "
                             f"(7-day average), **{wau[-1]}** this week, **{mau[-1]}** this month.")
         if len(days_list) > 30:
@@ -945,7 +973,7 @@ class ActivityStats(commands.Cog):
         days, now = days or 90, time.time()
         start = max(now - days * DAY, await self._data_start(guild))
         end = now - 7 * DAY
-        report = Report(f"🌱 New-member retention: last {days} days", admin=True)
+        report = Report(f"🌱 New-member retention: {period_label(days)}", admin=True)
         joins: Dict[int, float] = {}
         for uid, ts in await self.db.query(
                 "SELECT user, ts FROM member_events WHERE guild = ? AND event = 'join' AND ts >= ? AND ts < ?",
@@ -971,7 +999,7 @@ class ActivityStats(commands.Cog):
         report.lines.append(f"**{n}** people joined between <t:{int(start)}:d> and a week ago.")
         report.lines.append(f"✍️ Posted in their first week: **{posted}** ({pct(posted, n)})")
         report.lines.append(f"🏠 Still in the server: **{len(stayed)}** ({pct(len(stayed), n)})")
-        report.lines.append(f"🔥 Active in the last 30 days: **{active}** ({pct(active, n)})")
+        report.lines.append(f"🟢 Still active (posted or in voice, last 30 days): **{active}** ({pct(active, n)})")
         if note := await self._coverage_note(guild, now - days * DAY):
             report.lines.append(note)
         return report
@@ -1002,6 +1030,14 @@ class ActivityStats(commands.Cog):
         more = f" and {len(mentions) - MAX_NAMES} more" if len(mentions) > MAX_NAMES else ""
         return ", ".join(mentions[:MAX_NAMES]) + more
 
+    def _names_or_departed(self, guild: discord.Guild, user_ids: Iterable[int]) -> str:
+        """Mentions of members still here; people who left are counted instead (a mention would say @unknown-user)."""
+        user_ids = list(user_ids)
+        here = [f"<@{u}>" for u in user_ids if guild.get_member(u)]
+        gone = len(user_ids) - len(here)
+        departed = f"{ui.plural(gone, 'person', 'people')} who left the server" if gone else ""
+        return ", ".join(part for part in (self._names(here), departed) if part)
+
     async def report_joins(self, guild: discord.Guild, days: int = 90) -> Report:
         days, now = days or 90, time.time()
         tz, _ = await self._guild_tz(guild)
@@ -1010,7 +1046,7 @@ class ActivityStats(commands.Cog):
         for event, ts in await self.db.query(
                 "SELECT event, ts FROM member_events WHERE guild = ? AND ts >= ?", (guild.id, int(since))):
             (joins if event == "join" else leaves)[local_day(ts, tz)] += 1
-        report = Report(f"🚪 Joins and leaves: last {days} days", admin=True)
+        report = Report(f"🚪 Joins and leaves: {period_label(days)}", admin=True)
         j, l = sum(joins.values()), sum(leaves.values())
         report.lines.append(f"➕ **{j}** joined · ➖ **{l}** left · net **{j - l:+d}**")
         report.lines.append(f"👥 **{sum(not m.bot for m in guild.members)}** members now.")
@@ -1018,7 +1054,8 @@ class ActivityStats(commands.Cog):
             report.lines.append(note)
         days_list = day_range(since, now, tz)
         report.chart = lambda: daily_chart(days_list, {"Joined": [joins[d] for d in days_list],
-                                                       "Left": [leaves[d] for d in days_list]}, "members")
+                                                       "Left": [leaves[d] for d in days_list]}, "members",
+                                           colors=[CHART_GOOD, CHART_BAD])
         return report
 
     async def report_dead_channels(self, guild: discord.Guild, days: int = 30) -> Report:
@@ -1055,7 +1092,7 @@ class ActivityStats(commands.Cog):
             if walk_ins := len(showed - joined):
                 line += f", plus {walk_ins} who didn't click Join"
             if no_shows:
-                line += f"\n-# Didn't show: {self._names(f'<@{u}>' for u in no_shows)}"
+                line += f"\n-# Didn't show: {self._names_or_departed(guild, no_shows)}"
             report.lines.append(line)
         reliability = defaultdict(lambda: [0, 0])
         for _, _, joined, showed in await self.db.query(
@@ -1065,7 +1102,8 @@ class ActivityStats(commands.Cog):
             for uid in json.loads(joined):
                 reliability[uid][0] += 1
                 reliability[uid][1] += uid in showed
-        regulars = sorted(((s / j, j, uid) for uid, (j, s) in reliability.items() if j >= 2), reverse=True)
+        regulars = sorted(((s / j, j, uid) for uid, (j, s) in reliability.items()
+                           if j >= 2 and guild.get_member(uid)), reverse=True)
         if regulars:
             report.lines.append("**Show-up rate** (90 days, 2+ sessions joined): " + ", ".join(
                 f"<@{uid}> {rate:.0%} of {j}" for rate, j, uid in regulars[:15]))
@@ -1085,7 +1123,7 @@ class ActivityStats(commands.Cog):
             uses[command] += n
             if not ok:
                 failures[command] += n
-        report = Report(f"🛠️ Command usage: last {days} days", admin=True)
+        report = Report(f"🛠️ Command usage: {period_label(days)}", admin=True)
         report.lines.append(f"**{sum(uses.values()):,}** commands run by members.")
         for command, n in uses.most_common(15):
             name = command if command.startswith("/") else f"{prefix}{command}"
@@ -1117,19 +1155,20 @@ class ActivityStats(commands.Cog):
         rows = await self.db.query(
             "SELECT user, question, ts FROM unmet_questions WHERE guild = ? AND ts >= ? ORDER BY ts DESC LIMIT 25",
             (guild.id, int(time.time() - days * DAY)))
-        report = Report(f"🔎 Guide questions with no matching command: last {days} days", admin=True)
+        report = Report(f"🔎 Guide questions with no matching command: {period_label(days)}", admin=True)
         if not rows:
             report.lines.append("None. The guide found a command for every question.")
         for uid, question, ts in rows:
             question = question.replace("\n", " ")
-            report.lines.append(f"<t:{ts}:d> <@{uid}>: “{question[:150]}{'…' if len(question) > 150 else ''}”")
+            who = f"<@{uid}>" if guild.get_member(uid) else "A former member"
+            report.lines.append(f"<t:{ts}:d> {who}: “{ui.truncate(question, 151)}”")
         return report
 
     async def report_libraries(self, guild: discord.Guild) -> Report:
         report = Report("📚 Game library coverage", admin=True)
         gm = self.bot.get_cog("GameManager")
         if gm is None:
-            report.lines.append("GameManager isn't loaded.")
+            report.lines.append(ui.line(ui.WARN, "The game library (GameManager) isn't loaded."))
             return report
         users = await gm.config.guild(guild).users()
         humans = [m for m in guild.members if not m.bot]
@@ -1161,7 +1200,9 @@ class ActivityStats(commands.Cog):
             else:
                 before += n
                 prev_posters.add(uid)
-        report = Report(f"📰 Weekly digest: <t:{int(week)}:d> to <t:{int(now)}:d>", admin=True)
+        # Discord doesn't render <t:…> timestamps in embed titles, so the title gets plain dates.
+        report = Report(f"📰 Weekly digest: {short_date(local_day(week, tz))} – {short_date(local_day(now, tz))}",
+                        admin=True)
         report.lines.append(f"💬 **{this:,}** messages{change(this, before)} from **{len(posters)}** members "
                             f"(last week: {len(prev_posters)})")
         if channels:
@@ -1333,8 +1374,9 @@ class ActivityStats(commands.Cog):
     async def _report_embed(self, report: Report, footer: Optional[str] = None
                             ) -> Tuple[discord.Embed, Optional[discord.File]]:
         description = "\n".join(report.lines) or "Nothing to show yet."
-        embed = discord.Embed(title=report.title, description=description[:4000],
-                              color=ADMIN_COLOR if report.admin else MEMBER_COLOR)
+        # Admin reports keep the normal color and say "Staff only" in the footer instead.
+        embed = discord.Embed(title=report.title, description=ui.truncate(description, 4000), color=ui.BRAND)
+        footer = " · ".join(part for part in (STAFF_HINT if report.admin else None, footer) if part)
         if footer:
             embed.set_footer(text=footer)
         file = None
@@ -1357,7 +1399,7 @@ class ActivityStats(commands.Cog):
     async def _channel_id(self, ctx: commands.Context, channel) -> Optional[int]:
         """The tracked channel ID for a channel argument, or None after telling the user it's unavailable."""
         if not channel.permissions_for(ctx.author).view_channel:
-            await ctx.send("❌ You can't see that channel.")
+            await ctx.send(ui.line(ui.LOCKED, "You can't see that channel, so its stats are hidden from you."))
             return None
         return self._channel_key(channel)
 
@@ -1427,8 +1469,8 @@ class ActivityStats(commands.Cog):
         """Your own stats: messages, channels, usual hours, voice, games and game nights. Admins can name a member."""
         member = member or ctx.author
         if member != ctx.author and not await self._is_admin(ctx.author):
-            return await ctx.send("❌ You can only see your own stats. Leaderboards are in "
-                                  f"`{ctx.clean_prefix}stats top`.")
+            return await ctx.send(ui.line(ui.LOCKED, "You can only see your own stats. Leaderboards are in "
+                                                     f"`{ctx.clean_prefix}stats top`."))
         await self._send(ctx, await self.report_me(ctx.author, member, period or 30))
 
     @stats.command(name="ignoreme", aliases=["optout"])
@@ -1456,7 +1498,7 @@ class ActivityStats(commands.Cog):
     async def stats_admin(self, ctx: commands.Context):
         """Admin-only reports and stats settings."""
         p = f"{ctx.clean_prefix}stats admin"
-        embed = discord.Embed(title="📋 Admin stats", color=ADMIN_COLOR, description="\n".join([
+        embed = discord.Embed(title="📋 Admin stats", color=ui.BRAND, description="\n".join([
             f"`{p} active [period]`: daily, weekly and monthly active members",
             f"`{p} retention [period]`: do new members post and stick around?",
             f"`{p} quiet`: lurkers and members who went quiet",
@@ -1470,6 +1512,7 @@ class ActivityStats(commands.Cog):
             f"`{p} digest`: the weekly digest settings",
             f"`{p} settings` · `exclude` · `include` · `gametracking` · `backfill`",
         ]))
+        embed.set_footer(text=STAFF_HINT)
         await ctx.send(embed=embed)
 
     @stats_admin.command(name="active")
@@ -1524,7 +1567,8 @@ class ActivityStats(commands.Cog):
         excluded = ", ".join(self._channel_name(ctx.guild, c) for c in data["excluded_channels"]) or "None"
         digest_channel = self._channel_name(ctx.guild, data["digest_channel"]) if data["digest_channel"] else "not set"
         _, tz_name = await self._guild_tz(ctx.guild)
-        embed = discord.Embed(title="⚙️ Stats settings", color=ADMIN_COLOR)
+        embed = discord.Embed(title="⚙️ Stats settings", color=ui.BRAND)
+        embed.set_footer(text=STAFF_HINT)
         embed.add_field(name="Tracking since", value=f"<t:{int(await self._data_start(ctx.guild))}:D>")
         embed.add_field(name="Game tracking", value="On" if data["track_games"] else "Off")
         embed.add_field(name="Excluded channels", value=excluded, inline=False)
@@ -1656,10 +1700,10 @@ class ActivityStats(commands.Cog):
         weekday = WEEKDAY_INPUT.get(day.lower())
         match = re.fullmatch(r"(\d{1,2})(?::00)?\s*(am|pm)?", hour.lower())
         if weekday is None or not match:
-            return await ctx.send("❌ Use a day and hour, like `monday 9am` or `fri 18`.")
+            return await ctx.send(ui.line(ui.ASK, "Use a day and hour, like `monday 9am` or `fri 18`."))
         value = int(match.group(1)) % 12 + (12 if match.group(2) == "pm" else 0) if match.group(2) else int(match.group(1))
         if not 0 <= value <= 23:
-            return await ctx.send("❌ The hour must be 0–23, or 1–12 with am/pm.")
+            return await ctx.send(ui.line(ui.ASK, "The hour must be 0–23, or 1–12 with am/pm."))
         await self.config.guild(ctx.guild).digest_day.set(weekday)
         await self.config.guild(ctx.guild).digest_hour.set(value)
         _, tz_name = await self._guild_tz(ctx.guild)

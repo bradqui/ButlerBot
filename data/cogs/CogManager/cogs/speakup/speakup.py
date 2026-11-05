@@ -16,12 +16,14 @@ someone clicks, or posts a small card for things that are clearly useful. Everyt
 import asyncio
 import copy
 import difflib
+import importlib.util
 import logging
 import re
 import secrets
 import sys
 import time
 from datetime import datetime, timedelta, timezone, tzinfo
+from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 import aiohttp
@@ -30,6 +32,21 @@ from discord.ext import tasks
 from redbot.core import Config, app_commands, checks, commands
 from redbot.core.bot import Red
 
+
+def _load_butlerui():
+    """The shared style module (../_shared/butlerui.py), re-read when the file changes."""
+    path = Path(__file__).resolve().parent.parent / "_shared" / "butlerui.py"
+    module, mtime = sys.modules.get("butlerui"), path.stat().st_mtime
+    if module is None or getattr(module, "_mtime", None) != mtime:
+        spec = importlib.util.spec_from_file_location("butlerui", path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        module._mtime = mtime
+        sys.modules["butlerui"] = module
+    return module
+
+
+ui = _load_butlerui()
 log = logging.getLogger("red.speakup")
 
 
@@ -198,11 +215,18 @@ def price_line(details: dict) -> str:
     if details.get("free"):
         return "🆓 Free to play"
     if not price:
-        return "Not for sale right now"
+        return "🏷️ Not for sale right now"
     if price.get("discount_percent"):
         return (f"💸 **{price['discount_percent']}% off**: {price.get('final_formatted')} "
                 f"(was {price.get('initial_formatted')})")
     return f"💲 {price.get('final_formatted')}"
+
+
+def summary_text(url: str, summary: str, footer: Optional[str] = None) -> str:
+    """A link summary as one message: the summary is shortened (at a line or word break) to fit Discord's limit."""
+    head = f"{LINK_EMOJI} **Summary** of <{url}>\n" if len(url) <= 500 else f"{LINK_EMOJI} **Summary**\n"
+    tail = f"\n{ui.hint(footer)}" if footer else ""
+    return head + ui.truncate(summary.strip(), ui.MESSAGE_LIMIT - len(head) - len(tail)) + tail
 
 
 def speakup_cog(interaction: discord.Interaction) -> Optional["SpeakUp"]:
@@ -231,36 +255,36 @@ class RemoveButton(discord.ui.DynamicItem[discord.ui.Button], template=r"sp:x:(?
     async def callback(self, interaction: discord.Interaction):
         perms = interaction.channel.permissions_for(interaction.user)
         if interaction.user.id != self.uid and not perms.manage_messages:
-            return await interaction.response.send_message(
-                f"Only <@{self.uid}> or a moderator can remove this.", ephemeral=True,
-                allowed_mentions=discord.AllowedMentions.none())
-        await interaction.response.send_message("Remove this message for everyone?", view=ConfirmRemoveView(
-            interaction.message), ephemeral=True)
+            return await ui.respond(interaction, ui.line(ui.LOCKED, f"Only <@{self.uid}> or a moderator can remove "
+                                                                    "this."))
+        view = ConfirmRemoveView(interaction.message)
+        await interaction.response.send_message("Remove this message for everyone?", view=view, ephemeral=True)
+        view.message = interaction   # so it can grey itself out when it expires
 
 
-class ConfirmRemoveView(discord.ui.View):
-    """The private confirmation behind a Remove button."""
+class ConfirmRemoveView(ui.ExpiringView):
+    """The private confirmation behind a Remove button. Only the clicker sees it, so anyone may answer it."""
 
     def __init__(self, target: discord.Message):
-        super().__init__(timeout=60)
+        super().__init__(None, timeout=60)
         self.target = target
 
-    @discord.ui.button(label="Remove for everyone", emoji="🗑️", style=discord.ButtonStyle.danger)
+    @discord.ui.button(label="Remove for everyone", style=discord.ButtonStyle.danger)
     async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
         self.stop()
         try:
             await self.target.delete()
-            text = "🗑️ Removed."
+            text = ui.line(ui.DONE, "Removed.")
         except discord.NotFound:
-            text = "It's already gone."
+            text = ui.line(ui.DONE, "It's already gone.")
         except discord.HTTPException:
-            text = "❌ I couldn't remove it."
+            text = ui.line(ui.FAIL, "I couldn't remove it. A moderator can delete it instead.")
         await interaction.response.edit_message(content=text, view=None)
 
     @discord.ui.button(label="Keep it", style=discord.ButtonStyle.secondary)
     async def keep(self, interaction: discord.Interaction, button: discord.ui.Button):
         self.stop()
-        await interaction.response.edit_message(content="Kept.", view=None)
+        await interaction.response.edit_message(content=ui.line(ui.DONE, "Kept."), view=None)
 
 
 class ScheduleButton(discord.ui.DynamicItem[discord.ui.Button], template=r"sp:sched:(?P<ts>\d+)"):
@@ -282,8 +306,9 @@ class ScheduleButton(discord.ui.DynamicItem[discord.ui.Button], template=r"sp:sc
 
 
 class SteamButton(discord.ui.DynamicItem[discord.ui.Button], template=r"sp:(?P<action>own|want):(?P<appid>\d+)"):
-    LOOKS = {"own": ("I own this", "🎮", discord.ButtonStyle.success),
-             "want": ("I want this", "⭐", discord.ButtonStyle.primary)}
+    # Grey, like the Remove button next to them: neither is the card's one main action.
+    LOOKS = {"own": ("I own this", "📚", discord.ButtonStyle.secondary),
+             "want": ("I want this", "⭐", discord.ButtonStyle.secondary)}
 
     def __init__(self, action: str, appid: int):
         label, emoji, style = self.LOOKS[action]
@@ -319,16 +344,17 @@ class RunSuggestionView(discord.ui.View):
         super().__init__(timeout=300)
         self.cog, self.original, self.suggestion = cog, message, suggestion
         self.message: Optional[discord.Message] = None
-        run = discord.ui.Button(label="Run it", emoji="▶️", style=discord.ButtonStyle.success)
-        run.callback = self._run
-        self.add_item(run)
+        self.run_button = discord.ui.Button(label="Run it", emoji="▶️", style=discord.ButtonStyle.primary)
+        self.run_button.callback = self._run
+        self.add_item(self.run_button)
         self.add_item(RemoveButton(message.author.id))
 
     async def _run(self, interaction: discord.Interaction):
         if interaction.user.id != self.original.author.id:
-            return await interaction.response.send_message("Only the person who typed it can run it.", ephemeral=True)
+            return await ui.respond(interaction, ui.line(ui.LOCKED, "Only the person who typed it can run it."))
         self.stop()
-        await interaction.response.edit_message(content=f"▶️ Running `{self.suggestion}`", view=None)
+        await interaction.response.edit_message(content=ui.line(ui.WAIT, f"Running `{self.suggestion}`…"),
+                                                view=None)
         fake = copy.copy(self.original)
         fake.content = self.suggestion
         ctx = await self.cog.bot.get_context(fake)
@@ -336,11 +362,11 @@ class RunSuggestionView(discord.ui.View):
             await self.cog.bot.invoke(ctx)
 
     async def on_timeout(self):
-        if self.message is not None:
-            try:
-                await self.message.edit(view=None)
-            except discord.HTTPException:
-                pass
+        """Grey out Run it and say so. Remove is a persistent button, so it keeps working."""
+        if self.message is None:
+            return
+        self.run_button.disabled = True
+        await ui.edit_quietly(self.message, add_note=ui.ExpiringView.expired_note, view=self)
 
 
 # ==========================================
@@ -527,6 +553,7 @@ class SpeakUp(commands.Cog):
                     entry["done"] = False   # let someone else try (e.g. after a rate limit)
         except discord.HTTPException as e:
             log.warning("Couldn't answer a reaction in %s: %s", channel, e)
+            entry["done"] = False   # nothing was posted, so a later click can try again
         except Exception:
             # Anything else would otherwise fail silently: the click just does nothing.
             log.exception("Answering a %s reaction failed", entry["kind"])
@@ -582,21 +609,21 @@ class SpeakUp(commands.Cog):
             view.add_item(ScheduleButton(ts))
         view.add_item(RemoveButton(clicker.id))
         await channel.send("\n".join(lines), view=view, reference=message.to_reference(fail_if_not_exists=False),
-                           mention_author=False, allowed_mentions=discord.AllowedMentions.none())
+                           mention_author=False, allowed_mentions=ui.NO_PINGS)
 
     async def schedule_from_time(self, interaction: discord.Interaction, ts: int):
         gm = self.bot.get_cog("GameManager")
         if gm is None:
-            return await interaction.response.send_message("Game sessions aren't available right now.", ephemeral=True)
+            return await ui.respond(interaction, ui.line(ui.WARN, "Game sessions aren't available right now."))
         if ts <= time.time() + 60:
-            return await interaction.response.send_message("That time has already passed.", ephemeral=True)
+            return await ui.respond(interaction, ui.line(ui.WARN, "That time has already passed."))
 
         async def submit(modal_interaction: discord.Interaction, title: str):
             title = title or f"{modal_interaction.user.display_name}'s game session"
             await modal_interaction.response.defer(ephemeral=True)
             await gm.post_session(modal_interaction.guild, modal_interaction.channel, modal_interaction.user,
                                   title[:200], datetime.fromtimestamp(ts, timezone.utc))
-            await modal_interaction.followup.send(f"✅ Posted **{title}** for {stamp(ts)}.", ephemeral=True)
+            await ui.respond(modal_interaction, ui.line(ui.DONE, f"Posted **{title}** for {stamp(ts)}."))
 
         await interaction.response.send_modal(TitleModal(submit))
 
@@ -630,47 +657,44 @@ class SpeakUp(commands.Cog):
         """Right-click a message → Apps → Summarize link: a summary only the person asking can see."""
         await interaction.response.defer(ephemeral=True, thinking=True)
         if interaction.guild is None:
-            return await interaction.followup.send("Use this on a message in a server.", ephemeral=True)
+            return await ui.respond(interaction, ui.line(ui.FAIL, "This only works on messages in a server."))
         if self.bot.get_cog("ClaudeChat") is None:
-            return await interaction.followup.send("Summaries need the AI chat, which isn't running right now.",
-                                                   ephemeral=True)
+            return await ui.respond(interaction, ui.line(ui.WARN, "Summaries need the AI chat, which isn't running "
+                                                                  "right now."))
         links = await self._article_links(message, summary_links(message.content), wait=False)
         if not links:
-            return await interaction.followup.send("There's no article or video link in that message to summarize.",
-                                                   ephemeral=True)
+            return await ui.respond(interaction, ui.line(ui.ASK, "There's no article or video link in that message "
+                                                                 "to summarize."))
         if not self._summary_allowed(interaction.user):
-            return await interaction.followup.send(f"⏳ That's {SUMMARIES_PER_HOUR} summaries this hour. Try again "
-                                                   "later.", ephemeral=True)
+            return await ui.respond(interaction, ui.line(ui.WAIT, f"That's {SUMMARIES_PER_HOUR} summaries this hour. "
+                                                                  "Try again later."))
         summary = await self.summarize(links[0], interaction.user)
         if not summary:
-            return await interaction.followup.send("😶 I couldn't read that page. It may block bots, need a login, or "
-                                                   "be mostly video.", ephemeral=True)
-        await interaction.followup.send(f"{LINK_EMOJI} **Summary** of <{links[0]}>\n{summary}", ephemeral=True,
-                                        suppress_embeds=True)
+            return await ui.respond(interaction, ui.line(ui.FAIL, "I couldn't read that page. It may block bots, need "
+                                                                  "a login, or be mostly video."))
+        await ui.respond(interaction, summary_text(links[0], summary), suppress_embeds=True)
 
     async def _answer_link(self, channel, message: discord.PartialMessage, entry: dict, clicker: discord.Member) -> bool:
         if not self._summary_allowed(clicker):
-            await channel.send(f"⏳ {clicker.mention}, that's {SUMMARIES_PER_HOUR} summaries this hour. Try again later.",
-                               delete_after=15, allowed_mentions=discord.AllowedMentions(users=[clicker]))
+            await channel.send(ui.line(ui.WAIT, f"{clicker.mention}, that's {SUMMARIES_PER_HOUR} summaries this hour. "
+                                                "Try again later."), delete_after=15, allowed_mentions=ui.NO_PINGS)
             return False
         if self.bot.get_cog("ClaudeChat") is None:
             return False
         async with channel.typing():
             summary = await self.summarize(entry["url"], clicker)
         reference = message.to_reference(fail_if_not_exists=False)
-        if not summary:
-            view = discord.ui.View(timeout=None)
-            view.add_item(RemoveButton(clicker.id))
-            await channel.send("😶 I couldn't read that page. It may block bots, need a login, or be mostly video. "
-                               f"Try `{await self._prefix(channel.guild)}ai` with what you want to know about it.",
-                               view=view, reference=reference,
-                               mention_author=False)
-            return True
         view = discord.ui.View(timeout=None)
         view.add_item(RemoveButton(clicker.id))
-        await channel.send(f"{LINK_EMOJI} **Summary** of <{entry['url']}>\n{summary}\n-# Asked by {clicker.mention}",
+        if not summary:
+            await channel.send(ui.line(ui.FAIL, "I couldn't read that page. It may block bots, need a login, or be "
+                                                f"mostly video. Try `{await self._prefix(channel.guild)}ai` with what "
+                                                "you want to know about it."),
+                               view=view, reference=reference, mention_author=False, allowed_mentions=ui.NO_PINGS)
+            return True
+        await channel.send(summary_text(entry["url"], summary, f"Asked by {clicker.mention}"),
                            view=view, reference=reference, mention_author=False,
-                           allowed_mentions=discord.AllowedMentions.none(), suppress_embeds=True)
+                           allowed_mentions=ui.NO_PINGS, suppress_embeds=True)
         return True
 
     # ---------- Steam cards ----------
@@ -693,7 +717,7 @@ class SpeakUp(commands.Cog):
                 view.add_item(SteamButton("want", appid))
             view.add_item(RemoveButton(message.author.id))
             await message.channel.send(embed=embed, view=view, reference=message.to_reference(fail_if_not_exists=False),
-                                       mention_author=False, allowed_mentions=discord.AllowedMentions.none())
+                                       mention_author=False, allowed_mentions=ui.NO_PINGS)
 
     async def steam_embed(self, guild: discord.Guild, appid: int, details: dict) -> discord.Embed:
         lines = [price_line(details)]
@@ -726,16 +750,16 @@ class SpeakUp(commands.Cog):
             fans = [u for u in (entry or {}).get("users", []) if guild.get_member(int(u))]
             if fans:
                 lines.append(f"⭐ Wanted by **{len(fans)}**")
+        on_sale = bool((details.get("price") or {}).get("discount_percent"))
         embed = discord.Embed(title=details["name"], url=STEAM_APP_URL.format(appid), description="\n".join(lines),
-                              color=discord.Color.from_rgb(27, 40, 56))
+                              color=ui.HIGHLIGHT if on_sale else ui.BRAND)
         embed.set_footer(text="Steam")
         return embed
 
     async def steam_button(self, interaction: discord.Interaction, action: str, appid: int):
         gm = self.bot.get_cog("GameManager")
         if gm is None:
-            return await interaction.response.send_message("The game library isn't available right now.",
-                                                           ephemeral=True)
+            return await ui.respond(interaction, ui.line(ui.WARN, "The game library isn't available right now."))
         await interaction.response.defer(ephemeral=True, thinking=True)
         guild, member = interaction.guild, interaction.user
         name = self._steam_names.get(appid)
@@ -743,13 +767,15 @@ class SpeakUp(commands.Cog):
             details = await steam_details(appid)
             name = details["name"] if details else None
         if name is None:
-            return await interaction.followup.send("❌ I couldn't look that game up on Steam.", ephemeral=True)
+            return await ui.respond(interaction, ui.line(ui.FAIL, "I couldn't look that game up on Steam. Try again "
+                                                                  "in a minute."))
         self._steam_names[appid] = name
         if action == "want":
             added, already, have = await gm.add_wants(guild, member, [(name, appid)])
-            text = (f"⭐ Added **{name}** to your wishlist. You'll get a ping when it goes on sale." if added
-                    else f"You already own **{name}**." if have else f"**{name}** is already on your wishlist.")
-            return await interaction.followup.send(text, ephemeral=True)
+            text = (ui.line(ui.DONE, f"Added **{name}** to your wishlist. You'll get a ping when it goes on sale.")
+                    if added else ui.line(ui.WARN, f"You already own **{name}**, so it's not on your wishlist.")
+                    if have else ui.line(ui.DONE, f"**{name}** is already on your wishlist."))
+            return await ui.respond(interaction, text)
         games = await gm.config.guild(guild).games()
         game = next((g for g in games.values() if g.get("steam_appid") == appid), None)
         if game is not None:
@@ -812,10 +838,11 @@ class SpeakUp(commands.Cog):
         if suggestion is None or suggestion.strip() == f"{ctx.prefix}{typed}":
             return
         view = RunSuggestionView(self, ctx.message, suggestion)
-        shown = typed if len(typed) <= 60 else typed[:60] + "…"
-        view.message = await ctx.send(f"❓ `{ctx.prefix}{shown}` isn't a command. Did you mean `{suggestion}`?",
+        shown = ui.truncate(typed, 61)
+        view.message = await ctx.send(ui.line(ui.ASK, f"`{ctx.prefix}{shown}` isn't a command. Did you mean "
+                                                      f"`{suggestion}`?"),
                                       view=view, reference=ctx.message.to_reference(fail_if_not_exists=False),
-                                      mention_author=False, allowed_mentions=discord.AllowedMentions.none())
+                                      mention_author=False, allowed_mentions=ui.NO_PINGS)
 
     async def fuzzy_suggestion(self, ctx: commands.Context, typed: str) -> Optional[str]:
         """A close spelling match for the first one to three words, keeping the rest ("game owns X" -> "games own X")."""
@@ -902,15 +929,16 @@ class SpeakUp(commands.Cog):
             return await ctx.send(f"❓ What should I remind you about? `{ctx.clean_prefix}remindme 2h check the oven`")
         async with self.config.reminders() as reminders:
             if sum(r["user"] == ctx.author.id for r in reminders.values()) >= MAX_REMINDERS:
-                return await ctx.send(f"⚠️ You have {MAX_REMINDERS} reminders already. Cancel one with "
-                                      f"`{ctx.clean_prefix}reminders cancel <id>`.")
+                return await ctx.send(ui.line(ui.WAIT, f"You have {MAX_REMINDERS} reminders already. Cancel one with "
+                                                       f"`{ctx.clean_prefix}reminders cancel <id>`."))
             rid = secrets.token_hex(3)
             reminders[rid] = {"id": rid, "user": ctx.author.id, "guild": ctx.guild.id if ctx.guild else None,
                               "channel": ctx.channel.id, "text": what[:1000], "due": when.timestamp(),
                               "created": now.timestamp(), "jump": ctx.message.jump_url}
-        await ctx.send(f"⏰ I'll remind you {stamp(when.timestamp())} ({stamp(when.timestamp(), 'R')}): **{what[:200]}**"
-                       f"\n-# ID `{rid}` · `{ctx.clean_prefix}reminders` lists yours",
-                       allowed_mentions=discord.AllowedMentions.none())
+        await ctx.send(ui.line(ui.DONE, f"I'll remind you {stamp(when.timestamp())} ({stamp(when.timestamp(), 'R')}): "
+                                        f"**{ui.truncate(what, 200)}**",
+                               f"ID `{rid}` · `{ctx.clean_prefix}reminders` lists yours"),
+                       allowed_mentions=ui.NO_PINGS)
 
     @commands.group(name="reminders", invoke_without_command=True)
     async def reminders(self, ctx: commands.Context):
@@ -918,12 +946,14 @@ class SpeakUp(commands.Cog):
         mine = sorted((r for r in (await self.config.reminders()).values() if r["user"] == ctx.author.id),
                       key=lambda r: r["due"])
         if not mine:
-            return await ctx.send(f"You have no reminders. Set one with `{ctx.clean_prefix}remindme 2h check the oven`.")
-        lines = [f"`{r['id']}` · {stamp(r['due'])} ({stamp(r['due'], 'R')}): {r['text'][:100]}" for r in mine]
-        embed = discord.Embed(title="⏰ Your reminders", description="\n".join(lines)[:4000],
-                              color=discord.Color.blurple())
+            return await ctx.send(ui.line(ui.ASK, "You have no reminders. Set one with "
+                                                  f"`{ctx.clean_prefix}remindme 2h check the oven`."))
+        lines = [f"`{r['id']}` · {stamp(r['due'])} ({stamp(r['due'], 'R')}): {ui.truncate(r['text'], 100)}"
+                 for r in mine]
+        embed = discord.Embed(title="⏰ Your reminders", description=ui.truncate("\n".join(lines), 4000),
+                              color=ui.BRAND)
         embed.set_footer(text=f"{ctx.clean_prefix}reminders cancel <id> · {ctx.clean_prefix}reminders clear")
-        await ctx.send(embed=embed)
+        await ctx.send(embed=embed, allowed_mentions=ui.NO_PINGS)
 
     @reminders.command(name="cancel", aliases=["delete", "remove"])
     async def reminders_cancel(self, ctx: commands.Context, reminder_id: str):
@@ -931,9 +961,12 @@ class SpeakUp(commands.Cog):
         async with self.config.reminders() as reminders:
             reminder = reminders.get(reminder_id.strip("`"))
             if reminder is None or reminder["user"] != ctx.author.id:
-                return await ctx.send(f"❌ You have no reminder `{reminder_id}`.")
+                return await ctx.send(ui.line(ui.ASK, f"You have no reminder `{reminder_id}`. "
+                                                      f"`{ctx.clean_prefix}reminders` lists yours."),
+                                      allowed_mentions=ui.NO_PINGS)
             reminders.pop(reminder["id"])
-        await ctx.send(f"🗑️ Cancelled: {reminder['text'][:200]}", allowed_mentions=discord.AllowedMentions.none())
+        await ctx.send(ui.line(ui.DONE, f"Cancelled: {ui.truncate(reminder['text'], 200)}"),
+                       allowed_mentions=ui.NO_PINGS)
 
     @reminders.command(name="clear")
     async def reminders_clear(self, ctx: commands.Context):
@@ -942,7 +975,9 @@ class SpeakUp(commands.Cog):
             mine = [rid for rid, r in reminders.items() if r["user"] == ctx.author.id]
             for rid in mine:
                 reminders.pop(rid)
-        await ctx.send(f"🗑️ Cancelled {len(mine)} reminder(s).")
+        if not mine:
+            return await ctx.send(ui.line(ui.ASK, "You have no reminders to cancel."))
+        await ctx.send(ui.line(ui.DONE, f"Cancelled {ui.plural(len(mine), 'reminder')}."))
 
     @tasks.loop(seconds=30)
     async def reminder_loop(self):
@@ -997,13 +1032,12 @@ class SpeakUp(commands.Cog):
         conf = await self.config.guild(ctx.guild).all()
         p = ctx.clean_prefix
         quiet = ctx.channel.id in conf["quiet_channels"]
-        lines = [f"{'✅' if conf['features'].get(k, True) else '❌'} {label}" for k, label in FEATURES.items()]
+        lines = [f"{ui.TICK if conf['features'].get(k, True) else ui.UNTICK} {label}" for k, label in FEATURES.items()]
         lines += ["", f"**This channel:** {'quiet' if quiet else 'on'} · **You:** "
                       f"{'opted out' if await self.config.user(ctx.author).opted_out() else 'on'}", "",
                   f"`{p}speakup me off` stops it for your messages · `{p}speakup off` quiets this channel (mods)",
                   f"`{p}speakup feature <{'|'.join(FEATURES)}> <on|off>` (admins)"]
-        await ctx.send(embed=discord.Embed(title="🗣️ Speaking up", description="\n".join(lines),
-                                           color=discord.Color.blurple()))
+        await ctx.send(embed=discord.Embed(title="🗣️ Speaking up", description="\n".join(lines), color=ui.BRAND))
 
     @speakup.command(name="off")
     @checks.mod_or_permissions(manage_channels=True)
@@ -1013,7 +1047,7 @@ class SpeakUp(commands.Cog):
         async with self.config.guild(ctx.guild).quiet_channels() as quiet:
             if channel.id not in quiet:
                 quiet.append(channel.id)
-        await ctx.send(f"🤫 I won't chime in on my own in {channel.mention}.")
+        await ctx.send(ui.line(ui.DONE, f"I won't chime in on my own in {channel.mention}."))
 
     @speakup.command(name="on")
     @checks.mod_or_permissions(manage_channels=True)
@@ -1023,7 +1057,7 @@ class SpeakUp(commands.Cog):
         async with self.config.guild(ctx.guild).quiet_channels() as quiet:
             if channel.id in quiet:
                 quiet.remove(channel.id)
-        await ctx.send(f"🗣️ I'll chime in again in {channel.mention}.")
+        await ctx.send(ui.line(ui.DONE, f"I'll chime in again in {channel.mention}."))
 
     @speakup.command(name="me")
     async def speakup_me(self, ctx: commands.Context, enabled: bool):
@@ -1038,7 +1072,10 @@ class SpeakUp(commands.Cog):
         """Turn one feature on or off server-wide: times, steam, links or mistakes."""
         feature = feature.lower()
         if feature not in FEATURES:
-            return await ctx.send(f"❌ Features: {', '.join(f'`{f}`' for f in FEATURES)}")
+            return await ctx.send(ui.line(ui.ASK, f"There's no feature called `{feature}`. Use one of "
+                                                  f"{', '.join(f'`{f}`' for f in FEATURES)}, for example "
+                                                  f"`{ctx.clean_prefix}speakup feature links off`."),
+                                  allowed_mentions=ui.NO_PINGS)
         async with self.config.guild(ctx.guild).features() as features:
             features[feature] = enabled
         await ctx.send(f"✅ {FEATURES[feature]}: {'on' if enabled else 'off'}.")

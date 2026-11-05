@@ -265,7 +265,7 @@ You can ping once every 5 minutes.
 
 **Who:** everyone
 
-Show every game in the server's library (✅ = you have it installed).
+Show every game in the server's library (💾 = you have it installed).
 
 <a id="games-mygames"></a>
 ### !games mygames
@@ -274,7 +274,7 @@ Show every game in the server's library (✅ = you have it installed).
 
 **Who:** everyone · **Also:** `!games library`, `!games mylibrary`
 
-Show your library, favorites first (✅ = installed).
+Show your library, favorites first (💾 = installed).
 
 <a id="games-newprofile"></a>
 ### !games newprofile
@@ -555,7 +555,7 @@ List who has a game installed.
 
 **Who:** everyone · **Also:** `!games whohas`
 
-List who owns a game (✅ = has it installed).
+List who owns a game (💾 = has it installed).
 
 <a id="games-wishlist"></a>
 ### !games wishlist

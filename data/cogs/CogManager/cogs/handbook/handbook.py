@@ -186,6 +186,18 @@ def fit(text: str, limit: int) -> str:
     return text + "\n```" if text.count("```") % 2 else text
 
 
+def fit_lines(lines: List[str], room: int, *, limit: Optional[int] = None, more: str = "…and {n} more") -> str:
+    """As many whole lines as fit in `room` characters (and at most `limit`), then a count of the rest."""
+    shown, used = [], 0
+    for i, entry in enumerate(lines):
+        if used + len(entry) + 1 > room or (limit is not None and i >= limit):
+            shown.append(more.format(n=len(lines) - i))
+            break
+        shown.append(entry)
+        used += len(entry) + 1
+    return "\n".join(shown)
+
+
 def anchor(command: commands.Command) -> str:
     return command.qualified_name.replace(" ", "-").lower()
 
@@ -221,7 +233,12 @@ class HandbookHelp(HelpFormatterABC):
         try:
             await self._send_help(ctx, help_for)
         except discord.HTTPException as e:
-            log.warning("Couldn't send help: %s", e)
+            # Usually Discord turning a card down (too long, say); a plain line may still get through.
+            log.warning("Couldn't send help for %r: %s", help_for, e)
+            try:
+                await ctx.send("❌ Something went wrong showing help. The error was logged.")
+            except discord.HTTPException:
+                pass
         except Exception:
             log.exception("Help failed for %r", help_for)
             await ctx.send("❌ Something went wrong showing help. The error was logged.")
@@ -304,14 +321,18 @@ class Handbook(commands.Cog):
         """(title, url, description) for every topic, for the Claude cog's bot guide."""
         return [(title, await self.topic_url(path), about) for path, _, title, about, _ in TOPICS]
 
-    def _links_view(self, links: List[Tuple[str, str]]) -> discord.ui.View:
-        view = discord.ui.View()
-        for label, url in links[:25]:
-            view.add_item(discord.ui.Button(label=label[:80], url=url))
-        return view
+    def _link_buttons(self, links: List[Tuple[str, str]]) -> List[discord.ui.Button]:
+        """Link buttons for inside a card (they just open the page)."""
+        return [discord.ui.Button(label=label[:80], url=url) for label, url in links[:25]]
 
-    async def _prefix(self, ctx: commands.Context) -> str:
-        return ctx.clean_prefix
+    def _bot_name(self, ctx: commands.Context) -> str:
+        return ctx.me.display_name if ctx.guild else self.bot.user.name
+
+    async def _send_card(self, ctx: commands.Context, *parts, title: str, links: List[Tuple[str, str]]):
+        """One help card: the 📖 title, the parts, its link buttons inside, and the shared footer. Ping-free."""
+        container = ui.card(*parts, self._link_buttons(links) or None, title=title, color=ui.BRAND,
+                            footer=HELP_FOOTER.format(p=ctx.clean_prefix))
+        return await ui.send_card(ctx, ui.CardView(container))
 
     # ---------- cards ----------
 
@@ -321,60 +342,52 @@ class Handbook(commands.Cog):
         return (await self.bot.is_owner(ctx.author) or ctx.author.guild_permissions.manage_messages
                 or await self.bot.is_mod(ctx.author) or await self.bot.is_admin(ctx.author))
 
-    async def home_embed(self, ctx: commands.Context) -> discord.Embed:
-        p = ctx.clean_prefix
-        staff = await self._is_staff(ctx)
-        lines = [f"Everything I can do, explained by task. Pick a topic, or try `{p}help <command>` for one command."
-                 f"\nNot sure what to type? Ask me: `{p}butler how do I…`", ""]
-        for path, emoji, title, about, audience in TOPICS:
-            if audience == "everyone":
-                lines.append(f"{emoji} [{title}]({await self.topic_url(path)}): {about}")
-        if staff:
-            lines += ["", "**For mods and admins**"]
-            for path, emoji, title, about, audience in TOPICS:
-                if audience != "everyone":
-                    lines.append(f"{emoji} [{title}]({await self.topic_url(path)}): {about}")
-        name = ctx.me.display_name if ctx.guild else self.bot.user.name
-        return discord.Embed(title=f"📖 {name} handbook", description="\n".join(lines), color=ui.BRAND)
+    async def _topic_lines(self, staff: bool) -> List[str]:
+        """`emoji [Title](url): about` for the members' topics, or for the mod and admin ones."""
+        return [f"{emoji} [{title}]({await self.topic_url(path)}): {about}"
+                for path, emoji, title, about, audience in TOPICS if (audience != "everyone") == staff]
 
     async def send_home(self, ctx: commands.Context):
-        await ctx.send(embed=await self.home_embed(ctx),
-                       view=self._links_view([("Open the handbook", await self.base_url())]))
+        p = ctx.clean_prefix
+        intro = (f"Everything I can do, explained by task. Pick a topic, or try `{p}help <command>` for one command."
+                 f"\nNot sure what to type? Ask me: `{p}butler how do I…`")
+        staff = None
+        if await self._is_staff(ctx):
+            staff = "**For mods and admins**\n" + "\n".join(await self._topic_lines(staff=True))
+        await self._send_card(ctx, intro, ui.SEPARATOR, "\n".join(await self._topic_lines(staff=False)), staff,
+                              title=f"📖 {self._bot_name(ctx)} handbook",
+                              links=[("Open the handbook", await self.base_url()),
+                                     ("Browse all commands", await self.topic_url("reference/"))])
 
     async def send_command_card(self, ctx: commands.Context, command: commands.Command):
-        prefix, bot_name = ctx.clean_prefix, (ctx.me.display_name if ctx.guild else self.bot.user.name)
+        prefix, bot_name = ctx.clean_prefix, self._bot_name(ctx)
         who, owner_only = requirement(command)
-        text = fit(fill(command.help, prefix, bot_name), 1500)
-        embed = discord.Embed(title=f"📖 {prefix}{command.qualified_name}", description=text or "No description.",
-                              color=ui.BRAND)
-        embed.add_field(name="Usage", value=f"`{usage(command, prefix)}`", inline=False)
+        meta = [f"**Who:** {who.capitalize()}"]
         if command.aliases:
-            embed.add_field(name="Also works as", value=", ".join(f"`{prefix}{(command.full_parent_name + ' ' + a).strip()}`"
-                                                                  for a in command.aliases))
-        embed.add_field(name="Who can use it", value=who.capitalize())
+            meta.append("**Also:** " + ", ".join(f"`{prefix}{(command.full_parent_name + ' ' + a).strip()}`"
+                                                 for a in command.aliases))
+        head = f"`{usage(command, prefix)}`\n" + " · ".join(meta)
+        text = fit(fill(command.help, prefix, bot_name), 1500) or "No description."
+        subs_text = None
         if isinstance(command, commands.Group):
             subs = visible_commands(command)
             if subs:
-                lines = [f"`{s.name}`: {ui.truncate(fill(s.short_doc, prefix, bot_name), 90)}" for s in subs[:25]]
-                if len(subs) > 25:
-                    lines.append(f"…and {len(subs) - 25} more")
-                value = "\n".join(lines)
-                embed.add_field(name=f"Subcommands ({prefix}{command.qualified_name} <subcommand>)",
-                                value=fit(value, 1024), inline=False)
-        embed.set_footer(text=HELP_FOOTER.format(p=prefix))
+                lines = [f"`{s.name}`: {ui.truncate(fill(s.short_doc, prefix, bot_name), 90)}" for s in subs]
+                # A card holds about 4,000 characters of text in all: list what fits and count the rest.
+                subs_text = (f"**Subcommands** · `{prefix}{command.qualified_name} <subcommand>`\n"
+                             + fit_lines(lines, max(3400 - len(head) - len(text), 300), limit=25))
         links = []
         topic = self.topic_for(command, None)
         if topic:
-            title = next(t for path, _, t, _, _ in TOPICS if path == topic)
-            links.append((f"Guide: {title}", await self.topic_url(topic)))
+            links.append(("Open handbook page", await self.topic_url(topic)))
         if not owner_only:
-            links.append(("Command reference", await self.reference_url(command.cog, command)))
-        await ctx.send(embed=embed, view=self._links_view(links) if links else None)
+            links.append(("Open the reference", await self.reference_url(command.cog, command)))
+        await self._send_card(ctx, head, text, subs_text, title=f"📖 {prefix}{command.qualified_name}", links=links)
 
     async def send_cog_card(self, ctx: commands.Context, cog: commands.Cog):
-        prefix, bot_name = ctx.clean_prefix, (ctx.me.display_name if ctx.guild else self.bot.user.name)
-        about = fill(getattr(cog, "help", None) or cog.description, prefix, bot_name)
-        lines = [fit(about, 600), ""] if about else []
+        prefix, bot_name = ctx.clean_prefix, self._bot_name(ctx)
+        about = fit(fill(getattr(cog, "help", None) or cog.description, prefix, bot_name), 600)
+        lines = []
         for command in visible_commands(cog):
             who, owner_only = requirement(command)
             if owner_only and not await self.bot.is_owner(ctx.author):
@@ -382,16 +395,15 @@ class Handbook(commands.Cog):
             note = "" if who == "everyone" else f" *({who})*"
             lines.append(f"`{prefix}{command.qualified_name}`: "
                          f"{ui.truncate(fill(command.short_doc, prefix, bot_name), 100)}{note}")
-        embed = discord.Embed(title=f"📖 {friendly_name(cog)}", description=fit("\n".join(lines), 4000) or "No commands.",
-                              color=ui.BRAND)
-        embed.set_footer(text=HELP_FOOTER.format(p=prefix))
+        # A card holds about 4,000 characters of text: list what fits and count the rest.
+        listed = fit_lines(lines, 3300 - len(about), more="…and {n} more in the command reference.")
         links = []
         topic = self.topic_for(None, cog)
         if topic:
-            title = next(t for path, _, t, _, _ in TOPICS if path == topic)
-            links.append((f"Guide: {title}", await self.topic_url(topic)))
-        links.append(("Command reference", await self.reference_url(cog)))
-        await ctx.send(embed=embed, view=self._links_view(links))
+            links.append(("Open handbook page", await self.topic_url(topic)))
+        links.append(("Open the reference", await self.reference_url(cog)))
+        await self._send_card(ctx, about, ui.SEPARATOR if about and listed else None,
+                              listed or "No commands.", title=f"📖 {friendly_name(cog)}", links=links)
 
     async def send_not_found(self, ctx: commands.Context, text: str):
         names = [c.qualified_name for c in self.bot.walk_commands() if not c.hidden] + list(self.bot.cogs)
@@ -424,8 +436,9 @@ class Handbook(commands.Cog):
         if score < 0.5:
             return await ctx.send(f"❓ No handbook topic matches **{topic[:60]}**. `{ctx.clean_prefix}handbook` lists "
                                   "them all.", allowed_mentions=ui.NO_PINGS)
-        # The link is the button; the text just names the page.
-        await ctx.send(f"{emoji} **{title}**: {about}", view=self._links_view([(title, await self.topic_url(path))]))
+        # The link is the button; the card just names the page.
+        await self._send_card(ctx, f"{emoji} {about}", title=f"📖 {title}",
+                              links=[("Open this page", await self.topic_url(path))])
 
     @handbook.command(name="seturl")
     @checks.is_owner()

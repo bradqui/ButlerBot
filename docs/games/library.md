@@ -98,6 +98,6 @@ Session times, stats heatmaps and reminders use it.
 > - `memberadd true|false`, which lets members add games without a request
 > - `timezone` for the server default
 > - `sales [#channel]` turns on sale alerts; `freegames true|false` adds weekly free Epic games
-> - `settings`
+> - `settings` shows them all on one card, with a warning if ButlerBot is missing a permission it needs
 >
 > Server admins set the game admin role with `!games admin setrole <role>`.

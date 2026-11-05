@@ -1498,7 +1498,7 @@ class ActivityStats(commands.Cog):
     async def stats_admin(self, ctx: commands.Context):
         """Admin-only reports and stats settings."""
         p = f"{ctx.clean_prefix}stats admin"
-        embed = discord.Embed(title="📋 Admin stats", color=ui.BRAND, description="\n".join([
+        reports = "\n".join([
             f"`{p} active [period]`: daily, weekly and monthly active members",
             f"`{p} retention [period]`: do new members post and stick around?",
             f"`{p} quiet`: lurkers and members who went quiet",
@@ -1508,12 +1508,14 @@ class ActivityStats(commands.Cog):
             f"`{p} commands [period]`: what's used, what isn't, and commands that don't exist",
             f"`{p} unmet [period]`: guide questions no command could answer",
             f"`{p} libraries`: who has a game library",
-            "",
+        ])
+        settings = "\n".join([
             f"`{p} digest`: the weekly digest settings",
             f"`{p} settings` · `exclude` · `include` · `gametracking` · `backfill`",
-        ]))
-        embed.set_footer(text=STAFF_HINT)
-        await ctx.send(embed=embed)
+        ])
+        view = ui.CardView(ui.card(reports, ui.SEPARATOR, settings, title="📊 Admin stats", color=ui.BRAND,
+                                   footer=STAFF_HINT))
+        await ui.send_card(ctx, view)
 
     @stats_admin.command(name="active")
     async def admin_active(self, ctx: commands.Context, period: Optional[Period] = None):
@@ -1567,15 +1569,17 @@ class ActivityStats(commands.Cog):
         excluded = ", ".join(self._channel_name(ctx.guild, c) for c in data["excluded_channels"]) or "None"
         digest_channel = self._channel_name(ctx.guild, data["digest_channel"]) if data["digest_channel"] else "not set"
         _, tz_name = await self._guild_tz(ctx.guild)
-        embed = discord.Embed(title="⚙️ Stats settings", color=ui.BRAND)
-        embed.set_footer(text=STAFF_HINT)
-        embed.add_field(name="Tracking since", value=f"<t:{int(await self._data_start(ctx.guild))}:D>")
-        embed.add_field(name="Game tracking", value="On" if data["track_games"] else "Off")
-        embed.add_field(name="Excluded channels", value=excluded, inline=False)
-        embed.add_field(name="Weekly digest", inline=False, value=(
-            f"{'On' if data['digest_enabled'] else 'Off'} · {digest_channel} · "
-            f"{WEEKDAYS[data['digest_day']]} {hour_label(data['digest_hour'])} ({tz_name})"))
-        await ctx.send(embed=embed)
+        rows = ui.settings_text([
+            ("Tracking since", f"<t:{int(await self._data_start(ctx.guild))}:D>"),
+            ("Game tracking", bool(data["track_games"])),
+            ("Excluded channels", ui.truncate(excluded, 1500)),
+            ("Weekly digest", f"{'On' if data['digest_enabled'] else 'Off'} · {digest_channel} · "
+                              f"{WEEKDAYS[data['digest_day']]} {hour_label(data['digest_hour'])} ({tz_name})"),
+        ])
+        p = f"{ctx.clean_prefix}stats admin"
+        footer = (f"`{p} exclude|include #channel` · `{p} gametracking on|off` · `{p} digest`\n{STAFF_HINT}")
+        view = ui.CardView(ui.card(rows, ui.SEPARATOR, title="📊 Stats settings", color=ui.BRAND, footer=footer))
+        await ui.send_card(ctx, view)
 
     @stats_admin.command(name="exclude")
     async def admin_exclude(self, ctx: commands.Context, channel: ChannelArg):

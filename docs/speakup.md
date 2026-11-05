@@ -31,12 +31,12 @@ You can also ask: `!butler remind me friday at 6 to buy Helldivers`.
 
 ## When ButlerBot chimes in on its own
 
-ButlerBot sometimes offers help without being asked. Its replies never ping anyone, and each has a 🗑️ **Remove** button. Remove deletes the reply **for everyone**, after a quick confirmation only you see. It works for the person the reply was for, and for mods.
+ButlerBot sometimes offers help without being asked. Its replies never ping anyone, and each has a 🗑️ (Remove) button. It deletes the reply **for everyone**, after a quick confirmation only you see. It works for the person the reply was for, and for mods.
 
 | You post… | ButlerBot… |
 |---|---|
-| A time while making plans ("anyone up for 9?", "friday 8pm?") | Adds a 🕘 reaction. Click it to see the time in everyone's own timezone, with a **Schedule a session** button. |
-| A Steam store link | Replies with a small card: price, any sale, who here owns it, and **I own this** / **I want this** buttons. |
+| A time while making plans ("anyone up for 9?", "friday 8pm?") | Adds a 🕘 reaction. Click it for a small card with the time in everyone's own timezone and a **Schedule a session** button. |
+| A Steam store link | Replies with a small card: the price and any sale, who here owns or wants it, and **I own it** / **Add to wishlist** buttons. The card updates when someone clicks. |
 | An article or video link | Adds a 📄 reaction. Click it for a three-line summary, posted in the channel. |
 | A command that doesn't exist | Suggests the one you probably meant, with a **Run it** button. **Run it** works for 5 minutes, for the person who typed the command. |
 

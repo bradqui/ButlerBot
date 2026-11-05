@@ -194,3 +194,177 @@ async def respond(interaction: discord.Interaction, content: str, *, ephemeral: 
     if interaction.response.is_done():
         return await interaction.followup.send(content, ephemeral=ephemeral, **kwargs)
     return await interaction.response.send_message(content, ephemeral=ephemeral, **kwargs)
+
+
+# ==========================================
+#                  CARDS
+# ==========================================
+# A card is one Components V2 container: a colored edge, a short title, the details, its buttons inside, and a
+# small footer hint. Messages that carry a card can't have content or embeds, and that can never be undone for a
+# message, so a feature switches to cards for new messages only (check `is_card()` before editing an old one).
+# Mentions inside card text DO ping (unlike embeds), so every send helper here defaults to NO_PINGS.
+
+SEPARATOR = "---"   # in card(): a divider line
+
+
+def card(*parts, title: Optional[str] = None, color: discord.Color = BRAND, footer: Optional[str] = None,
+         thumbnail: Optional[str] = None) -> discord.ui.Container:
+    """
+    Build a card. Each part can be:
+    - a string: a block of text (empty strings are skipped)
+    - SEPARATOR: a divider
+    - a list or tuple of buttons/selects: an action row (five buttons per row; a select gets a row of its own)
+    - any discord.ui item (Section, ActionRow, TextDisplay, MediaGallery, Separator): added as is
+    - None: skipped
+    `thumbnail` (an image URL) sits beside the title and the first block of text.
+    """
+    items: List[discord.ui.Item] = []
+    first_text = None
+    for part in parts:
+        if part is None or part == "":
+            continue
+        if part == SEPARATOR:
+            items.append(discord.ui.Separator())
+        elif isinstance(part, str):
+            if thumbnail and first_text is None and not items:
+                first_text = part
+                continue
+            items.append(discord.ui.TextDisplay(part))
+        elif isinstance(part, (list, tuple)):
+            items.extend(action_rows(part))
+        else:
+            items.append(part)
+    head = [f"### {title}"] if title else []
+    if thumbnail:
+        texts = [discord.ui.TextDisplay(t) for t in head + ([first_text] if first_text else [])]
+        if not texts:
+            texts = [discord.ui.TextDisplay("​")]
+        items.insert(0, discord.ui.Section(*texts, accessory=discord.ui.Thumbnail(thumbnail)))
+    elif head:
+        items.insert(0, discord.ui.TextDisplay(head[0]))
+    if footer:
+        items.append(discord.ui.TextDisplay(hint(footer)))
+    return discord.ui.Container(*items, accent_color=color)
+
+
+def action_rows(items) -> List[discord.ui.ActionRow]:
+    """Buttons five to a row; each select menu on its own row."""
+    rows: List[discord.ui.ActionRow] = []
+    current: List[discord.ui.Item] = []
+    for item in items:
+        if item is None:
+            continue
+        inner = getattr(item, "item", item)   # a DynamicItem wraps its button
+        if isinstance(inner, discord.ui.Select) or isinstance(item, discord.ui.Select):
+            if current:
+                rows.append(discord.ui.ActionRow(*current))
+                current = []
+            rows.append(discord.ui.ActionRow(item))
+            continue
+        current.append(item)
+        if len(current) == 5:
+            rows.append(discord.ui.ActionRow(*current))
+            current = []
+    if current:
+        rows.append(discord.ui.ActionRow(*current))
+    return rows
+
+
+def settings_text(rows) -> str:
+    """`**Name** · value` lines for a settings card. Booleans become On/Off; None becomes "not set"."""
+    out = []
+    for name, value in rows:
+        if isinstance(value, bool):
+            value = "On" if value else "Off"
+        elif value is None or value == "":
+            value = "not set"
+        out.append(f"**{name}** · {value}")
+    return "\n".join(out)
+
+
+class CardView(discord.ui.LayoutView):
+    """A message made of cards. `CardView(card(...))`, or subclass and override `build()` to redraw on changes."""
+
+    def __init__(self, *cards: discord.ui.Item, timeout: Optional[float] = None):
+        super().__init__(timeout=timeout)
+        for item in cards:
+            self.add_item(item)
+
+    def build(self) -> Optional[discord.ui.Container]:
+        return None
+
+    def redraw(self):
+        """Replace the contents with a fresh `build()`."""
+        built = self.build()
+        if built is not None:
+            self.clear_items()
+            self.add_item(built)
+        return self
+
+
+class ExpiringCard(CardView):
+    """
+    A short-lived card menu for one person (the card version of ExpiringView). Anyone else gets a private notice.
+    When it times out, its buttons and menus grey out and the card gets an "Expired." line. Set `view.message`
+    after sending (a message, or the interaction whose response it is).
+    """
+
+    expired_note = "Expired."
+    not_yours = ExpiringView.not_yours
+
+    def __init__(self, owner_id: Optional[int], *cards: discord.ui.Item, timeout: Optional[float] = 180):
+        super().__init__(*cards, timeout=timeout)
+        self.owner_id = owner_id
+        self.message: Optional[Target] = None
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if self.owner_id is None or interaction.user.id == self.owner_id:
+            return True
+        await interaction.response.send_message(self.not_yours, ephemeral=True)
+        return False
+
+    def disable_all(self):
+        for item in self.walk_children():
+            if hasattr(item, "disabled") and not getattr(item, "url", None):
+                item.disabled = True
+
+    def add_note(self, note: str):
+        """Add a small grey line at the bottom of the (first) card."""
+        container = next((c for c in self.children if isinstance(c, discord.ui.Container)), None)
+        target = container or self
+        text = hint(note)
+        if not any(isinstance(i, discord.ui.TextDisplay) and i.content == text for i in target.children):
+            target.add_item(discord.ui.TextDisplay(text))
+
+    async def on_timeout(self):
+        if self.message is None:
+            return
+        self.disable_all()
+        self.add_note(self.expired_note)
+        await edit_quietly(self.message, view=self)
+
+
+def is_card(message: Optional[discord.Message]) -> bool:
+    """True if a message was sent as a card (Components V2). Old embed messages must be edited the old way."""
+    flags = getattr(message, "flags", None)
+    return bool(getattr(flags, "components_v2", False))
+
+
+async def send_card(target, view: discord.ui.LayoutView, *, ephemeral: bool = False, reply_to=None, **kwargs):
+    """
+    Send a card to a Context, channel, user or interaction. Ping-free unless `allowed_mentions` is given.
+    Returns the message (for interactions, the response message).
+    """
+    kwargs.setdefault("allowed_mentions", NO_PINGS)
+    if isinstance(target, discord.Interaction):
+        if target.response.is_done():
+            return await target.followup.send(view=view, ephemeral=ephemeral, wait=True, **kwargs)
+        await target.response.send_message(view=view, ephemeral=ephemeral, **kwargs)
+        try:
+            return await target.original_response()
+        except discord.HTTPException:
+            return None
+    if reply_to is not None:
+        kwargs.setdefault("mention_author", False)
+        return await reply_to.reply(view=view, **kwargs)
+    return await target.send(view=view, **kwargs)

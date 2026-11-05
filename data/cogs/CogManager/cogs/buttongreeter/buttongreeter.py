@@ -13,6 +13,9 @@ reload. Each custom ID carries the member it's for:
 
 Buttons read the server's settings when they're clicked. Problems are answered privately to the member and reported
 in the admin channel.
+
+The welcome and rules messages are cards (Components V2) with the buttons inside. Older ones are embed messages; the
+handlers only ever delete them, which works the same for both.
 """
 
 import importlib.util
@@ -124,7 +127,7 @@ class RoleItem(_GreeterItem, discord.ui.DynamicItem[discord.ui.Button],
 class CustomItem(_GreeterItem, discord.ui.DynamicItem[discord.ui.Button], template=r"bg:custom:(?P<uid>\d+)"):
     def __init__(self, member_id: int):
         super().__init__(discord.ui.Button(label="Custom alliance", emoji="🛡️", style=discord.ButtonStyle.secondary,
-                                           row=4, custom_id=f"bg:custom:{member_id}"))
+                                           custom_id=f"bg:custom:{member_id}"))
         self.member_id = member_id
 
     @classmethod
@@ -138,7 +141,7 @@ class CustomItem(_GreeterItem, discord.ui.DynamicItem[discord.ui.Button], templa
 class NoneItem(_GreeterItem, discord.ui.DynamicItem[discord.ui.Button], template=r"bg:none:(?P<uid>\d+)"):
     def __init__(self, member_id: int):
         super().__init__(discord.ui.Button(label="No alliance", emoji="👋", style=discord.ButtonStyle.secondary,
-                                           row=4, custom_id=f"bg:none:{member_id}"))
+                                           custom_id=f"bg:none:{member_id}"))
         self.member_id = member_id
 
     @classmethod
@@ -171,20 +174,32 @@ class RulesItem(_GreeterItem, discord.ui.DynamicItem[discord.ui.Button],
 GREETER_ITEMS = (RoleItem, CustomItem, NoneItem, RulesItem)
 
 
-def greeter_view(member_id: int, roles: dict) -> discord.ui.View:
-    view = discord.ui.View(timeout=None)
-    for label, role_id in list(roles.items())[:MAX_ROLE_BUTTONS]:
-        view.add_item(RoleItem(int(role_id), member_id, label))
-    view.add_item(CustomItem(member_id))
-    view.add_item(NoneItem(member_id))
-    return view
+def welcome_card(member: discord.Member, roles: dict) -> discord.ui.LayoutView:
+    """
+    The welcome card: avatar, greeting with the newcomer's mention (the one ping in the flow, so send it with
+    allowed_mentions for just them), then the group buttons five to a row and the two built-in ones on a row of their
+    own. At most 18 + 2 buttons: 30 components in all, under Discord's 40.
+    """
+    group_buttons = [RoleItem(int(role_id), member.id, label)
+                     for label, role_id in list(roles.items())[:MAX_ROLE_BUTTONS]]
+    return ui.CardView(ui.card(
+        f"{member.mention}, select your identity below to proceed.",
+        group_buttons,
+        [CustomItem(member.id), NoneItem(member.id)],
+        title=f"👋 Welcome to {discord.utils.escape_markdown(member.guild.name)}",
+        thumbnail=member.display_avatar.url,
+        color=ui.BRAND,
+    ))
 
 
-def rules_view(member_id: int) -> discord.ui.View:
-    view = discord.ui.View(timeout=None)
-    view.add_item(RulesItem("yes", member_id))
-    view.add_item(RulesItem("no", member_id))
-    return view
+def rules_card(member: discord.Member, rules: str) -> discord.ui.LayoutView:
+    """The rules agreement: it mentions the member, so send it ping-free (they were pinged by the welcome)."""
+    return ui.CardView(ui.card(
+        f"Identity accepted, {member.mention}. Do you agree to the rules in {rules}?",
+        [RulesItem("yes", member.id), RulesItem("no", member.id)],
+        title="👋 Protocol agreement",
+        color=ui.ATTENTION,
+    ))
 
 
 # ==========================================
@@ -340,12 +355,9 @@ class ButtonGreeter(commands.Cog):
                                             f"skipped. Set one with `{await self.prefix(guild)}bg setrulesrole "
                                             "<role>`.", member)
         rules = f"<#{data['rules_channel']}>" if data["rules_channel"] else "#rules"
-        embed = discord.Embed(title="Protocol Agreement", color=ui.ATTENTION,
-                              description=f"Identity accepted. Now, do you agree to the rules listed in {rules}?")
         try:
-            # Mention, but don't ping: the welcome message already pinged them.
-            await interaction.channel.send(member.mention, embed=embed, view=rules_view(member.id),
-                                           allowed_mentions=ui.NO_PINGS)
+            # Mention, but don't ping (send_card's default): the welcome message already pinged them.
+            await ui.send_card(interaction.channel, rules_card(member, rules), allowed_mentions=ui.NO_PINGS)
         except discord.HTTPException as e:
             log.info("Couldn't post the rules prompt in %s: %s", guild.id, e)
             await ui.respond(interaction, "❌ I couldn't post the rules prompt. A moderator has been told.")
@@ -399,18 +411,25 @@ class ButtonGreeter(commands.Cog):
             return role.mention if role else (f"deleted role ({rid})" if rid else "not set")
 
         mods = ", ".join(role_text(rid) for rid in data.get("mod_roles", [])) or "none (admins only)"
-        buttons = "\n".join(f"**[{label}]** gives {role_text(rid)}" for label, rid in data["roles"].items())
-        embed = discord.Embed(title="👋 Welcome settings", color=ui.BRAND)
-        embed.add_field(name="Channels", inline=False,
-                        value=f"**Welcome:** {channel(data['welcome_channel'])}\n"
-                              f"**Rules:** {channel(data['rules_channel'])}\n"
-                              f"**Error reports:** {channel(data['admin_channel'])}")
-        embed.add_field(name="Roles", inline=False,
-                        value=f"**Rules role:** {role_text(data['rules_role'])}\n**Mod roles:** {mods}")
-        embed.add_field(name="Group buttons", value=ui.truncate(buttons, 1024) or "None yet.", inline=False)
-        embed.add_field(name="Always shown", value="🛡️ **Custom alliance** (type a tag)\n👋 **No alliance**",
-                        inline=False)
-        await ctx.send(embed=embed, allowed_mentions=ui.NO_PINGS)
+        channels = ui.settings_text([("Welcome", channel(data["welcome_channel"])),
+                                     ("Rules", channel(data["rules_channel"])),
+                                     ("Error reports", channel(data["admin_channel"]))])
+        roles = ui.settings_text([("Rules role", role_text(data["rules_role"])), ("Mod roles", mods)])
+        buttons = ui.settings_text([(f"[{discord.utils.escape_markdown(label)}]", f"gives {role_text(rid)}")
+                                    for label, rid in data["roles"].items()]) or "None yet."
+        p = f"{await self.prefix(ctx.guild)}bg"
+        view = ui.CardView(ui.card(
+            f"**Channels**\n{channels}",
+            f"**Roles**\n{roles}",
+            f"**Group buttons**\n{ui.truncate(buttons, 2000)}\n"
+            "Every welcome also has **Custom alliance** (type a tag) and **No alliance**.",
+            ui.SEPARATOR,
+            title="👋 Welcome settings",
+            color=ui.BRAND,
+            footer=f"`{p} setchannel` · `{p} setruleschannel` · `{p} setadminchannel` · `{p} setrulesrole` · "
+                   f"`{p} addrole` · `{p} removerole` · `{p} addmodrole`\nStaff only",
+        ))
+        await ui.send_card(ctx, view)   # ping-free: the role mentions only show the roles
 
     @buttongreeter.command()
     async def addmodrole(self, ctx: commands.Context, role: discord.Role):
@@ -576,12 +595,9 @@ class ButtonGreeter(commands.Cog):
         if channel is None:
             return await self.report(member.guild, f"The welcome channel (ID {channel_id}) is gone, so I couldn't "
                                                    "greet a new member.", member)
-        embed = discord.Embed(title=f"Welcome to {member.guild.name}", color=ui.BRAND,
-                              description="Select your Identity below to proceed.")
-        embed.set_thumbnail(url=member.display_avatar.url)
         try:
-            # The one ping in the flow: the greeting itself.
-            await channel.send(member.mention, embed=embed, view=greeter_view(member.id, roles),
+            # The one ping in the flow: the greeting itself. Mentions in card text ping, so only the newcomer is allowed.
+            await ui.send_card(channel, welcome_card(member, roles),
                                allowed_mentions=discord.AllowedMentions(everyone=False, roles=False, users=[member]))
         except discord.HTTPException as e:
             log.info("Couldn't greet %s in %s: %s", member.id, member.guild.id, e)

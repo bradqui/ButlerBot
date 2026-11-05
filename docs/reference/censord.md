@@ -57,15 +57,15 @@ Arguments:
 
 **Who:** everyone
 
-Displays a dashboard of the current censorship configuration.
+Show the word filter's settings.
 
 Shows:
-- Current global level (Off/Low/High)
-- Current punishment action
-- Threshold settings
-- Channel strategies (Include/Exclude counts)
-- Word list counts
-- Configured Admin Role
+- The server level (off, low or high) and the punishment action
+- The threshold
+- The channel strategy, with the channels on the include and exceptions lists
+- Channels with their own level or action
+- How many entries each word list has
+- The filter admin role
 
 <a id="censord-delword"></a>
 ### !censord delword

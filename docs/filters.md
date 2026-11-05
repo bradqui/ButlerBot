@@ -19,7 +19,7 @@ Messages with a listed word are deleted, and the author gets a short warning (a 
 
 | Command | What it does |
 |---|---|
-| `!censor config` | Dashboard of the current setup. |
+| `!censor config` | The current settings: level, action, threshold, the channels on each list, and channels with their own level or action. |
 | `!censor level <off\|low\|high> [#channel]` | Set the level for the server, or for one channel. |
 | `!censor addword <low\|high> <word>` / `delword` | Add or remove a word. `*` is a wildcard (`bad*` matches "badly"). Without one, only whole words match. ButlerBot deletes your command (if it can) and never repeats the word in its reply. `delword` needs the entry exactly as it was added. |
 | `!censor strategy <mode>` | Watch every channel except some (`exclude`), or only some (`include`). |

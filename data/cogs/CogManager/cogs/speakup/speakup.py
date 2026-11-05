@@ -7,7 +7,8 @@ someone clicks, or posts a small card for things that are clearly useful. Everyt
 
 - Times in chat ("let's play at 9"): a clock reaction; clicking shows the time in everyone's timezone and offers to
   schedule a GameManager session.
-- Steam store links: a card with the price, any sale, who in the server owns it, and Add / Want buttons.
+- Steam store links: a small card with the price, any sale, who in the server owns or wants it, and
+  I own it / Add to wishlist buttons.
 - Article and video links: a page reaction; clicking posts a short summary (Claude's web fetch reads the page).
 - Command mistakes: "Did you mean `!games own Barony`?" with a Run button.
 - Reminders: `[p]remindme 2h check the oven`.
@@ -210,16 +211,63 @@ async def steam_details(appid: int) -> Optional[dict]:
         return None
 
 
-def price_line(details: dict) -> str:
+def price_text(details: dict) -> str:
+    """The price part of a Steam card's first line: `40% off, $17.99`, `$29.99`, `Free to play`."""
     price = details.get("price")
     if details.get("free"):
-        return "🆓 Free to play"
+        return "Free to play"
     if not price:
-        return "🏷️ Not for sale right now"
+        return "Not for sale right now"
     if price.get("discount_percent"):
-        return (f"💸 **{price['discount_percent']}% off**: {price.get('final_formatted')} "
-                f"(was {price.get('initial_formatted')})")
-    return f"💲 {price.get('final_formatted')}"
+        return f"{price['discount_percent']}% off, {price.get('final_formatted')}"
+    return price.get("final_formatted") or "Price unknown"
+
+
+def on_sale(details: dict) -> bool:
+    return bool((details.get("price") or {}).get("discount_percent"))
+
+
+def plain_name(name: str) -> str:
+    """A display name or game title, safe inside card text: no markdown, no working mentions."""
+    return discord.utils.escape_mentions(discord.utils.escape_markdown(name))
+
+
+def name_list(names: List[str], limit: int = 5) -> str:
+    """`Mira`, `Mira and Tor`, `Ana, Mira and Tor`, `Ana, Bo, Cy, Di, Ed and 3 more` (in the order given)."""
+    if len(names) > limit:
+        return ", ".join(names[:limit]) + f" and {len(names) - limit} more"
+    if len(names) == 1:
+        return names[0]
+    return ", ".join(names[:-1]) + " and " + names[-1]
+
+
+def result_text(result) -> str:
+    """
+    GameManager's library helpers answer with an embed today and may answer with text or a card later: turn any of
+    them into plain lines for a private reply.
+    """
+    if isinstance(result, tuple):
+        result = result[0] if result else None
+    if result is None:
+        return ""
+    if isinstance(result, str):
+        return result
+    if isinstance(result, discord.Embed):
+        return "\n".join(p for p in (f"**{result.title}**" if result.title else None, result.description) if p)
+    walk = getattr(result, "walk_children", None)
+    if walk is not None:
+        return "\n".join(i.content for i in walk() if isinstance(i, discord.ui.TextDisplay))
+    return str(result)
+
+
+def walk_components(components):
+    """Every component of a received message, including those nested in cards (containers, sections, rows)."""
+    for component in components or []:
+        yield component
+        yield from walk_components(getattr(component, "children", None))
+        accessory = getattr(component, "accessory", None)
+        if accessory is not None:
+            yield accessory
 
 
 def summary_text(url: str, summary: str, footer: Optional[str] = None) -> str:
@@ -243,9 +291,10 @@ class RemoveButton(discord.ui.DynamicItem[discord.ui.Button], template=r"sp:x:(?
     anyone who can manage messages. (Labeled Remove, not Dismiss: Discord's "Dismiss" only hides things for you.)
     """
 
-    def __init__(self, uid: int):
-        super().__init__(discord.ui.Button(label="Remove", emoji="🗑️", style=discord.ButtonStyle.secondary,
-                                           custom_id=f"sp:x:{uid}"))
+    def __init__(self, uid: int, compact: bool = False):
+        # Icon-only inside cards (the 🗑️ alone is clear there); labeled on plain-text replies.
+        super().__init__(discord.ui.Button(label=None if compact else "Remove", emoji="🗑️",
+                                           style=discord.ButtonStyle.secondary, custom_id=f"sp:x:{uid}"))
         self.uid = uid
 
     @classmethod
@@ -306,13 +355,12 @@ class ScheduleButton(discord.ui.DynamicItem[discord.ui.Button], template=r"sp:sc
 
 
 class SteamButton(discord.ui.DynamicItem[discord.ui.Button], template=r"sp:(?P<action>own|want):(?P<appid>\d+)"):
-    # Grey, like the Remove button next to them: neither is the card's one main action.
-    LOOKS = {"own": ("I own this", "📚", discord.ButtonStyle.secondary),
-             "want": ("I want this", "⭐", discord.ButtonStyle.secondary)}
+    # Grey, like the 🗑️ next to them: neither is the card's one main action. No emoji, to keep the card small.
+    LABELS = {"own": "I own it", "want": "Add to wishlist"}
 
     def __init__(self, action: str, appid: int):
-        label, emoji, style = self.LOOKS[action]
-        super().__init__(discord.ui.Button(label=label, emoji=emoji, style=style, custom_id=f"sp:{action}:{appid}"))
+        super().__init__(discord.ui.Button(label=self.LABELS[action], style=discord.ButtonStyle.secondary,
+                                           custom_id=f"sp:{action}:{appid}"))
         self.action, self.appid = action, appid
 
     @classmethod
@@ -386,6 +434,7 @@ class SpeakUp(commands.Cog):
         self._cooldowns: Dict[tuple, float] = {}
         self._summaries: Dict[int, List[float]] = {}   # user ID -> recent summary times
         self._steam_names: Dict[int, str] = {}
+        self._steam_info: Dict[int, dict] = {}         # app ID -> Steam details, to redraw a card after a click
         self._summary_cache: Dict[str, Tuple[float, str]] = {}   # URL -> (when, summary)
         # Right-click a message → Apps → Summarize link (bot owner: [p]slash enable "Summarize link" message)
         self.summarize_menu = app_commands.ContextMenu(name="Summarize link", callback=self.summarize_from_menu)
@@ -602,13 +651,14 @@ class SpeakUp(commands.Cog):
         ts, author = entry["ts"], channel.guild.get_member(entry["author"])
         name = author.display_name if author else "Someone"
         whose = f"{name}'s timezone" if entry["personal"] else "the server's default timezone"
-        lines = [f"{TIME_EMOJI} **{entry['phrase']}** is {stamp(ts)} ({stamp(ts, 'R')}).",
-                 f"-# Discord shows that in your own timezone. Read in {entry['tz']} ({whose})."]
-        view = discord.ui.View(timeout=None)
+        text = (f"{TIME_EMOJI} **{entry['phrase']}** is {stamp(ts)} ({stamp(ts, 'R')}).\n"
+                + ui.hint(f"Discord shows that in your own timezone. Read in {entry['tz']} ({whose})."))
+        buttons = []
         if self.bot.get_cog("GameManager") is not None and ts > time.time():
-            view.add_item(ScheduleButton(ts))
-        view.add_item(RemoveButton(clicker.id))
-        await channel.send("\n".join(lines), view=view, reference=message.to_reference(fail_if_not_exists=False),
+            buttons.append(ScheduleButton(ts))
+        buttons.append(RemoveButton(clicker.id, compact=True))
+        view = ui.CardView(ui.card(text, buttons, color=ui.BRAND))
+        await channel.send(view=view, reference=message.to_reference(fail_if_not_exists=False),
                            mention_author=False, allowed_mentions=ui.NO_PINGS)
 
     async def schedule_from_time(self, interaction: discord.Interaction, ts: int):
@@ -710,51 +760,71 @@ class SpeakUp(commands.Cog):
             if details is None:
                 continue
             self._steam_names[appid] = details["name"]
-            embed = await self.steam_embed(message.guild, appid, details)
-            view = discord.ui.View(timeout=None)
-            if self.bot.get_cog("GameManager") is not None:
-                view.add_item(SteamButton("own", appid))
-                view.add_item(SteamButton("want", appid))
-            view.add_item(RemoveButton(message.author.id))
-            await message.channel.send(embed=embed, view=view, reference=message.to_reference(fail_if_not_exists=False),
+            self._steam_info[appid] = details
+            view = await self.steam_card(message.guild, appid, details, message.author.id)
+            await message.channel.send(view=view, reference=message.to_reference(fail_if_not_exists=False),
                                        mention_author=False, allowed_mentions=ui.NO_PINGS)
 
-    async def steam_embed(self, guild: discord.Guild, appid: int, details: dict) -> discord.Embed:
-        lines = [price_line(details)]
+    async def steam_card(self, guild: discord.Guild, appid: int, details: dict, remove_uid: int) -> ui.CardView:
+        """
+        The Steam card: the linked name and price on one line, who here owns or wants it under that, and the buttons.
+        No image: Discord's own link preview already shows one. Gold when on sale, blurple otherwise.
+        """
+        title = plain_name(details["name"]).replace("[", "\\[").replace("]", "\\]")
+        text = f"**[{title}]({STEAM_APP_URL.format(appid)})** · {price_text(details)}"
+        buttons = []
         gm = self.bot.get_cog("GameManager")
         if gm is not None:
-            games = await gm.config.guild(guild).games()
-            users = await gm.config.guild(guild).users()
-            key = re.sub(r"[^a-z0-9]", "", details["name"].lower())
-            game = next((g for g in games.values() if g.get("steam_appid") == appid), None) or next(
-                (g for g in games.values() if re.sub(r"[^a-z0-9]", "", g["name"].lower()) == key), None)
-            if game is None:
-                lines.append("📚 Not in the server's game library yet.")
-            else:
-                owners, installed = [], 0
-                for uid, data in users.items():
-                    member = guild.get_member(int(uid))
-                    if member is None:
-                        continue
-                    if game["id"] in data.get("installed", []):
-                        owners.append(member.display_name)
-                        installed += 1
-                    elif game["id"] in data.get("owned", []):
-                        owners.append(member.display_name)
-                if owners:
-                    names = ", ".join(sorted(owners, key=str.lower)[:8]) + (" …" if len(owners) > 8 else "")
-                    lines.append(f"👥 Owned here by **{len(owners)}** ({names}), installed by **{installed}**")
-                else:
-                    lines.append("👥 In the library, but nobody has it yet.")
-            entry = (await gm.config.guild(guild).wishlist()).get(str(appid))
-            fans = [u for u in (entry or {}).get("users", []) if guild.get_member(int(u))]
-            if fans:
-                lines.append(f"⭐ Wanted by **{len(fans)}**")
-        on_sale = bool((details.get("price") or {}).get("discount_percent"))
-        embed = discord.Embed(title=details["name"], url=STEAM_APP_URL.format(appid), description="\n".join(lines),
-                              color=ui.HIGHLIGHT if on_sale else ui.BRAND)
-        embed.set_footer(text="Steam")
-        return embed
+            text += "\n" + ui.hint(await self._steam_people(gm, guild, appid, details["name"]))
+            buttons += [SteamButton("own", appid), SteamButton("want", appid)]
+        buttons.append(RemoveButton(remove_uid, compact=True))
+        return ui.CardView(ui.card(text, buttons, color=ui.HIGHLIGHT if on_sale(details) else ui.BRAND))
+
+    async def _steam_people(self, gm, guild: discord.Guild, appid: int, name: str) -> str:
+        """`Owned by Mira and Tor · wanted by 1`, `Nobody here owns it yet`, or `Wanted by 2 · not in the library`."""
+        games = await gm.config.guild(guild).games()
+        users = await gm.config.guild(guild).users()
+        key = re.sub(r"[^a-z0-9]", "", name.lower())
+        game = next((g for g in games.values() if g.get("steam_appid") == appid), None) or next(
+            (g for g in games.values() if re.sub(r"[^a-z0-9]", "", g["name"].lower()) == key), None)
+        parts = []
+        if game is not None:
+            owners = []
+            for uid, data in users.items():
+                member = guild.get_member(int(uid))
+                if member is not None and (game["id"] in data.get("owned", [])
+                                           or game["id"] in data.get("installed", [])):
+                    owners.append(member.display_name)
+            owners = [plain_name(n) for n in sorted(owners, key=lambda n: (re.sub(r"\W", "", n.lower()), n))]
+            parts.append(f"owned by {name_list(owners)}" if owners else "nobody here owns it yet")
+        entry = (await gm.config.guild(guild).wishlist()).get(str(appid))
+        fans = [u for u in (entry or {}).get("users", []) if guild.get_member(int(u))]
+        if fans:
+            parts.append(f"wanted by {len(fans)}")
+        if game is None:
+            parts.append("not in the library")
+        text = " · ".join(parts)
+        return text[:1].upper() + text[1:]
+
+    async def _refresh_steam_card(self, interaction: discord.Interaction, appid: int):
+        """Redraw a Steam card after an own/want click. Embed cards from before the switch to cards stay as they are."""
+        message = interaction.message
+        details = self._steam_info.get(appid)
+        if not ui.is_card(message) or details is None or interaction.guild is None:
+            return
+        uid = None
+        for component in walk_components(getattr(message, "components", None)):
+            match = re.fullmatch(r"sp:x:(\d+)", getattr(component, "custom_id", None) or "")
+            if match:
+                uid = int(match.group(1))
+                break
+        if uid is None:
+            return
+        try:
+            await message.edit(view=await self.steam_card(interaction.guild, appid, details, uid),
+                               allowed_mentions=ui.NO_PINGS)
+        except discord.HTTPException as e:
+            log.debug("Couldn't refresh a Steam card: %s", e)
 
     async def steam_button(self, interaction: discord.Interaction, action: str, appid: int):
         gm = self.bot.get_cog("GameManager")
@@ -763,9 +833,11 @@ class SpeakUp(commands.Cog):
         await interaction.response.defer(ephemeral=True, thinking=True)
         guild, member = interaction.guild, interaction.user
         name = self._steam_names.get(appid)
-        if name is None:
+        if name is None or appid not in self._steam_info:   # after a restart: look it up (and redraw with it)
             details = await steam_details(appid)
-            name = details["name"] if details else None
+            if details is not None:
+                self._steam_info[appid] = details
+                name = details["name"]
         if name is None:
             return await ui.respond(interaction, ui.line(ui.FAIL, "I couldn't look that game up on Steam. Try again "
                                                                   "in a minute."))
@@ -775,18 +847,24 @@ class SpeakUp(commands.Cog):
             text = (ui.line(ui.DONE, f"Added **{name}** to your wishlist. You'll get a ping when it goes on sale.")
                     if added else ui.line(ui.WARN, f"You already own **{name}**, so it's not on your wishlist.")
                     if have else ui.line(ui.DONE, f"**{name}** is already on your wishlist."))
-            return await ui.respond(interaction, text)
+            await ui.respond(interaction, text)
+            return await self._refresh_steam_card(interaction, appid)
+        # GameManager's text helpers when it has them (older versions answer with an embed): a private reply here.
+        change = getattr(gm, "change_library_text", None) or gm.change_library
+        request = getattr(gm, "request_games_text", None) or gm.request_games
         games = await gm.config.guild(guild).games()
         game = next((g for g in games.values() if g.get("steam_appid") == appid), None)
         if game is not None:
-            embed, _ = await gm.change_library(guild, member, [game["name"]], "own")
+            text = result_text(await change(guild, member, [game["name"]], "own"))
         elif await gm.can_add_games(member):
             await gm.add_games(guild, member, [name], {name: appid})
-            embed, _ = await gm.change_library(guild, member, [name], "own")
-            embed.description = f"➕ **Added to the server library:** {name}\n" + (embed.description or "")
+            text = (ui.line(ui.DONE, f"Added **{name}** to the server library.") + "\n"
+                    + result_text(await change(guild, member, [name], "own")))
         else:
-            embed = await gm.request_games(guild, interaction.channel, member, [name], "own", appids={name: appid})
-        await interaction.followup.send(embed=embed, ephemeral=True)
+            text = result_text(await request(guild, interaction.channel, member, [name], "own",
+                                             appids={name: appid}))
+        await ui.respond(interaction, ui.truncate(text.strip() or ui.line(ui.DONE, "Done."), ui.MESSAGE_LIMIT))
+        await self._refresh_steam_card(interaction, appid)
 
     # ---------- command mistakes ----------
 
@@ -950,10 +1028,10 @@ class SpeakUp(commands.Cog):
                                                   f"`{ctx.clean_prefix}remindme 2h check the oven`."))
         lines = [f"`{r['id']}` · {stamp(r['due'])} ({stamp(r['due'], 'R')}): {ui.truncate(r['text'], 100)}"
                  for r in mine]
-        embed = discord.Embed(title="⏰ Your reminders", description=ui.truncate("\n".join(lines), 4000),
-                              color=ui.BRAND)
-        embed.set_footer(text=f"{ctx.clean_prefix}reminders cancel <id> · {ctx.clean_prefix}reminders clear")
-        await ctx.send(embed=embed, allowed_mentions=ui.NO_PINGS)
+        p = ctx.clean_prefix
+        view = ui.CardView(ui.card(ui.truncate("\n".join(lines), 3600), title="⏰ Your reminders", color=ui.BRAND,
+                                   footer=f"`{p}reminders cancel <id>` · `{p}reminders clear`"))
+        await ui.send_card(ctx, view)   # ping-free (send_card's default): reminder text can hold mentions
 
     @reminders.command(name="cancel", aliases=["delete", "remove"])
     async def reminders_cancel(self, ctx: commands.Context, reminder_id: str):
@@ -1032,12 +1110,15 @@ class SpeakUp(commands.Cog):
         conf = await self.config.guild(ctx.guild).all()
         p = ctx.clean_prefix
         quiet = ctx.channel.id in conf["quiet_channels"]
-        lines = [f"{ui.TICK if conf['features'].get(k, True) else ui.UNTICK} {label}" for k, label in FEATURES.items()]
-        lines += ["", f"**This channel:** {'quiet' if quiet else 'on'} · **You:** "
-                      f"{'opted out' if await self.config.user(ctx.author).opted_out() else 'on'}", "",
-                  f"`{p}speakup me off` stops it for your messages · `{p}speakup off` quiets this channel (mods)",
-                  f"`{p}speakup feature <{'|'.join(FEATURES)}> <on|off>` (admins)"]
-        await ctx.send(embed=discord.Embed(title="🗣️ Speaking up", description="\n".join(lines), color=ui.BRAND))
+        opted_out = await self.config.user(ctx.author).opted_out()
+        features = ui.settings_text([(label, conf["features"].get(k, True)) for k, label in FEATURES.items()])
+        here = ui.settings_text([("This channel", "Quiet" if quiet else "On"),
+                                 ("Your messages", "Opted out" if opted_out else "On")])
+        footer = (f"`{p}speakup me off` stops it for your messages · `{p}speakup off` quiets this channel (mods)\n"
+                  f"`{p}speakup feature <{'|'.join(FEATURES)}> <on|off>` (admins)")
+        view = ui.CardView(ui.card(features, here, ui.SEPARATOR, title="🗣️ SpeakUp settings", color=ui.BRAND,
+                                   footer=footer))
+        await ui.send_card(ctx, view)
 
     @speakup.command(name="off")
     @checks.mod_or_permissions(manage_channels=True)

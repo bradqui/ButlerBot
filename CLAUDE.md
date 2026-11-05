@@ -203,6 +203,28 @@ Rules for using them:
 
 AI answers, adventure narration and butler replies stay plain text, split with `split_text()` (never by slicing).
 
+**Building cards** (`butlerui`):
+- **`card(*parts, title, color, footer, thumbnail)`** builds a `discord.ui.Container`. Parts can be:
+  - strings, which become text blocks;
+  - `SEPARATOR`;
+  - lists of buttons or selects, which become action rows (five buttons to a row, each select on its own row);
+  - any `discord.ui` item.
+
+  The title is rendered as a `### ` heading. The footer becomes a `-#` hint.
+- **`CardView(card(...))`** is a `LayoutView`. Subclasses override `build()` and call `redraw()`.
+- **`ExpiringCard(owner_id, …)`** is the card version of `ExpiringView`. It has an owner check, and on timeout it disables its items and adds a note line. Link buttons stay live.
+- **`settings_text([(name, value)])`** writes `**Name** · value` rows, with On/Off for booleans.
+- **`send_card(target, view, ephemeral=…, reply_to=…)`** sends to a Context, channel, user or interaction.
+- **`is_card(message)`** tells you whether a message is a card.
+
+Rules for card messages:
+- **They can't have content or embeds**, and Discord never lets a message switch back. Persistent features switch for new messages only, and their handlers must check `is_card(interaction.message)` and edit older embed messages the old way.
+- **Mentions in card text DO ping**, unlike embeds. `send_card` therefore defaults to `NO_PINGS`; pass `allowed_mentions` explicitly for a deliberate ping.
+- **Size limits:** 40 components per message, and roughly 4,000 characters of text.
+- **Persistent buttons:** `DynamicItem` buttons work inside a card's action rows.
+- **Settings cards** are titled "<topic emoji> <feature> settings", in `BRAND`. The body is `settings_text` rows, with optional bold group headings. A separator comes next, then a footer hint naming the change commands, plus "Staff only" when only staff can see the card.
+- **Tests:** the harness's `card_text(msg)`, `card_buttons(msg)` and `card_color(msg)` read card messages, and fake messages get `flags.components_v2` when they carry one.
+
 **Buttons:**
 - Labels are a verb of three words or fewer. Put emoji on every button in a row or on none; icon-only buttons are fine for 🗑️ and ◀ ▶.
 - Blurple (primary) is for the one main action. Grey is for everything else, Cancel and Keep included. Red is only for the confirm step of something destructive, and green isn't used for ordinary buttons.
@@ -221,7 +243,7 @@ AI answers, adventure narration and butler replies stay plain text, split with `
 
 **Phase 1 per-cog notes (2026-11-04):**
 - **GameManager:**
-  - `OwnerOnlyView` subclasses `ui.ExpiringView`, and each menu sets its own `expired_note` (for example "Expired. Nothing was saved.").
+  - Each menu sets its own `expired_note` (for example "Expired. Nothing was saved."). Menus are `OwnerOnlyCard` since Phase 2.
   - Installed games are marked 💾 (`INSTALLED`). `prefix(guild)` feeds `cmd()`.
   - Host and admin refusals, including `game_admin()`, are 🔒. ⚠️ means "already that way", and ➖ only means removed.
   - Session buttons: Join is primary and the rest are grey. Vote options are grey, and Approve is primary.
@@ -244,6 +266,34 @@ AI answers, adventure narration and butler replies stay plain text, split with `
   - `addword`/`delword` delete the command when they can, never repeat the word, and report honestly; `_update_csv` returns whether the list changed.
   - `threshold` values must be at least 1.
   - The "watch your language" warning mentions the person without pinging them.
+
+**Phase 2 per-cog notes (cards, 2026-11-05):**
+- **GameManager:**
+  - **Card messages.** Sessions, votes, requests, install requests, sale alerts, free Epic games, the settings card ("🎮 Game night settings") and every menu are cards. New records store `"card": True`, and `_edit_record()` edits cards as cards and older records with the old embed and View.
+    - The legacy helpers `session_embed`, `vote_embed`, `session_view`, `vote_view` and `request_view` remain only for old messages.
+    - `_drop_buttons()` strips buttons from old embeds only.
+    - Votes store `labels` so redraws can rebuild their buttons.
+  - **Builders.** Card builders are `session_card`, `vote_card` and `request_card`. `pings(ids)` makes a users-only `AllowedMentions` (up to 100 people) for the vote, sale and install cards, which still ping the same people as before.
+  - **Menus.** Menus build on `OwnerOnlyCard(ui.ExpiringCard)`, which replaced `OwnerOnlyView`.
+    - Every final state goes through `final_card()`, because a card can't turn back into text.
+    - `ConfirmView(user_id, text, label, title=)` and `NameCheckView(user_id, plural, text)` have new signatures, and the picker's `embed()` is now `text()`.
+  - **Results.** Library and request results are plain lines: `change_library_text()` and `request_games_text()`. The embed versions `change_library()` and `request_games()` remain as compatibility wrappers.
+  - **Still as before.** `send_list` lists stay embeds until Phase 3. The plain-text announcements and pings stay until Phase 4.
+- **SpeakUp:**
+  - The Steam card comes from `steam_card(guild, appid, details, remove_uid)`. Clicks redraw card messages only (`_refresh_steam_card`), which reads the Remove owner back from `message.components`. Details are cached in `_steam_info`.
+  - SpeakUp prefers GameManager's `*_text` helpers (`result_text()` handles every shape).
+  - Inside cards, `RemoveButton(uid, compact=True)` is icon-only.
+  - The time answer, `!speakup` settings and `!reminders` are cards. Summaries and the mistake suggestion stay text.
+- **ActivityStats:** the `!stats admin` menu and settings are 📊 cards marked "Staff only". Reports and the digest stay embeds until Phase 3.
+- **ButtonGreeter:** `welcome_card(member, roles)` and `rules_card(member, rules)`. The welcome card is the only card sent with a ping (just the newcomer).
+- **Censord:** the `censor config` card lists channels by name and shows per-channel overrides.
+- **Handbook:** every help reply is a card from `_send_card`, with link buttons inside.
+  - `fit_lines()` keeps command lists under about 3,400 characters, ending with "…and N more".
+  - If Discord rejects a card, the ❌ fallback line is sent instead.
+  - The export format is unchanged.
+- **Claude:** `!claude settings`, `models` and `usage` are cards. Usage for another member, and the server totals, carry "Staff only". The persona is shown in full only by `!claude persona`, as text.
+- **Gemini:** `!gemini settings` is the "🎨 Image settings" card. `!gemini list` sends one card per 3,500 characters.
+- **Tests:** the scratchpad harness checks every card sent or edited against Discord's limits. Problems print as `LAYOUT PROBLEMS` at the end of a run.
 
 ## Secrets (never print, log, or copy out)
 

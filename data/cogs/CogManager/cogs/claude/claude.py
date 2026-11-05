@@ -1905,32 +1905,38 @@ class ClaudeChat(commands.Cog):
     @claude.command(name="settings")
     async def claude_settings(self, ctx: commands.Context):
         """Show the current Claude settings for you, this channel, and this server."""
+        p = ctx.clean_prefix
         g = await self.config.guild(ctx.guild).all()
-        persona = g["persona"] or f"*Default:* {g['default_persona'] or DEFAULT_PERSONA}"
-        if len(persona) > 300:
-            persona = persona[:300] + "…"
+        # A one-line preview: the whole persona is `[p]claude persona`.
+        persona = " ".join((g["persona"] or g["default_persona"] or DEFAULT_PERSONA).split())
+        persona = ui.truncate(persona, 200) + ("" if g["persona"] else " *(default)*")
         channel = ctx.channel.parent if isinstance(ctx.channel, discord.Thread) and ctx.channel.parent else ctx.channel
-        embed = discord.Embed(title="🤖 AI chat settings", color=ui.BRAND)
-        embed.add_field(name="Models", value=(
-            f"**Your private chats:** {self._model_label(await self._model_for(f'USER_{ctx.author.id}', ctx.author, ctx.channel))}\n"
-            f"**This channel:** {self._model_label(await self._model_for('CHANNEL', ctx.author, channel))}\n"
-            f"**Bot default:** {self._model_label(await self.config.default_model())}"
-        ), inline=False)
-        embed.add_field(name="Server", value=(
-            f"**Web search:** {'On' if g['web_search'] else 'Off'}\n"
-            f"**@mention asks the guide:** {'On' if g['guide_mentions'] else 'Off'}\n"
-            f"**Guide runs commands for people:** {'On' if g['guide_actions'] else 'Off'}\n"
-            f"**Guide hands other questions to the AI chat:** {'On' if g['guide_handoff'] else 'Off'}\n"
-            f"**Daily limit:** {g['daily_limit'] or 'Unlimited'} messages per user\n"
-            f"**Persona:** {persona}"
-        ), inline=False)
-        embed.add_field(name="Bot-wide", value=(
-            f"**Effort:** {await self.config.effort()}\n"
-            f"**Memory:** last {await self.config.max_history()} messages, "
-            f"resets after {await self.config.idle_minutes()} idle minutes\n"
-            f"**Butler (`{ctx.clean_prefix}butler`):** {self._model_label(await self.config.guide_model())}"
-        ), inline=False)
-        await ctx.send(embed=embed)
+        models = ui.settings_text([
+            ("Your private chats", self._model_label(await self._model_for(f"USER_{ctx.author.id}", ctx.author,
+                                                                           ctx.channel))),
+            ("This channel", self._model_label(await self._model_for("CHANNEL", ctx.author, channel))),
+            ("Bot default", self._model_label(await self.config.default_model())),
+        ])
+        server = ui.settings_text([
+            ("Web search", g["web_search"]),
+            ("@mention asks the butler", g["guide_mentions"]),
+            ("Butler runs commands for people", g["guide_actions"]),
+            ("Butler hands other questions to the AI chat", g["guide_handoff"]),
+            ("Daily limit", f"{ui.plural(g['daily_limit'], 'message')} per person" if g["daily_limit"]
+             else "Unlimited"),
+            ("Persona", persona),
+        ])
+        bot_wide = ui.settings_text([
+            ("Effort", await self.config.effort()),
+            ("Memory", f"last {await self.config.max_history()} messages, resets after "
+                       f"{await self.config.idle_minutes()} idle minutes"),
+            (f"Butler (`{p}butler`)", self._model_label(await self.config.guide_model())),
+        ])
+        container = ui.card(
+            "**Models**\n" + models, "**This server**\n" + server, "**Bot-wide**\n" + bot_wide, ui.SEPARATOR,
+            title="🤖 AI chat settings", color=ui.BRAND,
+            footer=f"Change with {p}claude channelmodel, websearch, limit or persona · {p}help claude lists them all")
+        await ui.send_card(ctx, ui.CardView(container))
 
     @claude.command(name="models")
     async def claude_models(self, ctx: commands.Context):
@@ -1944,9 +1950,11 @@ class ClaudeChat(commands.Cog):
                 f"{status} **{info.name}** (`{alias_for.get(model, model)}`): ${info.input:g} in / ${info.output:g} out "
                 f"per 1M tokens{'' if info.web_search else ', no web search'}"
             )
-        lines.append(ui.hint(f"{ui.TICK} = admins (for their private chats) and channel managers can choose it. "
-                             "The bot owner manages the list."))
-        await ctx.send("\n".join(lines))
+        container = ui.card(
+            "\n".join(lines), ui.SEPARATOR, title="🤖 AI models", color=ui.BRAND,
+            footer=f"{ui.TICK} = admins (for their private chats) and channel managers can choose it. "
+                   "The bot owner manages the list.")
+        await ui.send_card(ctx, ui.CardView(container))
 
     @claude.command(name="mymodel")
     @checks.admin_or_permissions(manage_guild=True)
@@ -2220,26 +2228,29 @@ class ClaudeChat(commands.Cog):
         if member is not None and member != ctx.author and not is_admin:
             return await ctx.send("🔒 You can only view your own usage.")
 
-        def describe(u: dict) -> str:
-            return (
-                f"**Requests:** {humanize_number(u['requests'])} · **Web searches:** {humanize_number(u['searches'])}\n"
-                f"**Tokens:** {humanize_number(u['input'])} in · {humanize_number(u['output'])} out · "
-                f"{humanize_number(u['cache_read'])} cache read · {humanize_number(u['cache_write'])} cache write\n"
-                f"**Estimated cost:** ${u['cost']:.2f}"
-            )
+        def describe(u: dict) -> List[Tuple[str, str]]:
+            return [
+                ("Requests", humanize_number(u["requests"])),
+                ("Web searches", humanize_number(u["searches"])),
+                ("Tokens", f"{humanize_number(u['input'])} in · {humanize_number(u['output'])} out · "
+                           f"{humanize_number(u['cache_read'])} cache read · "
+                           f"{humanize_number(u['cache_write'])} cache write"),
+                ("Estimated cost", f"${u['cost']:.2f}"),
+            ]
 
+        prices = "Estimates from published API prices"
         if member is not None or not is_admin:
             target = member or ctx.author
             usage = await self.config.member(target).usage()
             daily = await self.config.member(target).daily()
             today = daily["count"] if daily["date"] == utc_today() else 0
-            embed = discord.Embed(title=f"🤖 AI usage: {target.display_name}", color=ui.BRAND)
-            embed.description = describe(usage) + f"\n**Messages today:** {today}"
-            return await ctx.send(embed=embed)
+            footer = prices + (" · Staff only" if target != ctx.author else "")
+            container = ui.card(ui.settings_text(describe(usage) + [("Messages today", humanize_number(today))]),
+                                ui.SEPARATOR, title=f"🤖 AI usage: {target.display_name}", color=ui.BRAND,
+                                footer=footer)
+            return await ui.send_card(ctx, ui.CardView(container))
 
         g = await self.config.guild(ctx.guild).all()
-        embed = discord.Embed(title=f"🤖 AI usage: {ctx.guild.name}", color=ui.BRAND)
-        embed.description = describe(g["usage"])
         members = await self.config.all_members(ctx.guild)
         top = sorted(members.items(), key=lambda kv: kv[1]["usage"]["cost"], reverse=True)[:10]
         lines = []
@@ -2247,12 +2258,13 @@ class ClaudeChat(commands.Cog):
             if data["usage"]["requests"] == 0:
                 continue
             m = ctx.guild.get_member(user_id)
-            name = m.display_name if m else f"User {user_id}"
+            name = m.display_name if m else "Someone who left"
             lines.append(f"{name}: ${data['usage']['cost']:.2f} ({ui.plural(data['usage']['requests'], 'request')})")
-        if lines:
-            embed.add_field(name="Top users", value="\n".join(lines), inline=False)
-        embed.set_footer(text=f"Since {g['usage_since'] or 'n/a'} · Estimates from published API prices")
-        await ctx.send(embed=embed)
+        container = ui.card(
+            ui.settings_text(describe(g["usage"])), ("**Top users**\n" + "\n".join(lines)) if lines else None,
+            ui.SEPARATOR, title=f"🤖 AI usage: {ctx.guild.name}", color=ui.BRAND,
+            footer=f"Since {g['usage_since'] or 'the start'} · {prices} · Staff only")
+        await ui.send_card(ctx, ui.CardView(container))
 
     @claude.command(name="resetusage")
     @checks.admin_or_permissions(manage_guild=True)

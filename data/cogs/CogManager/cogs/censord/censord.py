@@ -316,40 +316,64 @@ class Censord(commands.Cog):
     @censord.command()
     async def config(self, ctx):
         """
-        Displays a dashboard of the current censorship configuration.
+        Show the word filter's settings.
 
         Shows:
-        - Current global level (Off/Low/High)
-        - Current punishment action
-        - Threshold settings
-        - Channel strategies (Include/Exclude counts)
-        - Word list counts
-        - Configured Admin Role
+        - The server level (off, low or high) and the punishment action
+        - The threshold
+        - The channel strategy, with the channels on the include and exceptions lists
+        - Channels with their own level or action
+        - How many entries each word list has
+        - The filter admin role
         """
-        settings = await self.config.guild(ctx.guild).all()
+        guild = ctx.guild
+        settings = await self.config.guild(guild).all()
 
-        embed = discord.Embed(title="🛡️ Censord settings", color=ui.BRAND)
+        def channel_list(ids) -> str:
+            names = [f"<#{cid}>" for cid in ids if guild.get_channel(cid)]
+            gone = len(ids) - len(names)
+            if gone:
+                names.append(f"{ui.plural(gone, 'deleted channel')}")
+            return ", ".join(names) or "none"
 
-        embed.add_field(name="Server level", value=settings["global_level"].capitalize(), inline=True)
-        embed.add_field(name="Action", value=settings["action"].capitalize(), inline=True)
-        embed.add_field(name="Strategy", value=settings["strategy"].capitalize(), inline=True)
+        role = guild.get_role(settings["admin_role"]) if settings["admin_role"] else None
+        main = ui.settings_text([
+            ("Server level", settings["global_level"].capitalize()),
+            ("Action", settings["action"].capitalize()),
+            ("Threshold", f"{ui.plural(settings['threshold_count'], 'message')} in "
+                          f"{ui.plural(settings['threshold_time'], 'second')}"),
+            ("Word lists", f"{len(self.word_lists['low'])} low, {len(self.word_lists['high'])} high"),
+            ("Admin role", role.mention if role else "none (Manage Server only)"),
+        ])
+        strategy = settings["strategy"]
+        channels = ui.settings_text([
+            ("Strategy", "Include: only the include list is watched" if strategy == "include"
+             else "Exclude: every channel except the exceptions is watched"),
+            ("Include list", channel_list(settings["included_channels"])),
+            ("Exceptions", channel_list(settings["excluded_channels"])),
+        ])
 
-        embed.add_field(name="Threshold", inline=False,
-                        value=f"{ui.plural(settings['threshold_count'], 'message')} in "
-                              f"{ui.plural(settings['threshold_time'], 'second')}")
+        overrides = []
+        for channel in guild.text_channels:
+            data = await self.config.channel(channel).all()
+            parts = [f"level {data['override_level']}" if data["override_level"] else None,
+                     f"action {data['override_action']}" if data["override_action"] else None]
+            if any(parts):
+                overrides.append(f"{channel.mention} · " + ", ".join(p for p in parts if p))
+        override_text = ui.truncate("\n".join(overrides), 1500) if overrides else "None"
 
-        inc = len(settings["included_channels"])
-        exc = len(settings["excluded_channels"])
-        embed.add_field(name="Channels", value=f"Included: {inc}\nExcluded: {exc}", inline=True)
-
-        embed.add_field(name="Word lists", inline=True,
-                        value=f"Low: {len(self.word_lists['low'])}\nHigh: {len(self.word_lists['high'])}")
-
-        role_id = settings["admin_role"]
-        role_name = ctx.guild.get_role(role_id).mention if role_id and ctx.guild.get_role(role_id) else "None"
-        embed.add_field(name="Admin role", value=role_name, inline=False)
-
-        await ctx.send(embed=embed, allowed_mentions=ui.NO_PINGS)
+        p = f"{await self._prefix(ctx)}censor"
+        view = ui.CardView(ui.card(
+            main,
+            f"**Channels**\n{channels}",
+            f"**Channel overrides**\n{override_text}",
+            ui.SEPARATOR,
+            title="🛡️ Word filter settings",
+            color=ui.BRAND,
+            footer=f"`{p} level` · `{p} action` · `{p} threshold` · `{p} strategy` · `{p} includechan` · "
+                   f"`{p} exceptchan` · `{p} setrole`\nStaff only",
+        ))
+        await ui.send_card(ctx, view)   # ping-free: the role mention only shows the role
 
     @censord.command()
     async def level(self, ctx, level: str, channel: discord.TextChannel = None):

@@ -9,7 +9,6 @@ import discord
 from google import genai
 from google.genai import types
 from redbot.core import commands, Config, checks
-from redbot.core.utils.chat_formatting import pagify
 
 log = logging.getLogger("red.gemini")
 
@@ -257,17 +256,28 @@ class GeminiChat(commands.Cog):
             return await ctx.send(ui.line(ui.FAIL, "I couldn't get the model list from Google. Try again in a minute."))
         if not models:
             return await ctx.send(ui.line(ui.ASK, "Google didn't list any image models."))
-        msg = ("🎨 **Image models**\n" + ", ".join(f"`{m}`" for m in models) + "\n"
-               + ui.hint("Shortcuts: " + ", ".join(f"{a} = {m}" for a, m in self.model_aliases.items())))
-        for page in pagify(msg):
-            await ctx.send(page)
+        # A card holds about 4,000 characters of text, so a long list goes over several cards.
+        pages = ui.split_text(", ".join(f"`{m}`" for m in models), 3500)
+        shortcuts = "Shortcuts: " + ", ".join(f"{a} = {m}" for a, m in self.model_aliases.items())
+        for i, page in enumerate(pages):
+            title = "🎨 Image models" + (f" ({i + 1}/{len(pages)})" if len(pages) > 1 else "")
+            last = i == len(pages) - 1
+            container = ui.card(page, ui.SEPARATOR if last else None, title=title, color=ui.BRAND,
+                                footer=shortcuts if last else None)
+            await ui.send_card(ctx, ui.CardView(container))
 
     @gemini.command(name="settings")
     async def show_settings(self, ctx):
         """Show the image models used for you and this channel."""
         u_img = await self.config.user(ctx.author).image_model()
         c_img = await self.config.channel(ctx.channel).image_model()
-        await ctx.send(f"**👤 Private (`{ctx.clean_prefix}myai draw …`):** `{u_img}`\n**📺 This channel:** `{c_img}`")
+        p = ctx.clean_prefix
+        container = ui.card(
+            ui.settings_text([(f"Your private requests (`{p}myai draw …`)", f"`{u_img}`"),
+                              ("This channel", f"`{c_img}`")]),
+            ui.SEPARATOR, title="🎨 Image settings", color=ui.BRAND,
+            footer=f"Change with {p}gemini model or {p}gemini channelmodel · {p}gemini list shows the models")
+        await ui.send_card(ctx, ui.CardView(container))
 
     async def _check_model(self, ctx, model_name: str):
         """

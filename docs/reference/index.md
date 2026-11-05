@@ -40,7 +40,7 @@ Right-click a message (long-press on mobile) → **Apps**. Only you see the resu
 | [Downloader]({{ '/reference/downloader/' | relative_url }}) | Install community cogs made by Cog Creators. | 1 |
 | [EasyTranslate]({{ '/reference/easytranslate/' | relative_url }}) | Translate messages using Google Translate for free. Supports context menu commands. | 3 |
 | [Filter]({{ '/reference/filter/' | relative_url }}) | This cog is designed for "filtering" unwanted words and phrases from a server. | 14 |
-| [GameManager]({{ '/reference/gamemanager/' | relative_url }}) | Track the games your server owns, find something everyone can play, and vote on it. | 51 |
+| [GameManager]({{ '/reference/gamemanager/' | relative_url }}) | Track the games your server owns, find something everyone can play, and vote on it. | 62 |
 | [GeminiChat]({{ '/reference/geminichat/' | relative_url }}) | Image generation with Google Gemini. | 6 |
 | [General]({{ '/reference/general/' | relative_url }}) | General commands. | 9 |
 | [Handbook]({{ '/reference/handbook/' | relative_url }}) | The online handbook, short help cards, and the generated command reference. | 1 |

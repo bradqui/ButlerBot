@@ -95,8 +95,8 @@ COG_NAMES = {
 }
 # The footer hint on help cards: one thing (the butler is the AI chat now, and the home card mentions it).
 HELP_FOOTER = "`{p}help <command>` for details"
-GAME_NIGHT_COMMANDS = {"session", "sessions", "endsession", "sessionvote", "results", "endvote", "recurring", "lfg",
-                       "shared", "installed", "top"}
+GAME_NIGHT_COMMANDS = {"session", "sessions", "join", "leave", "here", "endsession", "sessionvote", "results",
+                       "endvote", "recurring", "lfg", "shared", "installed", "top"}
 # Right-click options have no help text of their own: (description, handbook topic) for the reference.
 CONTEXT_MENU_HELP = {
     "Summarize link": ("A three-line summary of the article or video linked in the message.", "speakup/"),
@@ -316,7 +316,8 @@ class Handbook(commands.Cog):
         name = cog.qualified_name.lower()
         if name == "gamemanager" and command is not None:
             parts = command.qualified_name.split()
-            return "games/nights/" if len(parts) > 1 and parts[1] in GAME_NIGHT_COMMANDS else "games/library/"
+            nights = parts[0] in ("session", "sessions") or (len(parts) > 1 and parts[1] in GAME_NIGHT_COMMANDS)
+            return "games/nights/" if nights else "games/library/"
         return COG_TOPICS.get(name)
 
     async def reference_url(self, cog: Optional[commands.Cog], command: Optional[commands.Command] = None) -> str:

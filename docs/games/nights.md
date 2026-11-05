@@ -24,12 +24,25 @@ Or just ask: `!butler what do Alex, Sam and I all have installed?`
 A session is a post people join with a button. Start one now, or schedule it:
 
 ```
-!games session                          starts now
-!games session Raid night               with a title
-!games session friday 9pm Raid night    scheduled
-!games session in 2h Rocket League
-!games session tomorrow 8:30pm
+!session new                            starts now
+!session new Raid night                 with a title
+!session new friday 9pm Raid night      scheduled
+!session new in 2h Rocket League
+!session new tomorrow 8:30pm
 ```
+
+**The session commands at a glance:**
+
+| Command | What it does |
+|---|---|
+| `!session` | Brings this channel's session card down to you. |
+| `!session new [time] [title]` | Starts a session. |
+| `!session join [name]` / `!session leave [name]` | Join or leave without finding the card. Add its name if there's more than one. |
+| `!session vote [picks] [time]` | Starts the vote (host or game admin). |
+| `!session end [name]` | Ends it (host or game admin). |
+| `!sessions` | Lists the active sessions, with links to their cards. |
+
+These are short for the `!games …` versions (`!games session`, `!games join`, `!games here`, …), which work too.
 
 **Times:**
 - Times are read in your timezone (`!games timezone`), and everyone sees them in their own.
@@ -38,9 +51,15 @@ A session is a post people join with a button. Start one now, or schedule it:
 **What happens next:**
 - The post is a card that shows the start time (in everyone's own timezone) and who's playing. Players press **Join** (or **Leave**).
 - The whole game night happens in that one card: the vote and its result show up in it too, so there's one place to look.
-- Everyone who joined gets a short ping 15 minutes before and another at the start. Each ping is one line with a link back to the card.
+- Everyone who joined gets a ping 15 minutes before and another at the start. If the card is still in view, the ping is one line with a link back to it.
 - If you haven't set a timezone, the card says which one your time was read in, with how to fix it.
 - Sessions end on their own 12 hours after they start. An ended session's card turns grey and loses its buttons, and its pings are cleaned up.
+
+**When chatter buries the card:**
+- The card moves itself to the bottom of the channel for the 15-minute reminder, the start and a vote, and pings players there instead of in a separate line. It only moves once it has 10 or more messages below it.
+- `!session` (or `!games here`) brings it down any time, once a minute per channel. Add the session's name if the channel has more than one: `!session here Raid night`.
+- `!session join` and `!session leave` work without the card. With more than one session around, add its name: `!session join Raid night`.
+- The slash versions (`/games join`, `/games leave`, `/games here`) answer just to you and list the sessions as you type.
 
 **Discord events:**
 - Scheduled sessions also show up in the server's **Events** list.
@@ -52,8 +71,8 @@ A session is a post people join with a button. Start one now, or schedule it:
 ### Weekly game nights
 
 ```
-!games session every friday 9pm Raid night
-!games session every other sunday 8pm
+!session new every friday 9pm Raid night
+!session new every other sunday 8pm
 ```
 
 **How they work:**
@@ -69,8 +88,8 @@ A session is a post people join with a button. Start one now, or schedule it:
 When everyone's in, the host presses **Start vote** on the session, or runs:
 
 ```
-!games vote               1 pick each, 2 minutes
-!games vote 2 3m          2 picks each, 3 minutes
+!session vote             1 pick each, 2 minutes
+!session vote 2 3m        2 picks each, 3 minutes
 ```
 
 **The options:** games everyone has installed. If there are none, games everyone owns; failing that, games at least two players have installed.
@@ -88,10 +107,10 @@ When everyone's in, the host presses **Start vote** on the session, or runs:
 |---|---|
 | `!games results [vote id]` | The tally so far. |
 | `!games endvote [vote id]` | End now and announce the winner. |
-| `!games sessions` | Active sessions, with links. |
-| `!games endsession [session id]` | End your latest session here (host or game admin). |
+| `!sessions` | Active sessions, with links. |
+| `!session end [name]` | End your latest session here, or one by name (host or game admin). |
 
-The IDs are optional: without one, these use the latest vote or session in the channel. `!games sessions` lists session IDs.
+The IDs are optional: without one, these use the latest vote in the channel.
 
 {: .staff }
 > **Game admins:**

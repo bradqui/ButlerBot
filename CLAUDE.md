@@ -93,7 +93,16 @@ Quirks to know:
   - **Background loops:**
     - `session_loop` (every minute) sends reminders and start pings, ends sessions 12 h after start or creation, and posts recurring sessions `RECURRING_POST_HOURS` (24) ahead.
     - `sale_loop` (every 6 h) refreshes wishlist prices and posts sale and free-game alerts.
-  - **Posting sessions:** `create_session` only parses input; `post_session` posts the message and creates the Discord event. Recurring schedules (guild `recurring`) use `post_session` too.
+  - **Posting sessions:** `create_session` only parses input; `post_session` posts the message and creates the Discord event.
+  - **Buried cards (2026-11-05):**
+    - **Moving a card:** `move_session_card(guild, session, ping_ids=)` reposts the card at the bottom and deletes the old one. It also deletes the old ping lines and the in-card vote's `ping_id`. It updates the session's and in-card vote's `message_id`, and `_relink_event` fixes the event description's link. A per-session lock (`_move_locks`) stops a card moving twice at once. An embed session from before cards comes back as a card.
+    - **Automatic moves:** `announce()` (the reminder, the start, and the vote via `start_vote`) moves the card instead of sending a ping line when `_buried()` finds at least `BURIED_AFTER` (10) messages below it. The moved card pings the players, since it names them.
+    - **On request:** `games here` / `/games here` (`bring_here`) moves the latest session in the channel, at most once per `HERE_COOLDOWN` (60 s) per channel.
+    - **Join and leave by command:** `games join` / `games leave` and the slash versions call `join_or_leave`. `pick_session` resolves the session: by title or ID, else the only one in the channel or the server. The slash commands' session autocomplete gives the ID. `set_membership` is the shared join/leave logic for these commands and the card's buttons.
+    - **Shortcuts:** top-level `!session` (group) and `!sessions` are short for the `games` session commands. `!session` alone runs `bring_here`. Its subcommands are `new` (aliases `create`/`host`), `join`, `leave`, `here`, `vote` and `end`.
+      - Starting needs `new`, because a title like "join the raid" would otherwise read as a subcommand.
+      - The group's catch-all `words` argument (hidden with `usage=""`) means SpeakUp treats a stray word as an argument and stays quiet; the group answers with its own "add `new`" hint instead.
+      - Handbook's `topic_for` maps both to the Game nights page. Recurring schedules (guild `recurring`) use `post_session` too.
     - A schedule stores weekday, hour, minute, `interval` (7 or 14), the host's timezone name and `next_start`. `advance_occurrence` rebuilds the local time each time, so daylight saving changes don't shift it. Input starting with `every`/`weekly` goes to `create_recurring`.
   - **Discord events:** `create_event` makes an external event (the location is the text channel, ending after `EVENT_LENGTH_HOURS`), or a voice event if `event_channel` is set. It needs Manage Events.
     - `update_event` starts it at the start ping and ends or cancels it in `end_session`.

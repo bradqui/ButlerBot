@@ -58,6 +58,8 @@ MAX_VOTE_SECONDS = 3600
 MAX_VOTE_OPTIONS = 20           # four rows of five buttons
 REMINDER_MINUTES = 15           # heads-up ping before a scheduled session
 SESSION_EXPIRE_HOURS = 12       # sessions end on their own this long after starting (or being created)
+BURIED_AFTER = 10               # messages below a session card before it counts as scrolled away (and moves down)
+HERE_COOLDOWN = 60              # seconds between `games here` moves in one channel
 LFG_COOLDOWN_SECONDS = 300
 PICKER_PAGE_SIZE = 25           # Discord's limit for one select menu
 LIST_TIMEOUT = 900              # seconds a list board can be paged before its buttons grey out
@@ -1361,6 +1363,8 @@ class GameManager(commands.Cog):
         self.config.register_user(timezone=None)
         self.vote_tasks: Dict[str, asyncio.Task] = {}
         self._lfg_last: Dict[Tuple[int, int], float] = {}
+        self._move_locks: Dict[str, asyncio.Lock] = {}   # session ID -> lock, so a card never moves twice at once
+        self._here_last: Dict[int, float] = {}            # channel ID -> when `games here` last moved a card
         self._resume_task: Optional[asyncio.Task] = None
 
     async def cog_load(self):
@@ -2884,23 +2888,9 @@ class GameManager(commands.Cog):
             return
 
         if action in ("join", "leave"):
-            async with sessions_conf() as sessions:
-                session = sessions.get(sid)
-                if session is None:
-                    return await ui.respond(interaction, "⚠️ This session has ended.")
-                players = session["participants"]
-                if action == "join":
-                    if uid in players:
-                        return await ui.respond(interaction, "⚠️ You're already in.")
-                    players.append(uid)
-                else:
-                    if uid == session["host_id"]:
-                        return await ui.respond(interaction,
-                                                "❌ You're the host, so you can't leave. Press **End session** instead.")
-                    if uid not in players:
-                        return await ui.respond(interaction, "⚠️ You haven't joined.")
-                    players.remove(uid)
-                session = dict(session)
+            feedback, session = await self.set_membership(guild, sid, member, action == "join")
+            if session is None:
+                return await ui.respond(interaction, feedback)
             if ui.is_card(interaction.message):
                 await interaction.response.edit_message(view=await self.session_card_now(guild, session),
                                                         allowed_mentions=NO_PING)
@@ -2915,6 +2905,170 @@ class GameManager(commands.Cog):
         else:
             await interaction.response.defer()
             await self.end_session(guild, sid)
+
+    async def set_membership(self, guild: discord.Guild, sid: str, member: discord.Member,
+                             join: bool) -> Tuple[str, Optional[dict]]:
+        """Join or leave a session. Returns (a line for the member, the saved session, or None if nothing changed)."""
+        uid = str(member.id)
+        async with self.config.guild(guild).play_sessions() as sessions:
+            session = sessions.get(sid)
+            if session is None:
+                return "⚠️ This session has ended.", None
+            players = session["participants"]
+            if join:
+                if uid in players:
+                    return "⚠️ You're already in.", None
+                players.append(uid)
+            else:
+                if uid == session["host_id"]:
+                    return ui.line(ui.FAIL, "You're the host, so you can't leave.",
+                                   hint="End the session instead."), None
+                if uid not in players:
+                    return "⚠️ You haven't joined.", None
+                players.remove(uid)
+            session = dict(session)
+        title = session["title"]
+        return ui.line(ui.DONE, f"You're in **{title}**." if join else f"You've left **{title}**."), session
+
+    async def pick_session(self, target: Target, name: Optional[str], verb: str, *,
+                           this_channel: bool = False) -> Optional[dict]:
+        """
+        The session a join, leave or here command means: one named by title or ID (as the slash commands' menu gives),
+        else the only one in this channel, or in the server when this channel has none. `here` (this_channel) only
+        looks in this channel and takes the latest. Says what's wrong and returns None when it isn't clear.
+        """
+        guild, _, channel = who(target)
+        sessions = sorted((await self.config.guild(guild).play_sessions()).values(), key=lambda s: s["created_at"])
+        here = [s for s in sessions if s["channel_id"] == channel.id]
+        pool = here if this_channel else here + [s for s in sessions if s not in here]
+        if name:
+            key = name.strip().lower()
+            found = ([s for s in pool if s["id"] == key or s["title"].lower() == key]
+                     or [s for s in pool if key in s["title"].lower()])
+            if len(found) > 1:
+                found = [s for s in found if s in here] or found   # the same name here and elsewhere: this channel's
+        elif this_channel:
+            found = here[-1:]
+        else:
+            found = here or sessions
+        if not found:
+            start = await self.cmd(guild, "games session")
+            if name:
+                text = ui.line(ui.ASK, f"There's no session called **{name[:80]}**"
+                                       + (" in this channel." if this_channel else "."))
+            else:
+                text = ui.line(ui.ASK, "There's no session in this channel." if this_channel
+                               else "There's no session to join right now.", hint=f"Start one with {start}.")
+            await self.reply(target, content=text, ephemeral=True)
+            return None
+        if len(found) > 1:
+            titles = name_list([f"**{s['title']}**" for s in found])
+            example = await self.cmd(guild, f"games {verb} {found[-1]['title'][:40]}")
+            await self.reply(target, ephemeral=True, content=ui.line(
+                ui.ASK, f"Which session? There's {titles}.", hint=f"Add its name, like {example}."))
+            return None
+        return found[0]
+
+    async def join_or_leave(self, target: Target, name: Optional[str], join: bool):
+        """`games join` / `games leave`: the same as the card's buttons, without having to find the card."""
+        guild, member, _ = who(target)
+        session = await self.pick_session(target, name, "join" if join else "leave")
+        if session is None:
+            return
+        feedback, changed = await self.set_membership(guild, session["id"], member, join)
+        if changed is not None:
+            await self.refresh_session_message(guild, changed)
+            link = self.session_link(guild, changed)
+            if link:
+                feedback += "\n" + ui.hint(f"[See the card]({link})")
+        await self.reply(target, content=feedback, ephemeral=True)
+
+    async def bring_here(self, target: Target, name: Optional[str]):
+        """`games here`: move this channel's session card back to the bottom, after chatter has buried it."""
+        guild, _, channel = who(target)
+        session = await self.pick_session(target, name, "here", this_channel=True)
+        if session is None:
+            return
+        last = self._here_last.get(channel.id, 0.0)
+        if time.monotonic() - last < HERE_COOLDOWN:
+            return await self.reply(target, ephemeral=True,
+                                    content=ui.line(ui.WAIT, "The card was just moved. Try again in a minute."))
+        self._here_last[channel.id] = time.monotonic()
+        if await self.move_session_card(guild, session) is None:
+            self._here_last.pop(channel.id, None)
+            return await self.reply(target, ephemeral=True, content=ui.line(
+                ui.FAIL, "I couldn't move the card.", hint="Check that I can send messages in this channel."))
+        if isinstance(target, discord.Interaction):
+            await self.reply(target, content="✅ Moved the card down here.", ephemeral=True)
+        else:
+            await target.tick()   # the card right below is the answer
+
+    async def _buried(self, guild: discord.Guild, session: dict) -> bool:
+        """Whether a session's card has scrolled out of sight: at least BURIED_AFTER messages were posted below it."""
+        channel = guild.get_channel_or_thread(session.get("channel_id") or 0)
+        if channel is None or not session.get("message_id"):
+            return False
+        count = 0
+        try:
+            async for _ in channel.history(after=discord.Object(int(session["message_id"])), limit=BURIED_AFTER):
+                count += 1
+        except discord.HTTPException:   # no Read Message History: leave the card where it is
+            return False
+        return count >= BURIED_AFTER
+
+    async def move_session_card(self, guild: discord.Guild, session: dict, *,
+                                ping_ids: Optional[List[str]] = None) -> Optional[dict]:
+        """
+        Repost a session's card at the bottom of its channel and delete the old one (Discord can't move a message).
+        The buttons keep working: they're tied to the session, not the message. With `ping_ids`, the new card pings
+        those people (it names them). Ping lines that linked to the old card go too. A session posted before cards
+        comes back as a card. Returns the saved session, or None if it ended or the card couldn't be posted.
+        """
+        sid = session["id"]
+        async with self._move_locks.setdefault(sid, asyncio.Lock()):
+            current = (await self.config.guild(guild).play_sessions()).get(sid)
+            channel = guild.get_channel_or_thread(current["channel_id"]) if current else None
+            if channel is None:
+                return None
+            current["card"] = True
+            try:
+                message = await self.send_card(channel, await self.session_card_now(guild, current),
+                                               allowed_mentions=pings(ping_ids) if ping_ids else None)
+            except discord.HTTPException as e:
+                log.info("Couldn't move session %s down: %s", sid, e)
+                return None
+            stale = [current.get("message_id"), *current.get("pings", [])]   # the old card, and lines linking to it
+            async with self.config.guild(guild).play_sessions() as sessions:
+                saved = sessions.get(sid)
+                if saved is not None:
+                    saved.update(message_id=message.id, card=True, pings=[])
+                    current = dict(saved)
+            if saved is None:   # it ended while the new card was being posted
+                await self._delete_messages(guild, channel.id, [message.id])
+                return None
+            if current.get("vote_id"):
+                async with self.config.guild(guild).votes() as votes:
+                    vote = votes.get(current["vote_id"])
+                    if vote is not None and vote.get("in_card"):   # the vote lives in the card: it moves with it
+                        vote["message_id"] = message.id
+                        stale.append(vote.get("ping_id"))
+                        vote["ping_id"] = None
+            await self._delete_messages(guild, channel.id, stale)
+            await self._relink_event(guild, current, stale[0])
+            return current
+
+    async def _relink_event(self, guild: discord.Guild, session: dict, old_message_id: Optional[int]):
+        """Point the session's Discord event description at the card's new message."""
+        if not session.get("event_id") or not old_message_id:
+            return
+        old = message_link(guild.id, session["channel_id"], old_message_id)
+        try:
+            event = guild.get_scheduled_event(session["event_id"]) or await guild.fetch_scheduled_event(
+                session["event_id"])
+            if event.description and old in event.description:
+                await event.edit(description=event.description.replace(old, self.session_link(guild, session)))
+        except discord.HTTPException as e:
+            log.debug("Couldn't relink the event for session %s: %s", session["id"], e)
 
     async def _tick_session(self, guild: discord.Guild, sid: str, session: dict, now: datetime):
         starts = parse_iso(session.get("starts_at"))
@@ -2956,10 +3110,18 @@ class GameManager(commands.Cog):
             await self._delete_messages(guild, session["channel_id"], new_pings)
         return current
 
-    async def announce(self, guild: discord.Guild, session: dict, text: str) -> Optional[int]:
-        """Ping a session's players with one short line linking to its card. Returns the line's message ID."""
-        return await self._ping(guild, session["channel_id"], "🎮", session["participants"], text,
-                                self.session_link(guild, session))
+    async def announce(self, guild: discord.Guild, session: dict, text: str, emoji: str = "🎮",
+                       user_ids: Optional[List[str]] = None) -> Optional[int]:
+        """
+        Tell a session's players something (the reminder, the start, a vote). If its card has scrolled out of sight,
+        the card itself moves to the bottom of the channel and pings them, and nothing else is posted. Otherwise one
+        short ping line links to the card. Returns the ping line's message ID, if one was sent.
+        """
+        ids = session["participants"] if user_ids is None else user_ids
+        if session.get("card") and await self._buried(guild, session):
+            if await self.move_session_card(guild, session, ping_ids=ids) is not None:
+                return None
+        return await self._ping(guild, session["channel_id"], emoji, ids, text, self.session_link(guild, session))
 
     @tasks.loop(minutes=1)
     async def session_loop(self):
@@ -3153,8 +3315,7 @@ class GameManager(commands.Cog):
         await self.refresh_session_message(guild, session)   # in the card: the options appear
         self.schedule_vote(guild.id, vid, ends_at)
         if in_card:
-            ping = await self._ping(guild, session["channel_id"], "🗳️", players, "Vote on what to play",
-                                    self.session_link(guild, session))
+            ping = await self.announce(guild, session, "Vote on what to play", "🗳️", players)
             async with self.config.guild(guild).votes() as all_votes:
                 if vid in all_votes:
                     all_votes[vid]["ping_id"] = ping
@@ -3628,6 +3789,31 @@ class GameManager(commands.Cog):
         await self.send_list(ctx, items, "🎮 Active sessions",
                              ui.plural(len(items), "session") + (" · 🗳️ = voting now" if voting else ""))
 
+    @games.command(name="join")
+    async def games_join(self, ctx: commands.Context, *, session: str = None):
+        """
+        Join a game session without finding its card.
+
+        With one session in this channel (or in the server), just type `[p]games join`. With more, add its name:
+        `[p]games join Raid night`.
+        """
+        await self.join_or_leave(ctx, session, join=True)
+
+    @games.command(name="leave")
+    async def games_leave(self, ctx: commands.Context, *, session: str = None):
+        """Leave a game session without finding its card. Add its name if there's more than one."""
+        await self.join_or_leave(ctx, session, join=False)
+
+    @games.command(name="here", aliases=["bump"])
+    async def games_here(self, ctx: commands.Context, *, session: str = None):
+        """
+        Bring this channel's game session card back down to the bottom, after chatter has buried it.
+
+        Cards also move down by themselves for the reminder, the start and a vote. Add a name if this channel has
+        more than one session.
+        """
+        await self.bring_here(ctx, session)
+
     @games.command(name="endsession")
     async def games_endsession(self, ctx: commands.Context, session_id: str = None):
         """End your latest session in this channel, or a session by ID (host or game admin)."""
@@ -4087,6 +4273,92 @@ class GameManager(commands.Cog):
         await ctx.send(f"✅ Cancelled {ui.plural(len(votes), 'vote')}.")
 
     # ==========================================
+    #   SHORTCUTS: [p]session and [p]sessions
+    # ==========================================
+    # The same session commands without "games". Starting one needs `new`: plain `[p]session <text>` can't start
+    # one, or a session called "join the raid" would read as the join command (the reason `[p]butler` has no
+    # subcommands).
+
+    @commands.group(name="session", invoke_without_command=True, usage="")   # the text is only for a hint
+    @commands.guild_only()
+    async def session_cmd(self, ctx: commands.Context, *, words: str = None):
+        """
+        Game sessions. On its own, brings this channel's session card down to you.
+
+        - `[p]session new friday 9pm Raid night` starts one (`[p]session new every friday 9pm` repeats weekly)
+        - `[p]session join` and `[p]session leave` (add its name if there's more than one)
+        - `[p]session vote` and `[p]session end` (host or game admin)
+        - `[p]sessions` lists them all
+        """
+        if words:   # an argument, so SpeakUp's "did you mean" stays out of it: this hint is more useful
+            start = await self.cmd(ctx.guild, f"session new {ui.truncate(words, 60)}")
+            return await ctx.send(ui.line(ui.ASK, f"`{ui.truncate(words.split()[0], 30)}` isn't a session command.",
+                                          hint=f"To start a session, add `new`: {start}"),
+                                  allowed_mentions=NO_PING)
+        if await self.latest_session(ctx.guild, ctx.channel.id) is None:
+            start = await self.cmd(ctx.guild, "session new 9pm Raid night")
+            return await ctx.send(ui.line(ui.ASK, "There's no session in this channel.",
+                                          hint=f"Start one with {start}."))
+        await self.bring_here(ctx, None)
+
+    @session_cmd.command(name="new", aliases=["create", "host"])
+    async def session_new(self, ctx: commands.Context, *, time_and_title: str = None):
+        """
+        Start a game session people can join.
+
+        Optionally start with a time (read in your timezone; everyone sees their own). Start with `every` to
+        repeat weekly. The same as `[p]games session`.
+
+        **Examples:** `[p]session new`, `[p]session new friday 9pm Raid night`, `[p]session new in 2h Rocket League`,
+        `[p]session new every friday 9pm`
+        """
+        await self.create_session(ctx, time_and_title)
+
+    @session_cmd.command(name="join")
+    async def session_join(self, ctx: commands.Context, *, session: str = None):
+        """Join a game session. Add its name if there's more than one."""
+        await self.join_or_leave(ctx, session, join=True)
+
+    @session_cmd.command(name="leave")
+    async def session_leave(self, ctx: commands.Context, *, session: str = None):
+        """Leave a game session. Add its name if there's more than one."""
+        await self.join_or_leave(ctx, session, join=False)
+
+    @session_cmd.command(name="here", aliases=["bump"])
+    async def session_here(self, ctx: commands.Context, *, session: str = None):
+        """Bring a session card in this channel down to the bottom. Add its name if there's more than one."""
+        await self.bring_here(ctx, session)
+
+    @session_cmd.command(name="vote")
+    async def session_vote(self, ctx: commands.Context, *options: str):
+        """
+        Start a vote on what to play for this channel's latest session (host or game admin).
+
+        Optional: how many games each person can pick (up to 10) and how long it runs (`90s`, `3m`).
+        **Examples:** `[p]session vote`, `[p]session vote 2 3m`
+        """
+        await ctx.invoke(self.games_sessionvote, *options)
+
+    @session_cmd.command(name="end")
+    async def session_end(self, ctx: commands.Context, *, session: str = None):
+        """End your session in this channel, or one by name (host or game admin)."""
+        if not session:
+            return await ctx.invoke(self.games_endsession)
+        picked = await self.pick_session(ctx, session, "end")
+        if picked is None:
+            return
+        if not await self.can_manage(ctx.author, picked["host_id"]):
+            return await ctx.send("🔒 Only the host or a game admin can end that session.")
+        await self.end_session(ctx.guild, picked["id"])
+        await ctx.send(f"✅ Ended **{picked['title']}**.", allowed_mentions=NO_PING)
+
+    @commands.command(name="sessions")
+    @commands.guild_only()
+    async def sessions_cmd(self, ctx: commands.Context):
+        """List the active game sessions, with links to their cards. The same as `[p]games sessions`."""
+        await ctx.invoke(self.games_sessions)
+
+    # ==========================================
     #       SLASH COMMANDS (with autocomplete)
     # ==========================================
     # The bot owner enables these once with `[p]slash enable games` and `[p]slash sync`.
@@ -4164,6 +4436,21 @@ class GameManager(commands.Cog):
                          minutes: app_commands.Range[int, 1, 60] = 2):
         await self.start_vote(interaction, None, picks, minutes * 60)
 
+    @slash.command(name="join", description="Join a game session without finding its card")
+    @app_commands.describe(session="Which session; leave empty for the one in this channel")
+    async def slash_join(self, interaction: discord.Interaction, session: Optional[str] = None):
+        await self.join_or_leave(interaction, session, join=True)
+
+    @slash.command(name="leave", description="Leave a game session without finding its card")
+    @app_commands.describe(session="Which session; leave empty for the one in this channel")
+    async def slash_leave(self, interaction: discord.Interaction, session: Optional[str] = None):
+        await self.join_or_leave(interaction, session, join=False)
+
+    @slash.command(name="here", description="Bring this channel's session card back down to the bottom")
+    @app_commands.describe(session="Which session; leave empty for the latest in this channel")
+    async def slash_here(self, interaction: discord.Interaction, session: Optional[str] = None):
+        await self.bring_here(interaction, session)
+
     @slash.command(name="endsession", description="End your latest session in this channel")
     async def slash_endsession(self, interaction: discord.Interaction):
         guild, member, channel = who(interaction)
@@ -4237,6 +4524,33 @@ class GameManager(commands.Cog):
     @slash_uninstall.autocomplete("game")
     async def _ac_installed_games(self, interaction: discord.Interaction, current: str):
         return await self._game_choices(interaction, current, "installed")
+
+    async def _session_choices(self, interaction: discord.Interaction, current: str, this_channel: bool):
+        """Active sessions by title, this channel's first; other channels' are marked with the channel's name."""
+        sessions = sorted((await self.config.guild(interaction.guild).play_sessions()).values(),
+                          key=lambda s: (s["channel_id"] != interaction.channel_id, s["created_at"]))
+        if this_channel:
+            sessions = [s for s in sessions if s["channel_id"] == interaction.channel_id]
+        key = current.strip().lower()
+        choices = []
+        for s in sessions:
+            if key and key not in s["title"].lower():
+                continue
+            label = s["title"]
+            if s["channel_id"] != interaction.channel_id:
+                channel = interaction.guild.get_channel_or_thread(s["channel_id"])
+                label += f" (#{channel.name})" if channel else ""
+            choices.append(app_commands.Choice(name=label[:100], value=s["id"]))
+        return choices[:25]
+
+    @slash_join.autocomplete("session")
+    @slash_leave.autocomplete("session")
+    async def _ac_sessions(self, interaction: discord.Interaction, current: str):
+        return await self._session_choices(interaction, current, this_channel=False)
+
+    @slash_here.autocomplete("session")
+    async def _ac_here_sessions(self, interaction: discord.Interaction, current: str):
+        return await self._session_choices(interaction, current, this_channel=True)
 
     @slash_timezone.autocomplete("zone")
     async def _ac_timezone(self, interaction: discord.Interaction, current: str):

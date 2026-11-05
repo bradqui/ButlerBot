@@ -212,6 +212,18 @@ End your latest session in this channel, or a session by ID (host or game admin)
 
 End a vote now and announce the winner (whoever started it, the session host, or a game admin).
 
+<a id="games-here"></a>
+### !games here
+
+`!games here [session]`
+
+**Who:** everyone · **Also:** `!games bump`
+
+Bring this channel's game session card back down to the bottom, after chatter has buried it.
+
+Cards also move down by themselves for the reminder, the start and a vote. Add a name if this channel has
+more than one session.
+
 <a id="games-install"></a>
 ### !games install
 
@@ -244,6 +256,27 @@ Name the people, or leave it empty to use everyone in this channel who has a lib
 **Who:** everyone
 
 Show install requests from game admins and how many people have installed each game.
+
+<a id="games-join"></a>
+### !games join
+
+`!games join [session]`
+
+**Who:** everyone
+
+Join a game session without finding its card.
+
+With one session in this channel (or in the server), just type `!games join`. With more, add its name:
+`!games join Raid night`.
+
+<a id="games-leave"></a>
+### !games leave
+
+`!games leave [session]`
+
+**Who:** everyone
+
+Leave a game session without finding its card. Add its name if there's more than one.
 
 <a id="games-lfg"></a>
 ### !games lfg
@@ -565,5 +598,91 @@ List who owns a game (💾 = has it installed).
 **Who:** everyone
 
 Show your wishlist with current Steam prices, or someone else's.
+
+<a id="session"></a>
+### !session
+
+`!session`
+
+**Who:** everyone
+
+Game sessions. On its own, brings this channel's session card down to you.
+
+- `!session new friday 9pm Raid night` starts one (`!session new every friday 9pm` repeats weekly)
+- `!session join` and `!session leave` (add its name if there's more than one)
+- `!session vote` and `!session end` (host or game admin)
+- `!sessions` lists them all
+
+<a id="session-end"></a>
+### !session end
+
+`!session end [session]`
+
+**Who:** everyone
+
+End your session in this channel, or one by name (host or game admin).
+
+<a id="session-here"></a>
+### !session here
+
+`!session here [session]`
+
+**Who:** everyone · **Also:** `!session bump`
+
+Bring a session card in this channel down to the bottom. Add its name if there's more than one.
+
+<a id="session-join"></a>
+### !session join
+
+`!session join [session]`
+
+**Who:** everyone
+
+Join a game session. Add its name if there's more than one.
+
+<a id="session-leave"></a>
+### !session leave
+
+`!session leave [session]`
+
+**Who:** everyone
+
+Leave a game session. Add its name if there's more than one.
+
+<a id="session-new"></a>
+### !session new
+
+`!session new [time_and_title]`
+
+**Who:** everyone · **Also:** `!session create`, `!session host`
+
+Start a game session people can join.
+
+Optionally start with a time (read in your timezone; everyone sees their own). Start with `every` to
+repeat weekly. The same as `!games session`.
+
+**Examples:** `!session new`, `!session new friday 9pm Raid night`, `!session new in 2h Rocket League`,
+`!session new every friday 9pm`
+
+<a id="session-vote"></a>
+### !session vote
+
+`!session vote [options...]`
+
+**Who:** everyone
+
+Start a vote on what to play for this channel's latest session (host or game admin).
+
+Optional: how many games each person can pick (up to 10) and how long it runs (`90s`, `3m`).
+**Examples:** `!session vote`, `!session vote 2 3m`
+
+<a id="sessions"></a>
+### !sessions
+
+`!sessions`
+
+**Who:** everyone
+
+List the active game sessions, with links to their cards. The same as `!games sessions`.
 
 {% endraw %}

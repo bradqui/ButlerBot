@@ -19,7 +19,7 @@ For a task-by-task guide, see [Filters and spam]({{ '/filters/' | relative_url }
 
 **Who:** everyone · **Also:** `!censor`
 
-Main configuration command for the Censord bot.
+Word filter settings.
 
 <a id="censord-action"></a>
 ### !censord action

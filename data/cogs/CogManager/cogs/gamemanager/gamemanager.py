@@ -605,6 +605,37 @@ def mention_list(user_ids, limit: int = 40) -> str:
     return ", ".join(ids[:limit]) + (f" and {len(ids) - limit} more" if len(ids) > limit else "")
 
 
+def name_list(names: List[str], limit: int = 5) -> str:
+    """`Ash, Bex and Cole` (at most `limit` names, then "and N more")."""
+    if len(names) > limit:
+        return ", ".join(names[:limit]) + f" and {len(names) - limit} more"
+    return ", ".join(names[:-1]) + f" and {names[-1]}" if len(names) > 1 else "".join(names)
+
+
+def details(*parts: Optional[str]) -> str:
+    """A row's or block's detail line: the parts that aren't empty, joined with " · ", starting with a capital."""
+    text = " · ".join(p for p in parts if p)
+    return text[:1].upper() + text[1:]
+
+
+def repeat_short(label: str) -> str:
+    """`Every other Friday at 9 PM (UTC)` (a session's "repeat") as `every other Friday`."""
+    head = label.split(" at ")[0]
+    return head[:1].lower() + head[1:]
+
+
+def tz_note_parts(note: str) -> Tuple[Optional[str], str]:
+    """
+    A session's stored timezone note ("Time read as **UTC**: … set one with `!games timezone <zone>` …") as
+    (the zone, for the card's time line, and a one-line footer hint for the host). Unreadable notes stay whole.
+    """
+    zone = re.search(r"\*\*(.+?)\*\*", note)
+    command = re.search(r"`[^`]*timezone[^`]*`", note)
+    if zone is None or command is None:
+        return None, note
+    return zone.group(1), f"Wrong time? The host can set a timezone with {command.group(0)}, then post it again"
+
+
 def store_button(url: str, label: str, emoji: Optional[str] = None) -> discord.ui.Button:
     """A link button (to a store page). Link buttons stay live when a menu expires."""
     return discord.ui.Button(label=label, url=url, emoji=emoji)
@@ -717,6 +748,18 @@ def session_buttons(sid: str) -> List[discord.ui.Item]:
     return [SessionButton(action, sid) for action in ("join", "leave", "vote", "end")]
 
 
+def vote_buttons(vote: dict) -> List[discord.ui.Item]:
+    """A running vote's option buttons, each showing its tally once it has one: `Deep Rock Galactic · 2`."""
+    labels = vote.get("labels") or vote.get("names") or {}
+    tallies = vote.get("tallies") or {}
+    buttons = []
+    for gid in vote["games"][:MAX_VOTE_OPTIONS]:
+        label = ui.truncate(labels.get(gid) or "Vote", 72)
+        count = tallies.get(gid, 0)
+        buttons.append(VoteButton(vote["id"], gid, f"{label} · {count}" if count > 0 else label))
+    return buttons
+
+
 # Classic views: only for session, vote and request messages posted as embeds before the switch to cards
 # (2026-11-05). New messages are cards with the same persistent buttons inside them; the custom IDs didn't change.
 
@@ -806,9 +849,9 @@ class NameCheckView(OwnerOnlyCard):
         self.text = text
         self.title = "🎮 Check the names" if plural else "🎮 Check the name"
         buttons = [
-            make_button("Use the suggested names" if plural else "Use the suggested name", self._choose("suggested"),
+            make_button("Use suggestions" if plural else "Use suggestion", self._choose("suggested"),
                         style=discord.ButtonStyle.primary),
-            make_button("Use what I typed", self._choose("typed")),
+            make_button("Keep my spelling", self._choose("typed")),
             make_button("Cancel", self._choose("cancel")),
         ]
         self.add_item(ui.card(text, buttons, title=self.title))
@@ -984,10 +1027,10 @@ class UnknownGamesView(OwnerOnlyCard):
         self.cog, self.names, self.action, self.can_add, self.text = cog, names, action, can_add, text
         self.title = self.TITLES.get(action, "🎮 Your library")
         them = "them" if len(names) > 1 else "it"
-        go = make_button(f"Add {them} to the library" if can_add else f"Request {them}", self._go,
+        go = make_button("Add to library" if can_add else f"Request {them}", self._go,
                          emoji="➕" if can_add else "📨", style=discord.ButtonStyle.primary)
-        footer = ("Adds them to the server library and to yours" if can_add
-                  else "Ask a game admin to add them: the button sends a request")
+        footer = (f"Adds {them} to the server library and to yours" if can_add
+                  else f"A game admin needs to add {them}: the button sends a request")
         self.add_item(ui.card(text, [go], title=self.title, footer=footer))
 
     async def _go(self, interaction: discord.Interaction):
@@ -1025,13 +1068,12 @@ class SteamPickView(OwnerOnlyCard):
         async def on_cancel(interaction: discord.Interaction):
             self.stop()
             await interaction.response.edit_message(
-                view=final_card(ui.line(ui.DONE, "Skipped. Nothing was added for that name."), title=self.TITLE,
-                                color=ui.MUTED),
+                view=final_card("Skipped. Nothing was added for that name.", title=self.TITLE, color=ui.MUTED),
                 allowed_mentions=NO_PING)
 
         select.callback = on_select
         question = f"Which game on Steam did you mean by **{name}**?" if name else "Which game on Steam did you mean?"
-        self.add_item(ui.card(question, [select], [make_button("None of these", on_cancel)], title=self.TITLE))
+        self.add_item(ui.card(question, [select], [make_button("Skip it", on_cancel)], title=self.TITLE))
 
 
 class TextModal(discord.ui.Modal):
@@ -1114,14 +1156,14 @@ class ProfileWizard(OwnerOnlyCard):
                 for label, zone in COMMON_TIMEZONES])
             select.callback = lambda i: self._set_timezone(i, select.values[0])
             selects.append(select)
-            buttons.append(make_button("Other timezone…", self._other_timezone, emoji="🌐"))
+            buttons.append(make_button("Type a timezone", self._other_timezone, emoji="🌐"))
         elif name == "owned":
             lines += [f"You have **{ui.plural(len(owned), 'game')}** in your library.",
                       "Tick them from the server's list, or type their names. Games the server doesn't have yet can "
                       "be requested (or added) from there."]
-            buttons.append(make_button("Pick from the server's games", self._picker("owned"), emoji="🎮",
+            buttons.append(make_button("Pick games", self._picker("owned"), emoji="🎮",
                                        style=discord.ButtonStyle.primary, disabled=not games))
-            buttons.append(make_button("Type game names", self._type_owned, emoji="⌨️"))
+            buttons.append(make_button("Type names", self._type_owned, emoji="⌨️"))
         elif name == "installed":
             installed = [g for g in data.get("installed", []) if g in games]
             if owned:
@@ -1149,11 +1191,12 @@ class ProfileWizard(OwnerOnlyCard):
         elif name == "wishlist":
             wanted = await cog.wanted_by(guild, member)
             channel_id = await cog.config.guild(guild).sale_channel()
-            lines += ["Games you want but don't own yet. When one goes on sale on Steam, you'll get a ping.",
-                      f"**On your wishlist ({len(wanted)}):** " + (", ".join(e["name"] for e in wanted[:20]) or "nothing yet")]
+            names = ", ".join(e["name"] for e in wanted[:20]) + (f" and {len(wanted) - 20} more" if len(wanted) > 20 else "")
+            lines += ["Games you want but don't own yet. When one goes on sale on Steam, you'll get a ping.", "",
+                      ui.two_line(f"**{ui.plural(len(wanted), 'game')} on your wishlist**", names or None)]
             if not channel_id:
                 lines.append("-# Sale alerts aren't turned on in this server yet, but your wishlist is saved.")
-            buttons.append(make_button("Add games you want", self._type_wanted, emoji="⭐",
+            buttons.append(make_button("Add wanted games", self._type_wanted, emoji="⭐",
                                        style=discord.ButtonStyle.primary))
         if state.get("note"):
             lines += ["", state["note"]]
@@ -1166,7 +1209,7 @@ class ProfileWizard(OwnerOnlyCard):
             ui.truncate("\n".join(l for l in lines if l is not None), 3500), selects or None, buttons or None,
             ui.SEPARATOR, nav,
             title=f"🎮 Profile setup · {step + 1} of {len(PROFILE_STEPS)}: {PROFILE_TITLES[name]}",
-            footer=f"Every step is optional · Only {member.display_name} can use this"))
+            footer="Every step can be skipped"))   # anyone else who presses is told it isn't theirs
 
     async def _summary(self, games: dict, data: dict, owned: List[str]) -> discord.ui.Container:
         guild, member = self.state["guild"], self.state["member"]
@@ -1174,15 +1217,15 @@ class ProfileWizard(OwnerOnlyCard):
         ranks = sorted(((r, g) for g, r in data.get("ranks", {}).items() if g in games and r <= 3))
         installed = [g for g in data.get("installed", []) if g in games]
         wanted = await self.cog.wanted_by(guild, member)
-        cmd = self.cog.cmd
-        lines = [f"🕘 **Timezone:** {tz_name}",
-                 f"🎮 **Library:** {len(owned)} games, {len(installed)} installed",
-                 "🏅 **Favorites:** " + (", ".join(f"#{r} {games[g]['name']}" for r, g in ranks) or "none"),
-                 f"⭐ **Wishlist:** {len(wanted)} games"]
-        footer = (f"Change things any time with {await cmd(guild, 'games own')}, {await cmd(guild, 'games install')}, "
-                  f"{await cmd(guild, 'games rank')} or {await cmd(guild, 'games want')}, or run "
-                  f"{await cmd(guild, 'games newprofile')} again.")
-        return ui.card("\n".join(lines), title="✅ Your profile is set up", color=ui.SUCCESS, footer=footer)
+        # Key-value pairs, so the settings-card layout (Message style's exception), without per-line emoji.
+        rows = ui.settings_text([
+            ("Timezone", tz_name),
+            ("Library", f"{ui.plural(len(owned), 'game')}, {len(installed)} installed"),
+            ("Favorites", ", ".join(f"#{r} {games[g]['name']}" for r, g in ranks) or "none"),
+            ("Wishlist", ui.plural(len(wanted), "game")),
+        ])
+        footer = f"Run {await self.cog.cmd(guild, 'games newprofile')} again to change anything"
+        return ui.card(rows, title="🎮 Your profile is set up", color=ui.SUCCESS, footer=footer)
 
     # ---------- step actions ----------
 
@@ -1491,13 +1534,15 @@ class GameManager(commands.Cog):
         """Send a card to a command, an interaction or a channel. Ping-free unless `allowed_mentions` says who."""
         return await ui.send_card(target, view, ephemeral=ephemeral, allowed_mentions=allowed_mentions or NO_PING)
 
-    async def send_list(self, target: Target, items: List[str], title: str, footer: Optional[str] = None,
+    async def send_list(self, target: Target, items: List[ui.Row], title: str, footer: Optional[str] = None,
                         ephemeral: bool = False, *, header: Optional[str] = None,
                         empty: Optional[str] = None) -> Optional[ui.Board]:
         """
-        Post a list as a board: one card that pages 15 rows at a time with ◀ ▶ (anyone can page it). Rows are one
-        line each. `footer` follows "Page x of y"; `header` sits above the rows on every page. Mentions in rows never
-        ping. With no rows it's a ❓ line, unless `empty` is given (then the board shows that text instead).
+        Post a list as a board: one card that pages 8 rows at a time with ◀ ▶ (anyone can page it), plus a Jump to
+        menu on long lists. Rows are two-line `ui.row(main, detail)` tuples: the game or person in **bold**, with
+        markers like 💾 at the end, and their counts and details on a small line underneath. `footer` follows
+        "Page x of y" (a count plus at most one hint); `header` sits above the rows on every page. Mentions in rows
+        never ping. With no rows it's a ❓ line, unless `empty` is given (then the board shows that text instead).
         """
         if not items and empty is None:
             await self.reply(target, content=ui.line(ui.ASK, "Nothing to show."), ephemeral=ephemeral)
@@ -1510,8 +1555,8 @@ class GameManager(commands.Cog):
         await board.send(target, ephemeral=ephemeral, allowed_mentions=NO_PING)
         return board
 
-    async def library_rows(self, guild: discord.Guild, viewer: discord.abc.User, games: List[dict]) -> List[str]:
-        """Board rows for server games: `Name 💾 · 4 own, 3 installed` (💾 = the viewer has it installed)."""
+    async def library_rows(self, guild: discord.Guild, viewer: discord.abc.User, games: List[dict]) -> List[tuple]:
+        """Board rows for server games: **Name** 💾 over `4 own · 3 installed` (💾 = the viewer has it installed)."""
         users = await self.config.guild(guild).users()
         owners, installers = Counter(), Counter()
         for uid, data in users.items():
@@ -1523,8 +1568,9 @@ class GameManager(commands.Cog):
         mine = set(users.get(str(viewer.id), {}).get("installed", []))
         rows = []
         for g in games:
-            counts = f"{owners[g['id']]} own" + (f", {installers[g['id']]} installed" if installers[g["id"]] else "")
-            rows.append(g["name"] + (f" {INSTALLED}" if g["id"] in mine else "") + f" · {counts}")
+            installed = installers[g["id"]]
+            rows.append(ui.row(f"**{g['name']}**" + (f" {INSTALLED}" if g["id"] in mine else ""),
+                               details(f"{owners[g['id']]} own", f"{installed} installed" if installed else None)))
         return rows
 
     async def find_game(self, target: Target, name: str, ephemeral: bool = False) -> Optional[dict]:
@@ -1863,12 +1909,12 @@ class GameManager(commands.Cog):
                 appids[title or name] = appid
             # Capitalization and symbol fixes are applied silently; only real spelling changes need a yes.
             if title and normalize(title) != normalize(name):
-                lines.append(f"- `{name}` → **{title}** ({source})")
+                where = {"Steam": "Steam's name for it", "web search": "found by web search"}.get(source, source)
+                lines.append(ui.two_line(f"**{title}**", f"You typed `{name}` · {where}"))
         if not lines:
             return suggested, appids
         plural = len(lines) > 1
-        text = (f"I checked {'those names' if plural else 'that name'}:\n" + "\n".join(lines)
-                + f"\nUse {'these' if plural else 'it'} instead?")
+        text = f"I checked {'those names' if plural else 'that name'}. Did you mean:\n" + "\n".join(lines)
         view = NameCheckView(member.id, plural, ui.truncate(text, 3500))
         view.message = await self.send_card(target, view, ephemeral=ephemeral)
         await view.wait()
@@ -1892,12 +1938,12 @@ class GameManager(commands.Cog):
             return await self.reply(target, content=text, ephemeral=ephemeral)
         owned.sort(key=lambda gid: (ranks.get(gid) is None, ranks.get(gid) or 0, games[gid]["name"].lower()))
         items = []
-        for gid in owned:
-            name = games[gid]["name"] + (f" {INSTALLED}" if gid in installed else "")
-            items.append(f"**{ranks[gid]}.** {name}" if ranks.get(gid) else name)
+        for gid in owned:   # ranked games first, their rank inside the bold: **1. Deep Rock Galactic** 💾
+            name = f"{ranks[gid]}. {games[gid]['name']}" if ranks.get(gid) else games[gid]["name"]
+            items.append(ui.row(f"**{name}**" + (f" {INSTALLED}" if gid in installed else "")))
         count = len([g for g in owned if g in installed])
         await self.send_list(target, items, f"🎮 {member.display_name}'s library",
-                             f"{len(owned)} owned · {count} installed · {INSTALLED} = installed", ephemeral)
+                             f"{ui.plural(len(owned), 'game')}, {count} installed · {INSTALLED} = installed", ephemeral)
 
     async def set_rank(self, target: Target, rank: int, name: str, ephemeral: bool = False):
         guild, member, _ = who(target)
@@ -1934,18 +1980,20 @@ class GameManager(commands.Cog):
             member = guild.get_member(int(uid))
             if member is not None:
                 mark = f" {INSTALLED}" if has_installed and not installed_only else ""
-                rows.append((member.display_name.lower(), f"{member.display_name}{mark}", has_installed))
+                rank = data.get("ranks", {}).get(game["id"])   # the one real detail: how much they like it
+                row = ui.row(f"**{member.display_name}**{mark}", f"Their #{rank}" if rank else None)
+                rows.append((member.display_name.lower(), row, has_installed))
         if not rows:
             verb = "has it installed" if installed_only else "owns it"
             return await self.reply(target, content=f"❓ Nobody {verb} yet: **{game['name']}**.")
-        rows.sort()
+        rows.sort(key=lambda r: r[0])
         if installed_only:
             await self.send_list(target, [r[1] for r in rows], f"🎮 Who has {game['name']} installed",
                                  ui.plural(len(rows), "player"))
         else:
             count = len([r for r in rows if r[2]])
             await self.send_list(target, [r[1] for r in rows], f"🎮 Who owns {game['name']}",
-                                 f"{ui.plural(len(rows), 'owner')} · {count} installed · {INSTALLED} = installed")
+                                 f"{ui.plural(len(rows), 'owner')}, {count} installed · {INSTALLED} = installed")
 
     async def shared_games(self, target: Target, members: List[discord.Member], installed: bool):
         guild, author, channel = who(target)
@@ -1970,7 +2018,14 @@ class GameManager(commands.Cog):
             return await self.reply(target, content=f"❓ No game is {field} by all of: {names}.")
         mine = set(users.get(str(author.id), {}).get("installed", []))
         common.sort(key=lambda g: g["name"].lower())
-        items = [g["name"] + (f" {INSTALLED}" if g["id"] in mine and not installed else "") for g in common]
+        items = []
+        for g in common:
+            if installed:   # everyone has every one of these installed: nothing more to say
+                items.append(ui.row(f"**{g['name']}**"))
+                continue
+            ready = sum(1 for m in members if g["id"] in users.get(str(m.id), {}).get("installed", []))
+            items.append(ui.row(f"**{g['name']}**" + (f" {INSTALLED}" if g["id"] in mine else ""),
+                                f"{ready} of {len(members)} installed"))
         title = "🎮 Installed by everyone" if installed else "🎮 Owned by everyone"
         footer = ui.plural(len(items), "game") + ("" if installed else f" · {INSTALLED} = you have it installed")
         await self.send_list(target, items, title, footer, header=ui.truncate(f"With {names}", 200))
@@ -2000,8 +2055,8 @@ class GameManager(commands.Cog):
         if not rows:
             return await self.reply(target, content="❓ No games match those filters.")
         rows.sort()
-        items = [f"**{i}.** {name}{f' {INSTALLED}' if is_mine else ''} · {owners}/{len(member_ids)} own"
-                 + (f", {inst} installed" if inst else "")
+        items = [ui.row(f"**{i}. {name}**" + (f" {INSTALLED}" if is_mine else ""),
+                        details(f"{owners} of {len(member_ids)} own", f"{inst} installed" if inst else None))
                  for i, (_, _, _, name, owners, inst, is_mine) in enumerate(rows, 1)]
         filters = [label for on, label in ((shared_only, "owned by everyone"),
                                            (installed_only, "installed by every owner")) if on]
@@ -2069,19 +2124,19 @@ class GameManager(commands.Cog):
         name, requester = request["name"], request["requested_by"]
         link = ([store_button(STEAM_APP_URL.format(request["steam_appid"]), "View on Steam")]
                 if request.get("steam_appid") else [])
+        title = f"🎮 Game request: {name}"
         if approved is None:
-            then = {"own": " and add it to their library",
-                    "install": " and mark it installed for them"}.get(request.get("for_action"), "")
+            then = {"own": "approving also adds it to their library",
+                    "install": "approving also marks it installed for them"}.get(request.get("for_action"))
             return ui.CardView(ui.card(
-                f"<@{requester}> asked to add **{name}** to the server library. Approving will add it{then}.",
+                ui.two_line(f"**{name}**", details(f"requested by <@{requester}> for the server library", then)),
                 [RequestButton("approve", request["id"]), RequestButton("deny", request["id"])] + link,
-                title=f"🎮 Game request: {name}", color=ui.ATTENTION, footer="Game admins can approve or deny"))
+                title=title, color=ui.ATTENTION, footer="Game admins can approve or deny"))
         verb = "approved" if approved else "denied"
-        by = f", {verb} by {approver.mention}" if approver is not None else ""
+        detail = details(f"requested by <@{requester}>", f"{verb} by {approver.mention}" if approver else None)
         return ui.CardView(ui.card(
-            f"Requested by <@{requester}>{by}." + (f"\n{ui.hint(note)}" if note else ""), link or None,
-            title=f"✅ Approved: {name}" if approved else f"❌ Denied: {name}",
-            color=ui.SUCCESS if approved else ui.DANGER))
+            ui.two_line("✅ **Approved**" if approved else "**Denied**", detail + (f"\n{note}" if note else "")),
+            link or None, title=title, color=ui.SUCCESS if approved else ui.DANGER))
 
     async def _request_games(self, guild, channel, member, names: List[str], action: Optional[str],
                              appids: Optional[Dict[str, int]]) -> Tuple[str, bool]:
@@ -2360,8 +2415,8 @@ class GameManager(commands.Cog):
             return await self.reply(target, ephemeral=ephemeral, content=(
                 f"⚠️ Your wishlist is empty. Add a game with {await self.cmd(guild, 'games want <game>')}." if mine
                 else f"❓ {member.display_name}'s wishlist is empty."))
-        items = [f"[{e['name']}]({STEAM_APP_URL.format(e['appid'])})"
-                 + (f" · {price_text(e['price'])}" if e.get("checked_at") else "") for e in wanted]
+        items = [ui.row(f"**[{e['name']}]({STEAM_APP_URL.format(e['appid'])})**",
+                        price_text(e["price"]) if e.get("checked_at") else None) for e in wanted]
         channel_id = await self.config.guild(guild).sale_channel()
         alerts = "Sale alerts are on" if channel_id else "Sale alerts aren't turned on in this server"
         await self.send_list(target, items, f"🎮 {member.display_name}'s wishlist",
@@ -2383,10 +2438,11 @@ class GameManager(commands.Cog):
                                                     f"{await self.cmd(guild, 'games want <game>')}.")
         items = []
         for _, _, entry, fans in sorted(rows, key=lambda r: r[:2]):
-            names = ", ".join(self._display(guild, u) for u in fans[:5]) + (" …" if len(fans) > 5 else "")
-            sale = f" · **{entry['price']['discount']}% off**" if (entry.get("price") or {}).get("discount") else ""
-            items.append(f"**[{entry['name']}]({STEAM_APP_URL.format(entry['appid'])})** · "
-                         f"wanted by {len(fans)}: {names}{sale}")
+            names = name_list([self._display(guild, u) for u in fans], 5)
+            discount = (entry.get("price") or {}).get("discount")
+            items.append(ui.row(f"**[{entry['name']}]({STEAM_APP_URL.format(entry['appid'])})**",
+                                details(f"wanted by {len(fans)}: {names}",
+                                        f"**{discount}% off**" if discount else None)))
         await self.send_list(target, items, "🎮 Most-wanted games",
                              f"{ui.plural(len(items), 'game')} · owners aren't counted")
 
@@ -2417,7 +2473,8 @@ class GameManager(commands.Cog):
                     and int(entry["appid"]) not in self._owned_appids(games, users.get(u, {}))]
             if not fans:
                 continue
-            line = f"**[{entry['name']}]({STEAM_APP_URL.format(entry['appid'])})**: {price_text(entry['price'])}"
+            line = ui.two_line(f"**[{entry['name']}]({STEAM_APP_URL.format(entry['appid'])})**",
+                               price_text(entry["price"]))
             new_fans = [u for u in fans if u not in pinged][:100 - len(pinged)]
             size = sum(len(l) + 1 for l in lines) + len(line) + 23 * (len(pinged) + len(new_fans))
             if lines and (size > 3400 or len(new_fans) < len([u for u in fans if u not in pinged])):
@@ -2452,7 +2509,8 @@ class GameManager(commands.Cog):
         lines = []
         for game in new:
             ends = parse_iso(game.get("ends"))
-            lines.append(f"**[{game['title']}]({game['url']})**" + (f": free until {stamp(ends, 'f')}" if ends else ""))
+            lines.append(ui.two_line(f"**[{game['title']}]({game['url']})**",
+                                     f"Free until {stamp(ends, 'f')}" if ends else None))
         link = [store_button(new[0]["url"], "View on Epic")] if len(new) == 1 and new[0].get("url") else None
         view = ui.CardView(ui.card(ui.truncate("\n".join(lines), 3500), link,
                                    title="🎮 Free to keep on the Epic Games Store", color=ui.HIGHLIGHT))
@@ -2496,69 +2554,68 @@ class GameManager(commands.Cog):
     #                 SESSIONS
     # ==========================================
 
-    def session_card(self, session: dict, ended: bool = False, vote: Optional[dict] = None) -> ui.CardView:
+    def session_card(self, session: dict, ended: bool = False, vote: Optional[dict] = None,
+                     guild: Optional[discord.Guild] = None) -> ui.CardView:
         """
-        A session's card: title, start time, who's playing, the buttons, and a footer with what happens next.
-        The whole game night happens in this one card: a vote started from it runs inside it (pass the running
-        `vote`, a record with "in_card"), and the result stays in it ("vote_result"). SUCCESS while it's open,
+        A session's card, in short two-line blocks: when (and how often), who's playing, then the vote or its
+        result, the buttons, and a one-hint footer. The whole game night happens in this one card: a vote started
+        from it runs inside it (pass the running `vote`, a record with "in_card"; `guild` turns the people it's
+        waiting on into display names), and the result stays in it ("vote_result"). SUCCESS while it's open,
         ATTENTION while voting, MUTED once it has ended (then without buttons). Player mentions in it don't ping:
         it's always sent and edited with NO_PING. The pings are short ping_line() messages that link here.
         """
         starts = parse_iso(session.get("starts_at"))
         host = session["host_id"]
-        lines = []
-        if starts:
-            lines.append(f"{stamp(starts)} · {stamp(starts, 'R')}")
-        if session.get("repeat"):
-            lines.append(f"🔁 {session['repeat']}")
+        upcoming = bool(starts) and not ended and not session.get("started")
+        zone, tz_hint = tz_note_parts(session["tz_note"]) if session.get("tz_note") and upcoming else (None, None)
+        blocks = []
+        if starts:   # Discord shows both stamps in each reader's own timezone
+            blocks.append(ui.two_line(f"**{stamp(starts)}**", details(
+                stamp(starts, "R"), repeat_short(session["repeat"]) if session.get("repeat") else None,
+                f"time read as {zone}" if zone else "your local time")))
         players = [f"<@{uid}> (host)" if uid == host else f"<@{uid}>" for uid in session["participants"]]
         if len(players) > 40:
             players = players[:40] + [f"and {len(players) - 40} more"]
-        lines.append(f"{'Played' if ended else 'Playing'}: " + (", ".join(players) or "nobody yet"))
-        if session.get("tz_note") and starts and not ended and not session.get("started"):
-            lines.append(ui.hint(session["tz_note"]))
+        count = len(session["participants"])
+        who_main = f"**{count} {'played' if ended else 'playing'}**" if count else "**Nobody yet**"
+        blocks.append(ui.two_line(who_main, ", ".join(players) or None))
         title = f"🎮 {session['title']}"
 
         if vote is not None and vote.get("in_card") and not ended:   # voting: the options are in this card
-            labels = vote.get("labels") or vote.get("names") or {}
-            buttons = [VoteButton(vote["id"], g, labels.get(g) or "Vote") for g in vote["games"][:MAX_VOTE_OPTIONS]]
-            body = "\n".join(["🗳️ **What should we play?**"] + self.vote_status(vote))
-            return ui.CardView(ui.card("\n".join(lines), ui.SEPARATOR, body, buttons, ui.SEPARATOR,
-                                       [SessionButton("end", session["id"])], title=title, color=ui.ATTENTION,
-                                       footer="Only players who joined before the vote can vote"))
+            # How to vote is in the private reply to a vote button, so the card stays short and has no footer.
+            return ui.CardView(ui.card(*blocks, ui.SEPARATOR, self.vote_status(vote, guild), vote_buttons(vote),
+                                       ui.SEPARATOR, [SessionButton("end", session["id"])],
+                                       title=title, color=ui.ATTENTION))
 
         result = session.get("vote_result")
-        result_text = None
+        result_block = None
         if result and not ended:
             if result.get("winner"):
-                head = f"🏆 **{result['winner']}** won the vote." + (f" {result['tie']}" if result.get("tie") else "")
+                head = f"🏆 **{result['winner']}** won the vote."
             else:
-                head = "🗳️ The vote ended without any votes."
-            parts = [head] + result.get("lines", [])
-            if result.get("footer"):
-                parts.append(ui.hint(result["footer"]))
-            result_text = "\n".join(parts)
+                head = "🗳️ **The vote ended without any votes.**"
+            lines = ([result["tie"]] if result.get("tie") else []) + result.get("lines", [])
+            lines += [result["footer"]] if result.get("footer") else []
+            result_block = ui.two_line(head, "\n".join(lines) or None)
         elif session.get("winner"):
-            lines.append(f"🏆 **{session['winner']}** won the vote.")
+            blocks.append(f"🏆 **{session['winner']}** won the vote.")
         if ended:
-            lines.append("This session has ended.")
-        elif session.get("vote_id"):   # a vote posted as its own card (sessions from before Phase 4 / old votes)
-            lines.append("🗳️ Voting now: pick a game on the vote below.")
-        notes = []
-        if not ended:
-            if starts and not session.get("started"):
+            return ui.CardView(ui.card(*blocks, title=title, color=ui.MUTED, footer="This session has ended."))
+        if session.get("vote_id"):   # a vote posted as its own card (sessions from before Phase 4 / old votes)
+            blocks.append("🗳️ Voting now: pick a game on the vote below.")
+        if tz_hint:   # the host's time may have been read in the wrong timezone: that's the one hint until it starts
+            footer = tz_hint
+        else:
+            notes = []
+            if upcoming:
                 notes.append(f"reminder {REMINDER_MINUTES} min before" if not session.get("reminded")
                              else "starting soon")
             if session.get("event_id"):
                 notes.append("on the server's events")
-            if not starts and not session.get("vote_id") and not session.get("winner") \
-                    and not session.get("vote_result"):
+            if not (starts or session.get("vote_id") or session.get("winner") or session.get("vote_result")):
                 notes.append("when everyone's in, the host presses Start vote")
-        footer = " · ".join(notes)
-        footer = footer[:1].upper() + footer[1:] if footer else None
-        if ended:
-            return ui.CardView(ui.card("\n".join(lines), title=title, color=ui.MUTED))
-        return ui.CardView(ui.card("\n".join(lines), ui.SEPARATOR if result_text else None, result_text,
+            footer = details(*notes) or None
+        return ui.CardView(ui.card(*blocks, ui.SEPARATOR if result_block else None, result_block,
                                    ui.SEPARATOR, session_buttons(session["id"]),
                                    title=title, color=ui.SUCCESS, footer=footer))
 
@@ -2597,7 +2654,7 @@ class GameManager(commands.Cog):
         vote = None
         if session.get("vote_id") and not ended:
             vote = (await self.config.guild(guild).votes()).get(session["vote_id"])
-        return self.session_card(session, ended, vote)
+        return self.session_card(session, ended, vote, guild)
 
     async def refresh_session_message(self, guild: discord.Guild, session: dict, ended: bool = False):
         view = await self.session_card_now(guild, session, ended) if session.get("card") else None
@@ -2653,7 +2710,7 @@ class GameManager(commands.Cog):
         }
         async with self.config.guild(guild).play_sessions() as sessions:
             sessions[sid] = session
-        message = await self.send_card(channel, self.session_card(session))   # names the host without a ping
+        message = await self.send_card(channel, self.session_card(session, guild=guild))   # names the host, no ping
         session["message_id"] = message.id
         session["event_id"] = await self.create_event(guild, session, host)
         async with self.config.guild(guild).play_sessions() as sessions:
@@ -2956,11 +3013,37 @@ class GameManager(commands.Cog):
         return [], "", counts
 
     @staticmethod
-    def vote_status(vote: dict) -> List[str]:
-        """A running vote's lines: how to vote, when it ends, who has voted and who hasn't, and what the options are."""
+    def vote_status(vote: dict, guild: Optional[discord.Guild] = None) -> str:
+        """
+        A running vote as one block: `🗳️ **Vote: what should we play?**` over `Pick up to 2 · ends in 2 minutes ·
+        3 of 8 voted, waiting on Ash, Bex and Cole` (display names when `guild` is given), plus where the options
+        came from when it isn't the usual "everyone has these installed". The tallies are on the buttons
+        (vote_buttons), and how to vote is in the private reply to a vote button.
+        """
+        ends = parse_iso(vote.get("ends_at"))
+        voters = vote["allowed_voters"]
+        waiting = [u for u in voters if u not in vote["user_votes"]]
+
+        def name(uid: str) -> str:
+            member = guild.get_member(int(uid)) if guild is not None else None
+            return member.display_name if member is not None else f"<@{uid}>"   # mentions here never ping
+
+        picks = vote["max_choices"]
+        voted = f"{len(voters) - len(waiting)} of {len(voters)} voted"
+        detail = details("Pick 1" if picks == 1 else f"Pick up to {picks}",
+                         f"ends {stamp(ends, 'R')}" if ends else None,   # (this replaced the "30 seconds left" ping)
+                         voted + (f", waiting on {name_list([name(u) for u in waiting])}" if waiting else ""))
+        basis = vote.get("basis") or ""
+        if basis and not basis.startswith("everyone has"):
+            detail += f"\nOptions: {basis}."
+        return ui.two_line("🗳️ **Vote: what should we play?**", detail)
+
+    @staticmethod
+    def vote_lines(vote: dict) -> List[str]:
+        """The older vote card's lines (vote_card). Its "Waiting on" mentions were the ping when it was posted."""
         ends = parse_iso(vote.get("ends_at"))
         lines = [f"Pick up to **{vote['max_choices']}**. Press a game again to take your vote back."]
-        if ends:   # (this replaced the old "30 seconds left" ping)
+        if ends:
             lines.append(f"Voting ends {stamp(ends, 'R')}, or as soon as everyone has voted.")
         voters = vote["allowed_voters"]
         voted = [u for u in voters if u in vote["user_votes"]]
@@ -2976,12 +3059,10 @@ class GameManager(commands.Cog):
         """
         A vote as a card of its own: only for sessions posted as embeds (before cards) and votes started before
         Phase 4. Votes on card sessions run inside the session card (session_card). The "Waiting on" mentions were
-        the ping when one was posted (pings(players)); every redraw is NO_PING.
+        the ping when one was posted (pings(players)); every redraw is NO_PING. Kept in its older shape, apart
+        from the tallies on its buttons.
         """
-        lines = self.vote_status(vote)
-        labels = vote.get("labels") or vote.get("names") or {}
-        buttons = [VoteButton(vote["id"], g, labels.get(g) or "Vote") for g in vote["games"][:MAX_VOTE_OPTIONS]]
-        return ui.CardView(ui.card("\n".join(lines), ui.SEPARATOR, buttons,
+        return ui.CardView(ui.card("\n".join(self.vote_lines(vote)), ui.SEPARATOR, vote_buttons(vote),
                                    title=f"🗳️ What should we play? {vote.get('title', '')}".strip(),
                                    color=ui.BRAND, footer="Only session players can vote"))
 
@@ -3027,7 +3108,7 @@ class GameManager(commands.Cog):
                                                     "on the session first.", ephemeral=True)
         games = await self.config.guild(guild).games()
         users = await self.config.guild(guild).users()
-        candidates, basis, counts = self.vote_candidates(games, users, players)
+        candidates, basis, _ = self.vote_candidates(games, users, players)
         if not candidates:
             return await self.reply(target, content="⚠️ These players don't have any games in common yet. Everyone can "
                                                     f"mark theirs with {await self.cmd(guild, 'games install')}.",
@@ -3037,8 +3118,9 @@ class GameManager(commands.Cog):
             basis += f" (top {MAX_VOTE_OPTIONS} of {len(candidates)})"
         max_choices = max(1, min(max_choices, len(options)))
         seconds = max(MIN_VOTE_SECONDS, min(seconds, MAX_VOTE_SECONDS))
-        show_counts = not basis.startswith("everyone has")
-        labels = [(g, games[g]["name"][:70] + (f" ({counts[g]}/{len(players)})" if show_counts else "")) for g in options]
+        # Plain names: the buttons add each game's running tally (vote_buttons), and the card says where the
+        # options came from when not everyone has them installed.
+        labels = [(g, games[g]["name"][:70]) for g in options]
 
         vid = generate_id()
         ends_at = utcnow() + timedelta(seconds=seconds)
@@ -3090,25 +3172,29 @@ class GameManager(commands.Cog):
             if vote is None:
                 feedback = "⚠️ This vote has ended."
             elif uid not in vote["allowed_voters"]:
-                feedback = "🔒 Only players who joined the session can vote."
+                feedback = ui.line(ui.LOCKED, "Only players who were in the session when the vote started can vote.")
                 vote = None
             else:
                 name = vote.get("names", {}).get(gid, "that game")
                 mine = vote["user_votes"].setdefault(uid, [])
                 tallies = vote["tallies"]
+                picks = vote["max_choices"]
                 if gid in mine:
                     mine.remove(gid)
                     tallies[gid] = tallies.get(gid, 1) - 1
                     if tallies[gid] <= 0:
                         del tallies[gid]
                     feedback = f"✅ Took back your vote for **{name}**."
-                elif len(mine) >= vote["max_choices"]:
-                    feedback = (f"⏳ You can pick {vote['max_choices']}. Press one of your picks again to take it "
+                elif len(mine) >= picks:
+                    feedback = (f"⏳ You can pick {picks}. Press one of your picks again to take it "
                                 "back first.")
                 else:
                     mine.append(gid)
                     tallies[gid] = tallies.get(gid, 0) + 1
-                    feedback = f"✅ Voted for **{name}**."
+                    # How voting works lives here, in the voter's private reply, instead of on the card.
+                    how = ("Press it again to take your vote back, then you can pick another." if picks == 1
+                           else f"Press a game again to take your vote back. You can pick up to {picks}.")
+                    feedback = ui.line(ui.DONE, f"Voted for **{name}**.", how)
                 if not mine:
                     del vote["user_votes"][uid]
                 everyone_voted = len(vote["user_votes"]) >= len(vote["allowed_voters"])
@@ -3121,7 +3207,7 @@ class GameManager(commands.Cog):
                 if vote.get("in_card"):   # the vote is inside the session card: redraw the whole card
                     session = (await self.config.guild(guild).play_sessions()).get(vote.get("session_id"))
                     if session is not None and ui.is_card(interaction.message):
-                        await interaction.message.edit(view=self.session_card(session, vote=vote),
+                        await interaction.message.edit(view=self.session_card(session, vote=vote, guild=guild),
                                                        allowed_mentions=NO_PING)
                 elif ui.is_card(interaction.message):
                     await interaction.message.edit(view=self.vote_card(vote), allowed_mentions=NO_PING)
@@ -3420,7 +3506,11 @@ class GameManager(commands.Cog):
         requests = await self.config.guild(ctx.guild).game_requests()
         if not requests:
             return await ctx.send("❓ No pending requests.")
-        items = [f"**{r['name']}** · requested by <@{r['requested_by']}>" for r in requests.values()]
+        items = []
+        for r in requests.values():
+            when = parse_iso(r.get("requested_at"))
+            items.append(ui.row(f"**{r['name']}**", details(f"requested by <@{r['requested_by']}>",
+                                                             stamp(when, "R") if when else None)))
         await self.send_list(ctx, items, "🎮 Game requests",
                              f"{ui.plural(len(items), 'request')} · Game admins approve with "
                              f"{await self.prefix(ctx.guild)}games admin approve <game>")
@@ -3527,13 +3617,16 @@ class GameManager(commands.Cog):
         items = []
         for s in sorted(sessions.values(), key=lambda s: s.get("starts_at") or s["created_at"]):
             starts = parse_iso(s.get("starts_at"))
-            when = f" · {stamp(starts, 'R')}" if starts else ""
-            status = " · 🗳️ voting" if s.get("vote_id") else (f" · 🏆 {s['winner']}" if s.get("winner") else "")
             link = self.session_link(ctx.guild, s)
             title = f"[{s['title']}]({link})" if link else s["title"]
-            items.append(f"**{title}**{when} · <@{s['host_id']}> hosting · "
-                         f"{ui.plural(len(s['participants']), 'player')}{status} · `{s['id']}`")
-        await self.send_list(ctx, items, "🎮 Active sessions", ui.plural(len(items), "session"))
+            items.append(ui.row(
+                f"**{title}**" + (" 🗳️" if s.get("vote_id") else ""),   # 🗳️ = voting right now
+                details(stamp(starts, "R") if starts else None, f"hosted by <@{s['host_id']}>",
+                        ui.plural(len(s["participants"]), "player"),
+                        f"playing {s['winner']}" if s.get("winner") else None, f"ID `{s['id']}`")))
+        voting = any(s.get("vote_id") for s in sessions.values())
+        await self.send_list(ctx, items, "🎮 Active sessions",
+                             ui.plural(len(items), "session") + (" · 🗳️ = voting now" if voting else ""))
 
     @games.command(name="endsession")
     async def games_endsession(self, ctx: commands.Context, session_id: str = None):
@@ -3561,7 +3654,7 @@ class GameManager(commands.Cog):
         names = vote.get("names") or {}
         games = await self.config.guild(ctx.guild).games()
         tallies = sorted(((c, g) for g, c in vote["tallies"].items() if c > 0), reverse=True)
-        items = [f"**{names.get(g) or games.get(g, {}).get('name', 'Unknown game')}** · {ui.plural(c, 'vote')}"
+        items = [ui.row(f"**{names.get(g) or games.get(g, {}).get('name', 'Unknown game')}**", ui.plural(c, "vote"))
                  for c, g in tallies]
         await self.send_list(ctx, items, f"🗳️ Votes so far: {vote.get('title', '')}".strip().rstrip(":"),
                              f"{len(vote['user_votes'])} of {len(vote['allowed_voters'])} voted · ID {vote['id']}",
@@ -3585,7 +3678,9 @@ class GameManager(commands.Cog):
         """Show install requests from game admins and how many people have installed each game."""
         games = await self.config.guild(ctx.guild).games()
         requests = await self.config.guild(ctx.guild).install_requests()
-        items = [f"**{games[r['game_id']]['name']}** · {len(r['installed_by'])}/{len(r['target_users'])} installed"
+        items = [ui.row(f"**{games[r['game_id']]['name']}**",
+                        details(f"{len(r['installed_by'])} of {len(r['target_users'])} installed",
+                                f"asked by <@{r['requested_by']}>" if r.get("requested_by") else None))
                  for r in requests.values() if r["game_id"] in games]
         if not items:
             return await ctx.send("❓ No install requests.")
@@ -3682,8 +3777,9 @@ class GameManager(commands.Cog):
         items = []
         for s in sorted(schedules.values(), key=lambda s: s["next_start"]):
             nxt = parse_iso(s["next_start"])
-            items.append(f"**{s['title']}** · {repeat_label(s)} · next {stamp(nxt, 'R')} · <@{s['host_id']}> hosting "
-                         f"· <#{s['channel_id']}> · `{s['id']}`")
+            items.append(ui.row(f"**{s['title']}**",
+                                details(repeat_label(s), f"next {stamp(nxt, 'R')}", f"hosted by <@{s['host_id']}>",
+                                        f"in <#{s['channel_id']}>", f"ID `{s['id']}`")))
         await self.send_list(ctx, items, "🎮 Repeating sessions",
                              f"{ui.plural(len(items), 'schedule')} · Manage with "
                              f"{await self.prefix(ctx.guild)}games recurring skip <id> or stop <id>")
@@ -3877,7 +3973,7 @@ class GameManager(commands.Cog):
         if not view.value:
             if view.interaction is not None:
                 await view.interaction.response.edit_message(
-                    view=final_card(ui.line(ui.DONE, "Cancelled. Nothing was removed."), title=title, color=ui.MUTED),
+                    view=final_card("Cancelled. Nothing was removed.", title=title, color=ui.MUTED),
                     allowed_mentions=NO_PING)
             return
         async with self.config.guild(ctx.guild).games() as all_games:

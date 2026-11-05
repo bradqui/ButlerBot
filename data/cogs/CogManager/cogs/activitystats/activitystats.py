@@ -202,16 +202,61 @@ def pct(part: float, whole: float) -> str:
     return f"{part / whole:.0%}" if whole else "n/a"
 
 
-def change(current: float, previous: float) -> str:
+def trend(current: float, previous: float, before: str) -> Optional[str]:
+    """"up 12% on the week before" (or down, or the same), or None when there's nothing to compare with."""
     if not previous:
-        return ""
+        return None
     delta = (current - previous) / previous
-    return f" ({'+' if delta >= 0 else ''}{delta:.0%} vs. the period before)"
+    if round(delta * 100) == 0:
+        return f"the same as {before}"
+    return f"{'up' if delta > 0 else 'down'} {abs(delta):.0%} on {before}"
 
 
 def period_label(days: int) -> str:
     return {0: "all time", 1: "today", 7: "this week", 30: "this month", 365: "this year"}.get(
         days, f"last {days} days")
+
+
+def before_label(days: int) -> str:
+    """The period before this one, for trend(): "the week before", "the 14 days before"."""
+    return {1: "the day before", 7: "the week before", 30: "the month before", 365: "the year before"}.get(
+        days, f"the {days} days before")
+
+
+def details(*parts: Optional[str]) -> Optional[str]:
+    """A row's detail line: the parts that aren't empty, joined with " · "."""
+    return " · ".join(p for p in parts if p) or None
+
+
+def md(text: str) -> str:
+    """Names people chose (games, session titles) with their markdown escaped, so a `*` can't bold half a row."""
+    return discord.utils.escape_markdown(str(text))
+
+
+def ranked_main(i: int, name: str) -> str:
+    """A ranked row's bold main line: the number, then a medal for the top three (markers go at the end)."""
+    return f"**{i + 1}. {name}**" + (f" {MEDALS[i]}" if i < len(MEDALS) else "")
+
+
+def leader_row(head: str, ranked: List[Tuple[str, float]], full: Callable[[float], str],
+               short: Callable[[float], str]) -> tuple:
+    """
+    The top item as a fact, the runners-up in its details:
+    `**Busiest in #general**` / `1,204 messages · then #gaming 877 · #memes 402`.
+    """
+    (name, n), rest = ranked[0], ranked[1:]
+    detail = full(n)
+    if rest:
+        detail += " · then " + " · ".join(f"{other} {short(m)}" for other, m in rest)
+    return ui.row(f"**{head} {name}**", detail)
+
+
+def fmt_messages(n: float) -> str:
+    return ui.plural(int(n), "message")
+
+
+def fmt_count(n: float) -> str:
+    return f"{int(n):,}"
 
 
 def parse_period(text: str) -> Optional[int]:
@@ -289,23 +334,36 @@ class ChannelPicker(ui.ExpiringCard):
     """Asks which of several same-named channels the command meant."""
 
     expired_note = "Expired. Nothing was changed."
-    SHOWN = 10
+    BUTTONS = 5    # up to this many choices are buttons; more are a select menu
+    SHOWN = 25     # a select menu's limit
 
     def __init__(self, owner_id: int, shared: SharedName):
         super().__init__(owner_id, timeout=60)
         self.chosen = None
-        buttons = []
-        for channel in shared.channels[:self.SHOWN]:
-            place = getattr(getattr(channel, "category", None), "name", None)
-            label = f"{channel.name} · {place}" if place else channel.name
-            button = discord.ui.Button(label=ui.truncate(label, 80), emoji=CHANNEL_ICONS.get(type(channel), "💬"))
-            button.callback = self._choose(channel)
-            buttons.append(button)
+        self.channels = shared.channels[:self.SHOWN]
+        if len(self.channels) <= self.BUTTONS:
+            choices = []
+            for channel in self.channels:
+                button = discord.ui.Button(label=ui.truncate(self._label(channel), 80),
+                                           emoji=CHANNEL_ICONS.get(type(channel), "💬"))
+                button.callback = self._choose(channel)
+                choices.append(button)
+        else:
+            menu = discord.ui.Select(placeholder="Pick a channel…", options=[
+                discord.SelectOption(label=ui.truncate(self._label(c), 100), value=str(i),
+                                     emoji=CHANNEL_ICONS.get(type(c), "💬")) for i, c in enumerate(self.channels)])
+            menu.callback = self._pick(menu)
+            choices = [menu]
         extra = len(shared.channels) - self.SHOWN
         self.add_item(ui.card(
             ui.line(ui.ASK, f"More than one channel is called **{discord.utils.escape_markdown(shared.name)}**. "
                             "Which one?"),
-            buttons, footer=f"{extra} more not shown. Use the channel's mention instead." if extra > 0 else None))
+            choices, footer=f"{extra} more not shown. Use the channel's mention instead." if extra > 0 else None))
+
+    @staticmethod
+    def _label(channel) -> str:
+        place = getattr(getattr(channel, "category", None), "name", None)
+        return f"{channel.name} · {place}" if place else channel.name
 
     def _choose(self, channel):
         async def callback(interaction: discord.Interaction):
@@ -314,11 +372,18 @@ class ChannelPicker(ui.ExpiringCard):
             self.stop()
         return callback
 
+    def _pick(self, menu: discord.ui.Select):
+        async def callback(interaction: discord.Interaction):
+            await self._choose(self.channels[int(menu.values[0])])(interaction)
+        return callback
+
 
 @dataclass
 class Report:
     title: str
-    lines: List[str] = field(default_factory=list)
+    # Each line is a block: ui.row(main, detail) (a bold fact or list item with its numbers on a small line under
+    # it) or a plain string (a note, or a list of names).
+    lines: List[ui.Row] = field(default_factory=list)
     chart: Optional[Callable[[], bytes]] = None   # draws a PNG; runs in a worker thread
     admin: bool = False
     # Where the report's list starts: lines from here on are paged as board rows, and the lines before it (the
@@ -483,14 +548,20 @@ HEAD_ALONE_ROOM = 3400   # ...and a report with no list pages once its summary i
 COVERAGE_NOTE = "-# Tracking started"   # _coverage_note's lines start with this
 
 
-def split_row(line: str, room: int = ROW_ROOM) -> List[str]:
+def is_coverage(line: ui.Row) -> bool:
+    return isinstance(line, str) and line.startswith(COVERAGE_NOTE)
+
+
+def split_row(line: ui.Row, room: int = ROW_ROOM) -> List[ui.Row]:
     """
-    A list line as board rows of at most `room` characters. Long lines break at ", " (between names, so a mention
-    is never cut) and at line breaks; a small-print ("-# ") line stays small on its continuation rows.
+    A list line (a row tuple or a string) as board rows of at most `room` characters. Long lines break at ", "
+    (between names, so a mention is never cut) and at line breaks; a small-print ("-# ") line, like a row's
+    details, stays small on its continuation rows.
     """
-    if len(line) <= room:
+    if len(ui.row_text(line)) <= room:
         return [line]
-    rows: List[str] = []
+    line = ui.row_text(line)
+    rows: List[ui.Row] = []
     current = ""
     for part in line.split("\n"):
         small = "-# " if part.startswith("-# ") else ""
@@ -505,24 +576,49 @@ def split_row(line: str, room: int = ROW_ROOM) -> List[str]:
     return rows
 
 
-def report_layout(report: Report) -> Tuple[Optional[str], List[str]]:
+def report_layout(report: Report) -> Tuple[List[str], List[ui.Row]]:
     """
-    (summary, rows) for a report's board. The "Tracking started …" note at the end of a list moves up
+    (summary blocks, rows) for a report's board. The "Tracking started …" note at the end of a list moves up
     into the summary, so a full page of rows doesn't spill a lone note onto page 2.
     """
     lines = list(report.lines)
     split = len(lines) if report.rows_from is None else report.rows_from
     head, rows = lines[:split], lines[split:]
     if report.rows_from is not None:
-        while len(rows) > 1 and rows[-1].startswith(COVERAGE_NOTE):
+        while len(rows) > 1 and is_coverage(rows[-1]):
             head.append(rows.pop())
     room = HEAD_ROOM if rows else HEAD_ALONE_ROOM
-    if len("\n".join(head)) > room:   # too long to repeat on every page: page everything instead
-        head, rows = [], lines
-    out: List[str] = []
+    blocks = [ui.row_text(line) for line in head]
+    if len("\n".join(blocks)) > room:   # too long to repeat on every page: page everything instead
+        blocks, rows = [], lines
+    out: List[ui.Row] = []
     for row in rows:
         out.extend(split_row(row))
-    return "\n".join(head) or None, out
+    return blocks, out
+
+
+class ReportBoard(ui.Board):
+    """
+    A report's board. Its summary (above the chart, repeated on every page) is several blocks, and each is its own
+    text block, like the rows, so Discord puts a little space between the facts.
+    """
+
+    def __init__(self, title: str, rows: List[ui.Row], *, blocks: List[str], **kwargs):
+        self.blocks = blocks
+        super().__init__(title, rows, header="\n".join(blocks) or None, **kwargs)
+
+    def build(self) -> discord.ui.Container:
+        container = super().build()
+        if len(self.blocks) < 2:
+            return container
+        items, split = [], False
+        for item in container.children:
+            if not split and isinstance(item, discord.ui.TextDisplay) and item.content == self.header:
+                items.extend(discord.ui.TextDisplay(block) for block in self.blocks)
+                split = True
+            else:
+                items.append(item)
+        return discord.ui.Container(*items, accent_color=container.accent_color)
 
 
 # ==========================================
@@ -793,16 +889,39 @@ class ActivityStats(commands.Cog):
                  if gid == guild.id]
         return [(u, g, max(s, since), min(e, until)) for u, g, s, e in rows if min(e, until) > max(s, since)]
 
-    async def _tz(self, member: discord.Member) -> Tuple[tzinfo, str]:
-        """The member's GameManager timezone, else the server's, else UTC."""
+    async def _tz_info(self, member: discord.Member) -> Tuple[tzinfo, str, bool]:
+        """(timezone, its name, whether the member set it): their GameManager timezone, else the server's, else UTC."""
         gm = self.bot.get_cog("GameManager")
         if gm is not None and hasattr(gm, "timezone_for"):
             try:
-                tz, name, _ = await gm.timezone_for(member)
-                return tz, name
+                return await gm.timezone_for(member)
             except Exception:
                 log.debug("GameManager timezone lookup failed", exc_info=True)
-        return timezone.utc, "UTC"
+        return timezone.utc, "UTC", False
+
+    async def _tz(self, member: discord.Member) -> Tuple[tzinfo, str]:
+        tz, name, _ = await self._tz_info(member)
+        return tz, name
+
+    async def _tz_note(self, member: discord.Member, viewer: Optional[discord.Member] = None) -> str:
+        """Which timezone a report's times are in, for a detail line: "your timezone", or its name."""
+        _, name, personal = await self._tz_info(member)
+        return "your timezone" if personal and member == (viewer or member) else f"{name} time"
+
+    @staticmethod
+    def _person(guild: discord.Guild, user_id: int) -> str:
+        """A member's display name for a row's main line, or "A former member"."""
+        member = guild.get_member(user_id)
+        return md(member.display_name) if member else "A former member"
+
+    def _feature_name(self, cog: commands.Cog) -> str:
+        """The name people know a cog by, from the Handbook cog when it's loaded ("AI chat", not "ClaudeChat")."""
+        handbook = self.bot.get_cog("Handbook")
+        friendly = getattr(sys.modules.get(type(handbook).__module__), "friendly_name", None) if handbook else None
+        try:
+            return friendly(cog) if friendly else cog.qualified_name
+        except Exception:
+            return cog.qualified_name
 
     async def _guild_tz(self, guild: discord.Guild) -> Tuple[tzinfo, str]:
         gm = self.bot.get_cog("GameManager")
@@ -844,7 +963,7 @@ class ActivityStats(commands.Cog):
     async def report_overview(self, viewer: discord.Member, days: int = 7) -> Report:
         guild, now = viewer.guild, time.time()
         days = days or 7
-        tz, tz_name = await self._tz(viewer)
+        tz, _ = await self._tz(viewer)
         since = now - days * DAY
         total = previous = 0
         per_channel, slots, daily, users = Counter(), Counter(), Counter(), set()
@@ -861,22 +980,26 @@ class ActivityStats(commands.Cog):
             daily[local.date()] += n
             slots[(local.weekday(), local.hour)] += n
         report = Report(f"📊 {guild.name}: {period_label(days)}")
-        report.lines.append(f"💬 **{total:,}** messages from **{len(users)}** members{change(total, previous)}")
+        report.lines.append(ui.row(f"**{fmt_messages(total)}**", details(
+            f"from {ui.plural(len(users), 'member')}", trend(total, previous, before_label(days)))))
         if per_channel:
-            report.lines.append("🔥 Busiest channels: " + ", ".join(
-                f"{self._channel_name(guild, c)} ({n:,})" for c, n in per_channel.most_common(3)))
+            report.lines.append(leader_row("Busiest in", [(self._channel_name(guild, c), n)
+                                                          for c, n in per_channel.most_common(3)],
+                                           fmt_messages, fmt_count))
         if slots:
             (weekday, hour), _ = slots.most_common(1)[0]
-            report.lines.append(f"🕘 Busiest hour: **{WEEKDAYS[weekday]} {hour_label(hour)}** ({tz_name})")
+            report.lines.append(ui.row(f"**Busiest on {WEEKDAYS[weekday]} at {hour_label(hour)}**",
+                                       await self._tz_note(viewer)))
         voice = sum(e - s for c, _, s, e in await self._voice_rows(guild, since, now) if self._can_see(viewer, guild, c))
-        if voice:
-            report.lines.append(f"🔊 **{fmt_hours(voice)}** in voice")
         games = Counter()
         for _, game, s, e in await self._game_rows(guild, since, now):
             games[game] += e - s
-        if games:
-            game, seconds = games.most_common(1)[0]
-            report.lines.append(f"🎮 Most played: **{game}** ({fmt_hours(seconds)})")
+        top_game = games.most_common(1)[0] if games else None
+        if voice:
+            report.lines.append(ui.row(f"**{fmt_hours(voice)} in voice**", top_game and
+                                       f"most played: {md(top_game[0])}, {fmt_hours(top_game[1])}"))
+        elif top_game:
+            report.lines.append(ui.row(f"**Most played: {md(top_game[0])}**", fmt_hours(top_game[1])))
         if note := await self._coverage_note(guild, since):
             report.lines.append(note)
         days_list = day_range(since, now, tz)
@@ -892,13 +1015,14 @@ class ActivityStats(commands.Cog):
             if self._can_see(viewer, guild, cid):
                 per_channel[cid] += n
                 per_day[cid][local_day(hour, tz)] += n
-        report = Report(f"💬 Messages per channel: {period_label(days)}")
+        report = Report(f"📊 Messages per channel: {period_label(days)}")
         total = sum(per_channel.values())
-        report.lines.append(f"**{total:,}** messages in **{len(per_channel)}** channels, "
-                            f"about **{total / days:,.0f}** a day.")
+        report.lines.append(ui.row(f"**{fmt_messages(total)}**", details(
+            f"in {ui.plural(len(per_channel), 'channel')}", f"about {total / days:,.0f} a day")))
         report.start_list()
         for cid, n in per_channel.most_common(15):
-            report.lines.append(f"{self._channel_name(guild, cid)}: **{n:,}** ({n / days:,.1f}/day)")
+            report.lines.append(ui.row(f"**{self._channel_name(guild, cid)}**",
+                                       details(fmt_messages(n), f"{n / days:,.1f} a day")))
         if note := await self._coverage_note(guild, since):
             report.lines.append(note)
         days_list = day_range(since, now, tz)
@@ -912,7 +1036,7 @@ class ActivityStats(commands.Cog):
     async def report_channel(self, viewer: discord.Member, channel_id: int, days: int = 30) -> Report:
         guild, now = viewer.guild, time.time()
         days = days or 30
-        tz, tz_name = await self._tz(viewer)
+        tz, _ = await self._tz(viewer)
         since = now - days * DAY
         daily, posters, hours = Counter(), Counter(), Counter()
         for _, uid, hour, n in await self._message_rows(guild, since, channel_id=channel_id):
@@ -920,15 +1044,18 @@ class ActivityStats(commands.Cog):
             posters[uid] += n
             hours[datetime.fromtimestamp(hour, tz).hour] += n
         total = sum(daily.values())
-        report = Report(f"💬 #{getattr(guild.get_channel(channel_id), 'name', 'deleted')}: {period_label(days)}")
-        report.lines.append(f"**{total:,}** messages from **{len(posters)}** members, "
-                            f"about **{total / days:,.1f}** a day.")
+        report = Report(f"📊 #{getattr(guild.get_channel(channel_id), 'name', 'deleted')}: {period_label(days)}")
+        report.lines.append(ui.row(f"**{fmt_messages(total)}**", details(
+            f"from {ui.plural(len(posters), 'member')}", f"about {total / days:,.1f} a day")))
         if daily:
             best_day, best = daily.most_common(1)[0]
-            report.lines.append(f"📅 Busiest day: **{best_day:%a %b %d}** ({best:,})")
-            report.lines.append(f"🕘 Busiest hour: **{hour_label(hours.most_common(1)[0][0])}** ({tz_name})")
-            report.lines.append("🏆 Top posters: " + ", ".join(
-                f"<@{u}> ({n:,})" for u, n in posters.most_common(5) if guild.get_member(u)))
+            report.lines.append(ui.row(f"**Busiest on {best_day:%a} {short_date(best_day)}**", fmt_messages(best)))
+            report.lines.append(ui.row(f"**Busiest around {hour_label(hours.most_common(1)[0][0])}**",
+                                       await self._tz_note(viewer)))
+            report.start_list()   # the top posters
+            top = [(u, n) for u, n in posters.most_common() if guild.get_member(u)][:5]
+            for i, (uid, n) in enumerate(top):
+                report.lines.append(ui.row(ranked_main(i, self._person(guild, uid)), fmt_messages(n)))
         if note := await self._coverage_note(guild, since):
             report.lines.append(note)
         days_list = day_range(since, now, tz)
@@ -944,12 +1071,12 @@ class ActivityStats(commands.Cog):
                 counts[uid] += n
         ranked = [(uid, n) for uid, n in counts.most_common() if guild.get_member(uid)]
         where = f" in #{getattr(guild.get_channel(channel_id), 'name', 'deleted')}" if channel_id else ""
-        report = Report(f"🏆 Top posters{where}: {period_label(days)}", rows_from=0)
+        report = Report(f"📊 Top posters{where}: {period_label(days)}", rows_from=0)
         for i, (uid, n) in enumerate(ranked[:TOP_COUNT]):
-            report.lines.append(f"{MEDALS[i] if i < 3 else f'`{i + 1}.`'} <@{uid}>: **{n:,}**")
+            report.lines.append(ui.row(ranked_main(i, self._person(guild, uid)), fmt_messages(n)))
         mine = next((i for i, (uid, _) in enumerate(ranked) if uid == viewer.id), None)
         if mine is not None and mine >= TOP_COUNT:
-            report.lines.append(f"…\n`{mine + 1}.` You: **{ranked[mine][1]:,}**")
+            report.lines.append(ui.row(ranked_main(mine, "You"), fmt_messages(ranked[mine][1])))
         if not ranked:
             report.lines.append("No messages counted yet.")
         if days and (note := await self._coverage_note(guild, since)):
@@ -967,19 +1094,23 @@ class ActivityStats(commands.Cog):
                 local = datetime.fromtimestamp(hour, tz)
                 grid[local.weekday()][local.hour] += n
         where = f"#{getattr(guild.get_channel(channel_id), 'name', 'deleted')}" if channel_id else guild.name
-        report = Report(f"🗓️ When {where} is busiest: {period_label(days)}")
+        report = Report(f"📊 When {where} is busiest: {period_label(days)}")
         slots = sorted(((grid[d][h], d, h) for d in range(7) for h in range(24)), reverse=True)
         if not slots[0][0]:
             report.lines.append("No messages counted yet.")
             return report
-        report.lines.append("🔥 Busiest hours: " + ", ".join(
-            f"**{WEEKDAYS[d]} {hour_label(h)}**" for n, d, h in slots[:3] if n))
+        busiest = [f"{WEEKDAYS[d]} at {hour_label(h)}" for n, d, h in slots[:3] if n]
+        report.lines.append(ui.row(f"**Busiest on {busiest[0]}**", details(
+            "then " + " · ".join(busiest[1:]) if len(busiest) > 1 else None, await self._tz_note(viewer))))
         by_day = [sum(row) for row in grid]
         by_hour = [sum(grid[d][h] for d in range(7)) for h in range(24)]
-        report.lines.append(f"📅 Busiest day: **{WEEKDAYS[by_day.index(max(by_day))]}** · quietest: "
-                            f"**{WEEKDAYS[by_day.index(min(by_day))]}**")
-        report.lines.append(f"🕘 Busiest time of day: **{hour_label(by_hour.index(max(by_hour)))}**")
-        report.lines.append(f"-# Times are in {tz_name}.")
+        if max(by_day) > min(by_day):
+            report.lines.append(ui.row(f"**Busiest day: {WEEKDAYS[by_day.index(max(by_day))]}**",
+                                       f"quietest: {WEEKDAYS[by_day.index(min(by_day))]}"))
+        else:
+            report.lines.append(ui.row("**Every day is as busy as the rest**"))
+        report.lines.append(ui.row(f"**Busiest hour: {hour_label(by_hour.index(max(by_hour)))}**",
+                                   "across the whole week"))
         if note := await self._coverage_note(guild, since):
             report.lines.append(note)
         report.chart = lambda: heatmap_chart(grid, tz_name)
@@ -1001,15 +1132,12 @@ class ActivityStats(commands.Cog):
             per_user[uid] += end - start
             for day, seconds in split_by_day(start, end, tz):
                 daily[day] += seconds / 3600
-        report = Report(f"🔊 Voice: {period_label(days)}")
+        report = Report(f"📊 Voice: {period_label(days)}")
         if not rows:
             report.lines.append("No voice time recorded yet.")
             return report
-        report.lines.append(f"**{fmt_hours(sum(per_channel.values()))}** in voice from **{len(per_user)}** members.")
-        report.lines.append("📢 Channels: " + ", ".join(
-            f"{self._channel_name(guild, c)} ({fmt_hours(s)})" for c, s in per_channel.most_common(5)))
-        report.lines.append("🏆 Most time: " + ", ".join(
-            f"<@{u}> ({fmt_hours(s)})" for u, s in per_user.most_common(5) if guild.get_member(u)))
+        report.lines.append(ui.row(f"**{fmt_hours(sum(per_channel.values()))} in voice**",
+                                   f"from {ui.plural(len(per_user), 'member')}"))
         events = sorted([(s, 1) for _, _, s, _ in rows] + [(e, -1) for _, _, _, e in rows], key=lambda x: (x[0], x[1]))
         current = peak = 0
         peak_at = since
@@ -1017,7 +1145,14 @@ class ActivityStats(commands.Cog):
             current += delta
             if current > peak:
                 peak, peak_at = current, ts
-        report.lines.append(f"👥 Most at once: **{peak}** (<t:{int(peak_at)}:f>)")
+        report.lines.append(ui.row(f"**Up to {ui.plural(peak, 'person', 'people')} at once**",
+                                   f"on <t:{int(peak_at)}:f>"))
+        report.lines.append(leader_row("Busiest in", [(self._channel_name(guild, c), s)
+                                                      for c, s in per_channel.most_common(5)], fmt_hours, fmt_hours))
+        report.start_list()   # who spent the most time in voice
+        top = [(u, s) for u, s in per_user.most_common() if guild.get_member(u)][:5]
+        for i, (uid, seconds) in enumerate(top):
+            report.lines.append(ui.row(ranked_main(i, self._person(guild, uid)), f"{fmt_hours(seconds)} in voice"))
         if note := await self._coverage_note(guild, since):
             report.lines.append(note)
         days_list = day_range(since, now, tz)
@@ -1028,7 +1163,7 @@ class ActivityStats(commands.Cog):
     async def report_me(self, viewer: discord.Member, member: discord.Member, days: int = 30) -> Report:
         guild, now = viewer.guild, time.time()
         days = days or 30
-        tz, tz_name = await self._tz(member)
+        tz, _ = await self._tz(member)
         since = now - days * DAY
         period_counts, channels, hours = Counter(), Counter(), Counter()
         for cid, uid, hour, n in await self._message_rows(guild, since):
@@ -1043,41 +1178,44 @@ class ActivityStats(commands.Cog):
         mine = period_counts[member.id]
         ranked = [u for u, _ in period_counts.most_common() if guild.get_member(u)]
         who = "Your" if member == viewer else f"{member.display_name}'s"
-        report = Report(f"🙋 {who} stats: {period_label(days)}")
-        rank = f", **#{ranked.index(member.id) + 1}** in the server" if member.id in ranked else ""
-        report.lines.append(f"💬 **{mine:,}** messages{rank} · **{all_time:,}** all time")
+        report = Report(f"📊 {who} stats: {period_label(days)}")
+        rank = f"#{ranked.index(member.id) + 1} in the server" if member.id in ranked else None
+        report.lines.append(ui.row(f"**{fmt_messages(mine)}**", details(rank, f"{all_time:,} all time")))
         if channels:
-            report.lines.append("📍 Most active in: " + ", ".join(
-                f"{self._channel_name(guild, c)} ({n:,})" for c, n in channels.most_common(3)))
-            report.lines.append("🕘 Usually around: " + ", ".join(
-                f"**{hour_label(h)}**" for h, _ in hours.most_common(3)) + f" ({tz_name})")
+            report.lines.append(leader_row("Most active in", [(self._channel_name(guild, c), n)
+                                                              for c, n in channels.most_common(3)],
+                                           fmt_messages, fmt_count))
+            usual = [hour_label(h) for h, _ in hours.most_common(3)]
+            report.lines.append(ui.row(f"**Usually around {usual[0]}**", details(
+                "then " + " · ".join(usual[1:]) if len(usual) > 1 else None, await self._tz_note(member, viewer))))
         voice = Counter()
         for cid, uid, start, end in await self._voice_rows(guild, since, now):
             if uid == member.id and self._can_see(viewer, guild, cid):
                 voice[cid] += end - start
         if voice:
             top_channel = voice.most_common(1)[0][0]
-            report.lines.append(f"🔊 **{fmt_hours(sum(voice.values()))}** in voice, mostly in "
-                                f"{self._channel_name(guild, top_channel)}")
+            report.lines.append(ui.row(f"**{fmt_hours(sum(voice.values()))} in voice**",
+                                       f"mostly in {self._channel_name(guild, top_channel)}"))
         games = Counter()
         for uid, game, start, end in await self._game_rows(guild, since, now):
             if uid == member.id:
                 games[game] += end - start
         if games:
-            report.lines.append("🎮 Played: " + ", ".join(
-                f"**{g}** ({fmt_hours(s)})" for g, s in games.most_common(5)))
+            report.lines.append(leader_row("Most played:", [(md(g), s) for g, s in games.most_common(5)],
+                                           fmt_hours, fmt_hours))
         sessions = await self.db.query("SELECT joined, showed FROM game_sessions WHERE guild = ? AND start >= ?",
                                        (guild.id, int(since)))
         joined = [json.loads(s) for j, s in sessions if member.id in json.loads(j)]
         if joined:
             showed = sum(member.id in s for s in joined)
-            report.lines.append(f"🎲 Game nights: joined **{len(joined)}**, showed up for **{showed}**")
+            report.lines.append(ui.row(f"**Joined {ui.plural(len(joined), 'game night')}**",
+                                       f"showed up for {showed}"))
         report.lines.extend(await self._library_suggestions(guild, member, games))
         if note := await self._coverage_note(guild, since):
             report.lines.append(note)
         return report
 
-    async def _library_suggestions(self, guild: discord.Guild, member: discord.Member, games: Counter) -> List[str]:
+    async def _library_suggestions(self, guild: discord.Guild, member: discord.Member, games: Counter) -> List[tuple]:
         """Games the member played for 2+ hours that aren't in their GameManager library."""
         gm = self.bot.get_cog("GameManager")
         if gm is None or not games:
@@ -1096,7 +1234,7 @@ class ActivityStats(commands.Cog):
                 tips.append(f"`{prefix}games own {names[key]}`")
             else:
                 tips.append(f"`{prefix}games request {game}`")
-        return ["💡 Played but not in your library: " + " · ".join(tips[:3])] if tips else []
+        return [ui.row("**Played but not in your library**", " · ".join(tips[:3]))] if tips else []
 
     async def report_games(self, viewer: discord.Member, days: int = 30) -> Report:
         guild, now = viewer.guild, time.time()
@@ -1106,16 +1244,15 @@ class ActivityStats(commands.Cog):
         for uid, game, start, end in await self._game_rows(guild, since, now):
             seconds[game] += end - start
             players[game].add(uid)
-        report = Report(f"🎮 Most-played games: {period_label(days)}", rows_from=0)
+        report = Report(f"📊 Most-played games: {period_label(days)}", rows_from=0)
         if not await self.config.guild(guild).track_games():
             report.lines.append("Game tracking is turned off on this server.")
         elif not seconds:
             report.lines.append("No games recorded yet. Games show up when members share their activity status "
                                 "(\"Playing …\") in Discord.")
         for i, (game, total) in enumerate(seconds.most_common(15)):
-            count = len(players[game])
-            report.lines.append(f"{MEDALS[i] if i < 3 else f'`{i + 1}.`'} **{game}**: {fmt_hours(total)}, "
-                                f"{ui.plural(count, 'player')}")
+            report.lines.append(ui.row(ranked_main(i, md(game)),
+                                       details(fmt_hours(total), ui.plural(len(players[game]), 'player'))))
         if note := await self._coverage_note(guild, since):
             report.lines.append(note)
         return report
@@ -1147,13 +1284,16 @@ class ActivityStats(commands.Cog):
         dau = [len(active.get(d, ())) for d in days_list]
         wau = [window(d, 7) for d in days_list]
         mau = [window(d, 30) for d in days_list]
-        report = Report(f"📈 Active members: {period_label(days)}", admin=True)
-        report.lines.append(f"Active means they posted or joined voice. Right now: **{sum(dau[-7:]) / 7:.1f}** a day "
-                            f"(7-day average), **{wau[-1]}** this week, **{mau[-1]}** this month.")
-        if len(days_list) > 30:
-            report.lines.append(f"A month earlier: **{wau[-31]}** weekly, **{mau[-31]}** monthly.")
+        report = Report(f"📊 Active members: {period_label(days)}", admin=True)
+        earlier = len(days_list) > 30
         humans = sum(not m.bot for m in guild.members)
-        report.lines.append(f"Out of **{humans}** members, **{pct(mau[-1], humans)}** were active this month.")
+        report.lines.append(ui.row(f"**{sum(dau[-7:]) / 7:.1f} active a day**",
+                                   "7-day average · active means they posted or joined voice"))
+        report.lines.append(ui.row(f"**{wau[-1]} active this week**",
+                                   f"a month earlier: {wau[-31]}" if earlier else None))
+        report.lines.append(ui.row(f"**{mau[-1]} active this month**", details(
+            f"{pct(mau[-1], humans)} of {ui.plural(humans, 'member')}",
+            f"a month earlier: {mau[-31]}" if earlier else None)))
         if note := await self._coverage_note(guild, since - 29 * DAY):
             report.lines.append(note)
         report.line_chart(days_list, {"Monthly": mau, "Weekly": wau, "Daily": dau}, "members",
@@ -1164,7 +1304,7 @@ class ActivityStats(commands.Cog):
         days, now = days or 90, time.time()
         start = max(now - days * DAY, await self._data_start(guild))
         end = now - 7 * DAY
-        report = Report(f"🌱 New-member retention: {period_label(days)}", admin=True)
+        report = Report(f"📊 New-member retention: {period_label(days)}", admin=True)
         joins: Dict[int, float] = {}
         for uid, ts in await self.db.query(
                 "SELECT user, ts FROM member_events WHERE guild = ? AND event = 'join' AND ts >= ? AND ts < ?",
@@ -1187,10 +1327,12 @@ class ActivityStats(commands.Cog):
         stayed = [uid for uid in joins if guild.get_member(uid)]
         active = sum(any(h >= now - 30 * DAY for h in posts[uid]) or uid in recent_voice for uid in stayed)
         n = len(joins)
-        report.lines.append(f"**{n}** people joined between <t:{int(start)}:d> and a week ago.")
-        report.lines.append(f"✍️ Posted in their first week: **{posted}** ({pct(posted, n)})")
-        report.lines.append(f"🏠 Still in the server: **{len(stayed)}** ({pct(len(stayed), n)})")
-        report.lines.append(f"🟢 Still active (posted or in voice, last 30 days): **{active}** ({pct(active, n)})")
+        report.lines.append(ui.row(f"**{ui.plural(n, 'person', 'people')} joined**",
+                                   f"between <t:{int(start)}:d> and a week ago"))
+        report.lines.append(ui.row(f"**{posted} posted in their first week**", f"{pct(posted, n)} of them"))
+        report.lines.append(ui.row(f"**{len(stayed)} still in the server**", f"{pct(len(stayed), n)} of them"))
+        report.lines.append(ui.row(f"**{active} still active**",
+                                   f"{pct(active, n)} of them · posted or in voice in the last 30 days"))
         if note := await self._coverage_note(guild, now - days * DAY):
             report.lines.append(note)
         return report
@@ -1205,12 +1347,15 @@ class ActivityStats(commands.Cog):
         went_quiet = sorted((m for m in humans if earlier[m.id] >= QUIET_MIN_MESSAGES and not recent[m.id]),
                             key=lambda m: -earlier[m.id])
         lurkers = [m for m in humans if not recent[m.id] and m.id not in in_voice]
-        report = Report("🤫 Quiet members", admin=True, rows_from=0)
-        report.lines.append(f"**Went quiet** ({len(went_quiet)}): {QUIET_MIN_MESSAGES}+ messages 1–3 months ago, "
-                            "none in the last 30 days.")
-        report.lines.append(self._names(m.mention for m in went_quiet) or "-# Nobody.")
-        report.lines.append(f"**No messages or voice in 30 days** ({len(lurkers)} of {len(humans)} members):")
-        report.lines.append(self._names(m.mention for m in lurkers) or "-# Nobody.")
+        report = Report("📊 Quiet members", admin=True, rows_from=0)
+        report.lines.append(ui.row(f"**Went quiet: {ui.plural(len(went_quiet), 'member')}**",
+                                   f"{QUIET_MIN_MESSAGES}+ messages 1–3 months ago, none in the last 30 days"))
+        if went_quiet:
+            report.lines.append(self._names(m.mention for m in went_quiet))
+        report.lines.append(ui.row(f"**Silent for 30 days: {len(lurkers)} of {ui.plural(len(humans), 'member')}**",
+                                   "no messages and no time in voice"))
+        if lurkers:
+            report.lines.append(self._names(m.mention for m in lurkers))
         if note := await self._coverage_note(guild, now - 90 * DAY):
             report.lines.append(note + " These lists are reliable once 30 days are covered.")
         return report
@@ -1237,10 +1382,10 @@ class ActivityStats(commands.Cog):
         for event, ts in await self.db.query(
                 "SELECT event, ts FROM member_events WHERE guild = ? AND ts >= ?", (guild.id, int(since))):
             (joins if event == "join" else leaves)[local_day(ts, tz)] += 1
-        report = Report(f"🚪 Joins and leaves: {period_label(days)}", admin=True)
+        report = Report(f"📊 Joins and leaves: {period_label(days)}", admin=True)
         j, l = sum(joins.values()), sum(leaves.values())
-        report.lines.append(f"➕ **{j}** joined · ➖ **{l}** left · net **{j - l:+d}**")
-        report.lines.append(f"👥 **{sum(not m.bot for m in guild.members)}** members now.")
+        report.lines.append(ui.row(f"**{j} joined, {l} left**", f"net {j - l:+d}"))
+        report.lines.append(ui.row(f"**{ui.plural(sum(not m.bot for m in guild.members), 'member')} now**"))
         if note := await self._coverage_note(guild, since):
             report.lines.append(note)
         days_list = day_range(since, now, tz)
@@ -1260,30 +1405,31 @@ class ActivityStats(commands.Cog):
                 ts = max(ts, discord.utils.snowflake_time(channel.last_message_id).timestamp())
             if ts < now - days * DAY:
                 dead.append((ts, channel))
-        report = Report(f"🕸️ Channels with no posts in {days} days", admin=True, rows_from=0)
+        report = Report(f"📊 Channels with no posts in {days} days", admin=True, rows_from=0)
         if not dead:
             report.lines.append("Every channel has had a post recently.")
         for ts, channel in sorted(dead, key=lambda x: x[0])[:30]:
-            report.lines.append(f"{channel.mention}: " + (f"last post <t:{int(ts)}:R>" if ts else "no posts seen"))
+            report.lines.append(ui.row(f"**{channel.mention}**",
+                                       f"last post <t:{int(ts)}:R>" if ts else "no posts seen"))
         return report
 
     async def report_attendance(self, guild: discord.Guild, count: int = 10) -> Report:
         rows = await self.db.query(
             "SELECT title, start, joined, showed FROM game_sessions WHERE guild = ? ORDER BY start DESC LIMIT ?",
             (guild.id, max(1, min(count, 25))))
-        report = Report("🎲 Game night attendance", admin=True, rows_from=0)
+        report = Report("📊 Game night attendance", admin=True, rows_from=0)
         if not rows:
             report.lines.append("No game sessions recorded yet. Sessions are recorded when they end.")
             return report
         for title, start, joined, showed in rows:
             joined, showed = set(json.loads(joined)), set(json.loads(showed))
             no_shows = joined - showed
-            line = f"**{title}** · <t:{start}:d>: **{len(joined & showed)}/{len(joined)}** showed up"
-            if walk_ins := len(showed - joined):
-                line += f", plus {walk_ins} who didn't click Join"
+            walk_ins = len(showed - joined)
+            detail = details(f"<t:{start}:d>", f"{len(joined & showed)} of {len(joined)} showed up",
+                             f"plus {walk_ins} who didn't click Join" if walk_ins else None)
             if no_shows:
-                line += f"\n-# Didn't show: {self._names_or_departed(guild, no_shows)}"
-            report.lines.append(line)
+                detail += f"\nDidn't show: {self._names_or_departed(guild, no_shows)}"
+            report.lines.append(ui.row(f"**{md(title)}**", detail))
         reliability = defaultdict(lambda: [0, 0])
         for _, _, joined, showed in await self.db.query(
                 "SELECT title, start, joined, showed FROM game_sessions WHERE guild = ? AND start >= ?",
@@ -1295,8 +1441,10 @@ class ActivityStats(commands.Cog):
         regulars = sorted(((s / j, j, uid) for uid, (j, s) in reliability.items()
                            if j >= 2 and guild.get_member(uid)), reverse=True)
         if regulars:
-            report.lines.append("**Show-up rate** (90 days, 2+ sessions joined): " + ", ".join(
-                f"<@{uid}> {rate:.0%} of {j}" for rate, j, uid in regulars[:15]))
+            report.lines.append(ui.row("**Show-up rates**", "last 90 days, for people who joined 2 or more"))
+            for rate, j, uid in regulars[:15]:
+                report.lines.append(ui.row(f"**{self._person(guild, uid)}**",
+                                           f"showed up {rate:.0%} of the time · joined {j}"))
         return report
 
     async def report_commands(self, guild: discord.Guild, days: int = 30) -> Report:
@@ -1313,30 +1461,32 @@ class ActivityStats(commands.Cog):
             uses[command] += n
             if not ok:
                 failures[command] += n
-        report = Report(f"🛠️ Command usage: {period_label(days)}", admin=True)
-        report.lines.append(f"**{sum(uses.values()):,}** commands run by members.")
-        report.start_list()
-        for command, n in uses.most_common(15):
-            name = command if command.startswith("/") else f"{prefix}{command}"
-            report.lines.append(f"`{name}`: **{n:,}**" + (f" ({failures[command]} failed)" if failures[command] else ""))
-        if unknown:
-            report.lines.append("❓ Typed but don't exist: " + ", ".join(
-                f"`{prefix}{c}` ({n})" for c, n in unknown.most_common(8)))
-        if await self._data_start(guild) <= since:
-            used_roots = {c.lstrip("/").split()[0] for c in uses}
-            unused = sorted(
-                name for name, cog in self.bot.cogs.items()
-                if (roots := {c.name for c in cog.get_commands() if not c.hidden}) and not roots & used_roots)
-            if unused:
-                report.lines.append("💤 No uses: " + ", ".join(unused))
+        report = Report(f"📊 Command usage: {period_label(days)}", admin=True)
+        report.lines.append(ui.row(f"**{ui.plural(sum(uses.values()), 'command')} run by members**",
+                                   f"{ui.plural(len(uses), 'different command')}"))
         claude = self.bot.get_cog("ClaudeChat")
         if claude is not None:
             try:
                 usage = await claude.config.guild(guild).usage()
-                report.lines.append(f"🤖 AI: **{usage.get('requests', 0):,}** requests, about "
-                                    f"**${usage.get('cost', 0):,.2f}** all time")
+                report.lines.append(ui.row(f"**{ui.plural(usage.get('requests', 0), 'AI chat request')}**",
+                                           f"about ${usage.get('cost', 0):,.2f} all time"))
             except Exception:
                 log.debug("Couldn't read Claude usage", exc_info=True)
+        report.start_list()
+        for command, n in uses.most_common(15):
+            name = command if command.startswith("/") else f"{prefix}{command}"
+            report.lines.append(ui.row(f"**`{name}`**", details(
+                ui.plural(n, "use"), f"{failures[command]} failed" if failures[command] else None)))
+        if unknown:
+            report.lines.append(ui.row("**Typed but don't exist**", " · ".join(
+                f"`{prefix}{c}` ({n})" for c, n in unknown.most_common(8))))
+        if await self._data_start(guild) <= since:
+            used_roots = {c.lstrip("/").split()[0] for c in uses}
+            unused = sorted(
+                self._feature_name(cog) for cog in self.bot.cogs.values()
+                if (roots := {c.name for c in cog.get_commands() if not c.hidden}) and not roots & used_roots)
+            if unused:
+                report.lines.append(ui.row("**Features nobody used**", ", ".join(unused)))
         if note := await self._coverage_note(guild, since):
             report.lines.append(note)
         return report
@@ -1346,17 +1496,18 @@ class ActivityStats(commands.Cog):
         rows = await self.db.query(
             "SELECT user, question, ts FROM unmet_questions WHERE guild = ? AND ts >= ? ORDER BY ts DESC LIMIT 25",
             (guild.id, int(time.time() - days * DAY)))
-        report = Report(f"🔎 Guide questions with no matching command: {period_label(days)}", admin=True, rows_from=0)
+        report = Report(f"📊 Butler questions with no matching command: {period_label(days)}", admin=True,
+                        rows_from=0)
         if not rows:
-            report.lines.append("None. The guide found a command for every question.")
+            report.lines.append("None. The butler found a command for every question.")
         for uid, question, ts in rows:
-            question = question.replace("\n", " ")
-            who = f"<@{uid}>" if guild.get_member(uid) else "A former member"
-            report.lines.append(f"<t:{ts}:d> {who}: “{ui.truncate(question, 151)}”")
+            question = md(ui.truncate(question.replace("\n", " "), 151))
+            report.lines.append(ui.row(f"**“{question}”**",
+                                       details(self._person(guild, uid), f"<t:{ts}:d>")))
         return report
 
     async def report_libraries(self, guild: discord.Guild) -> Report:
-        report = Report("📚 Game library coverage", admin=True)
+        report = Report("📊 Game library coverage", admin=True)
         gm = self.bot.get_cog("GameManager")
         if gm is None:
             report.lines.append(ui.line(ui.WARN, "The game library (GameManager) isn't loaded."))
@@ -1366,15 +1517,15 @@ class ActivityStats(commands.Cog):
         sizes = {m.id: len(set(users.get(str(m.id), {}).get("owned", []))
                            | set(users.get(str(m.id), {}).get("installed", []))) for m in humans}
         with_library = [uid for uid, n in sizes.items() if n]
-        report.lines.append(f"**{len(with_library)}** of **{len(humans)}** members have a game library "
-                            f"({pct(len(with_library), len(humans))}).")
-        if with_library:
-            report.lines.append(f"Average library: **{sum(sizes[u] for u in with_library) / len(with_library):.0f}** "
-                                "games.")
+        average = sum(sizes[u] for u in with_library) / len(with_library) if with_library else 0
+        report.lines.append(ui.row(
+            f"**{len(with_library)} of {ui.plural(len(humans), 'member')} have a game library**",
+            details(pct(len(with_library), len(humans)), f"{average:.0f} games on average" if with_library else None)))
         missing = [m.mention for m in humans if not sizes[m.id]]
         if missing:
             report.start_list()
-            report.lines.append(f"**No library yet:** {self._names(missing)}")
+            report.lines.append(ui.row(f"**No library yet: {ui.plural(len(missing), 'member')}**"))
+            report.lines.append(self._names(missing))
         return report
 
     async def report_digest(self, guild: discord.Guild) -> Report:
@@ -1392,47 +1543,55 @@ class ActivityStats(commands.Cog):
             else:
                 before += n
                 prev_posters.add(uid)
-        # Discord doesn't render <t:…> timestamps in embed titles, so the title gets plain dates.
-        report = Report(f"📰 Weekly digest: {short_date(local_day(week, tz))} – {short_date(local_day(now, tz))}",
+        # Discord doesn't render <t:…> timestamps in titles, so the title gets plain dates.
+        report = Report(f"📊 Weekly digest: {short_date(local_day(week, tz))} – {short_date(local_day(now, tz))}",
                         admin=True)
-        report.lines.append(f"💬 **{this:,}** messages{change(this, before)} from **{len(posters)}** members "
-                            f"(last week: {len(prev_posters)})")
+        report.lines.append(ui.row(f"**{fmt_messages(this)}**", details(
+            f"from {ui.plural(len(posters), 'member')} ({len(prev_posters)} the week before)",
+            trend(this, before, "the week before"))))
         if channels:
-            report.lines.append("🔥 Busiest: " + ", ".join(
-                f"{self._channel_name(guild, c)} ({n:,})" for c, n in channels.most_common(3)))
+            report.lines.append(leader_row("Busiest in", [(self._channel_name(guild, c), n)
+                                                          for c, n in channels.most_common(3)],
+                                           fmt_messages, fmt_count))
         active = await self._active_user_days(guild, week, tz)
-        report.lines.append(f"👥 **{len(set().union(*active.values()))}** active members this week")
+        report.lines.append(ui.row(f"**{len(set().union(*active.values()))} active members**",
+                                   "posted or joined voice this week"))
         events = Counter(e for e, in await self.db.query(
             "SELECT event FROM member_events WHERE guild = ? AND ts >= ?", (guild.id, int(week))))
-        report.lines.append(f"🚪 **{events['join']}** joined, **{events['leave']}** left")
+        report.lines.append(ui.row(f"**{events['join']} joined, {events['leave']} left**",
+                                   f"net {events['join'] - events['leave']:+d}"))
         voice = sum(e - s for _, _, s, e in await self._voice_rows(guild, week, now))
-        if voice:
-            report.lines.append(f"🔊 **{fmt_hours(voice)}** in voice")
         games = Counter()
         for _, game, s, e in await self._game_rows(guild, week, now):
             games[game] += e - s
-        if games:
-            report.lines.append("🎮 Most played: " + ", ".join(f"**{g}**" for g, _ in games.most_common(3)))
+        played = "most played: " + ", ".join(md(g) for g, _ in games.most_common(3)) if games else None
+        if voice:
+            report.lines.append(ui.row(f"**{fmt_hours(voice)} in voice**", played))
+        elif games:
+            report.lines.append(leader_row("Most played:", [(md(g), s) for g, s in games.most_common(3)],
+                                           fmt_hours, fmt_hours))
         sessions = await self.db.query("SELECT joined, showed FROM game_sessions WHERE guild = ? AND start >= ?",
                                        (guild.id, int(week)))
         if sessions:
             joined = sum(len(json.loads(j)) for j, _ in sessions)
             showed = sum(len(set(json.loads(j)) & set(json.loads(s))) for j, s in sessions)
-            report.lines.append(f"🎲 **{len(sessions)}** game sessions, **{pct(showed, joined)}** of sign-ups showed up")
+            report.lines.append(ui.row(f"**{ui.plural(len(sessions), 'game night')}**",
+                                       f"{pct(showed, joined)} of sign-ups showed up"))
         top = await self.db.query(
             "SELECT command, COUNT(*) FROM command_uses WHERE guild = ? AND ts >= ? AND command NOT LIKE '?%' "
             "GROUP BY command ORDER BY 2 DESC LIMIT 3", (guild.id, int(week)))
         if top:
             prefix = await self._prefix(guild)
-            report.lines.append("🛠️ Top commands: " + ", ".join(
-                f"`{c if c.startswith('/') else prefix + c}` ({n})" for c, n in top))
+            report.lines.append(leader_row("Top command:", [(f"`{c if c.startswith('/') else prefix + c}`", n)
+                                                            for c, n in top],
+                                           lambda n: ui.plural(int(n), "use"), fmt_count))
         unmet = (await self.db.query("SELECT COUNT(*) FROM unmet_questions WHERE guild = ? AND ts >= ?",
                                      (guild.id, int(week))))[0][0]
         if unmet:
-            report.lines.append(f"🔎 **{unmet}** guide questions had no matching command")
+            report.lines.append(ui.row(f"**{ui.plural(unmet, 'butler question')} with no matching command**"))
         dead = await self.report_dead_channels(guild, 30)
-        if dead.lines and not dead.lines[0].startswith("Every"):
-            report.lines.append(f"🕸️ **{len(dead.lines)}** channels with no posts in 30 days")
+        if quiet := sum(isinstance(line, tuple) for line in dead.lines):
+            report.lines.append(ui.row(f"**{ui.plural(quiet, 'channel')} with no posts in 30 days**"))
         days_list = day_range(week, now, tz)
         report.line_chart(days_list, {"Messages": [daily[d] for d in days_list]}, "messages", "messages")
         return report
@@ -1540,8 +1699,17 @@ class ActivityStats(commands.Cog):
 
     @staticmethod
     def _plain(guild: discord.Guild, report: Report) -> str:
-        """A report as text for Claude: mentions become names, timestamps become dates."""
-        text = "\n".join([report.title, *report.lines])
+        """
+        A report as text for Claude, one line per block: a row's details follow its main line after " — ".
+        Mentions become names and timestamps become dates.
+        """
+        def block(line: ui.Row) -> str:
+            if isinstance(line, str):
+                return line
+            main, detail = line[0], (line[1] if len(line) > 1 else None)
+            return f"{main} — {detail}" if detail else main
+
+        text = "\n".join([report.title, *map(block, report.lines)])
 
         def channel(match):
             found = guild.get_channel_or_thread(int(match.group(1)))
@@ -1557,6 +1725,7 @@ class ActivityStats(commands.Cog):
         text = re.sub(r"<#(\d+)>", channel, text)
         text = re.sub(r"<@!?(\d+)>", member, text)
         text = re.sub(r"<t:(\d+)(?::\w)?>", stamp, text)
+        text = re.sub(r"\\([*_`~|\\])", r"\1", text)   # names were escaped for markdown; Claude reads them plain
         return text.replace("-# ", "")
 
     # ==========================================
@@ -1566,10 +1735,10 @@ class ActivityStats(commands.Cog):
     async def _report_card(self, report: Report, footer: Optional[str] = None
                            ) -> Tuple[ui.Board, Optional[discord.File]]:
         """
-        A report as a board (a card that pages): the summary, then the chart, then the list, 15 rows a page.
+        A report as a board (a card that pages): the summary blocks, then the chart, then the list, 8 rows a page.
         Returns the board and the chart file, which must be sent with it (a card hides files it doesn't show).
         """
-        head, rows = report_layout(report)
+        blocks, rows = report_layout(report)
         file = media = None
         if report.chart is not None:
             try:
@@ -1580,8 +1749,8 @@ class ActivityStats(commands.Cog):
                 log.exception("Couldn't draw a stats chart")
         # Admin reports keep the normal color and say "Staff only" in the footer instead.
         footer = " · ".join(part for part in (STAFF_HINT if report.admin else None, footer) if part) or None
-        board = ui.Board(report.title, rows, color=ui.BRAND, header=head, footer=footer, media=media,
-                         empty="" if head else "Nothing to show yet.")
+        board = ReportBoard(report.title, rows, blocks=blocks, color=ui.BRAND, footer=footer, media=media,
+                            empty="" if blocks else "Nothing to show yet.")
         return board, file
 
     async def _send(self, target, report: Report, footer: Optional[str] = None):
@@ -1633,10 +1802,8 @@ class ActivityStats(commands.Cog):
 
         With no subcommand, shows the last week at a glance. Periods look like `week`, `month`, `90d` or `all`.
         """
-        p = ctx.clean_prefix
         await self._send(ctx, await self.report_overview(ctx.author, period or 7),
-                         footer=f"More: {p}stats channels · {p}stats top · {p}stats heatmap · {p}stats voice · "
-                                f"{p}stats games · {p}stats me")
+                         footer=f"More with {ctx.clean_prefix}help stats")
 
     @stats.command(name="channels")
     async def stats_channels(self, ctx: commands.Context, period: Optional[Period] = None):
@@ -1706,15 +1873,15 @@ class ActivityStats(commands.Cog):
         await self.config.user(ctx.author).ignored.set(True)
         self._ignored.add(ctx.author.id)
         await self._forget_user(ctx.author.id)
-        await ctx.send(f"✅ I've stopped tracking you and deleted your stats. `{ctx.clean_prefix}stats trackme` "
-                       "turns tracking back on.")
+        await ctx.send(ui.line(ui.DONE, "I've stopped tracking you and deleted your stats.",
+                               f"`{ctx.clean_prefix}stats trackme` turns tracking back on."))
 
     @stats.command(name="trackme", aliases=["optin"])
     async def stats_trackme(self, ctx: commands.Context):
         """Turn activity tracking back on for yourself."""
         await self.config.user(ctx.author).ignored.set(False)
         self._ignored.discard(ctx.author.id)
-        await ctx.send("✅ Tracking is back on for you.")
+        await ctx.send(ui.line(ui.DONE, "Tracking is back on for you."))
 
     # ==========================================
     #               ADMIN COMMANDS
@@ -1725,22 +1892,27 @@ class ActivityStats(commands.Cog):
     async def stats_admin(self, ctx: commands.Context):
         """Admin-only reports and stats settings."""
         p = f"{ctx.clean_prefix}stats admin"
-        reports = "\n".join([
-            f"`{p} active [period]`: daily, weekly and monthly active members",
-            f"`{p} retention [period]`: do new members post and stick around?",
-            f"`{p} quiet`: lurkers and members who went quiet",
-            f"`{p} joins [period]`: joins and leaves",
-            f"`{p} deadchannels [period]`: channels with no recent posts",
-            f"`{p} attendance [count]`: game sessions, who joined vs. who showed up",
-            f"`{p} commands [period]`: what's used, what isn't, and commands that don't exist",
-            f"`{p} unmet [period]`: guide questions no command could answer",
-            f"`{p} libraries`: who has a game library",
-        ])
-        settings = "\n".join([
-            f"`{p} digest`: the weekly digest settings",
-            f"`{p} settings` · `exclude` · `include` · `gametracking` · `backfill`",
-        ])
-        view = ui.CardView(ui.card(reports, ui.SEPARATOR, settings, title="📊 Admin stats", color=ui.BRAND,
+        reports = [
+            (f"`{p} active [period]`", "Daily, weekly and monthly active members"),
+            (f"`{p} retention [period]`", "Do new members post and stick around?"),
+            (f"`{p} quiet`", "Lurkers and members who went quiet"),
+            (f"`{p} joins [period]`", "Joins and leaves"),
+            (f"`{p} deadchannels [period]`", "Channels with no recent posts"),
+            (f"`{p} attendance [count]`", "Game nights: who joined and who showed up"),
+            (f"`{p} commands [period]`", "What's used, what isn't, and commands that don't exist"),
+            (f"`{p} unmet [period]`", "Butler questions no command could answer"),
+            (f"`{p} libraries`", "Who has a game library"),
+        ]
+        settings = [
+            (f"`{p} settings`", "What's tracked, and the digest"),
+            (f"`{p} exclude #channel`", "Stop tracking a channel and delete its counts"),
+            (f"`{p} include #channel`", "Track an excluded channel again"),
+            (f"`{p} gametracking on|off`", "Record games from Discord's \"Playing\" status"),
+            (f"`{p} digest`", "The weekly digest for admins"),
+            (f"`{p} backfill [days]`", "Count messages from before tracking started"),
+        ]
+        view = ui.CardView(ui.card(*(ui.two_line(*r) for r in reports), ui.SEPARATOR,
+                                   *(ui.two_line(*r) for r in settings), title="📊 Admin stats", color=ui.BRAND,
                                    footer=STAFF_HINT))
         await ui.send_card(ctx, view)
 
@@ -1824,7 +1996,8 @@ class ActivityStats(commands.Cog):
             self._voice_open.pop(key)
         for table in ("messages", "voice"):
             await self.db.query(f"DELETE FROM {table} WHERE guild = ? AND channel = ?", (ctx.guild.id, cid))
-        await ctx.send(f"✅ {self._channel_name(ctx.guild, cid)} is no longer tracked, and its stats are deleted.")
+        await ctx.send(ui.line(ui.DONE, f"{self._channel_name(ctx.guild, cid)} is no longer tracked, and its stats are "
+                                        "deleted."))
 
     @stats_admin.command(name="include")
     async def admin_include(self, ctx: commands.Context, channel: ChannelArg):
@@ -1842,7 +2015,7 @@ class ActivityStats(commands.Cog):
             for member in channel.members:
                 if self._tracks_voice(member, channel):
                     self._voice_open.setdefault((ctx.guild.id, member.id), (channel.id, now))
-        await ctx.send(f"✅ {self._channel_name(ctx.guild, cid)} is tracked again.")
+        await ctx.send(ui.line(ui.DONE, f"{self._channel_name(ctx.guild, cid)} is tracked again."))
 
     @stats_admin.command(name="gametracking")
     async def admin_gametracking(self, ctx: commands.Context, enabled: bool):
@@ -1852,7 +2025,7 @@ class ActivityStats(commands.Cog):
         if not enabled:
             for key in [k for k in self._games_open if k[0] == ctx.guild.id]:
                 self._games_open.pop(key)
-        await ctx.send(f"✅ Game tracking is {'on' if enabled else 'off'}.")
+        await ctx.send(ui.line(ui.DONE, f"Game tracking is {'on' if enabled else 'off'}."))
 
     @stats_admin.command(name="backfill")
     async def admin_backfill(self, ctx: commands.Context, days: int = 30):
@@ -1862,14 +2035,15 @@ class ActivityStats(commands.Cog):
         Only message counts can be backfilled; voice time and games can't. This can take a while on busy servers.
         """
         if ctx.guild.id in self._backfills and not self._backfills[ctx.guild.id].done():
-            return await ctx.send("⏳ A backfill is already running here.")
+            return await ctx.send(ui.line(ui.WAIT, "A backfill is already running here."))
         days = max(1, min(days, BACKFILL_MAX_DAYS))
         conf = self.config.guild(ctx.guild)
         until = await conf.backfilled_from() or await conf.started_at() or time.time()
         since = time.time() - days * DAY
         if since >= until:
-            return await ctx.send(f"✅ Messages back to <t:{int(until)}:D> are already counted.")
-        status = await ctx.send(f"⏳ Counting messages from <t:{int(since)}:D> to <t:{int(until)}:D>…")
+            return await ctx.send(ui.line(ui.WARN, f"Messages back to <t:{int(until)}:D> are already counted.",
+                                          "Nothing to backfill for that period."))
+        status = await ctx.send(ui.line(ui.WAIT, f"Counting messages from <t:{int(since)}:D> to <t:{int(until)}:D>…"))
         self._backfills[ctx.guild.id] = asyncio.create_task(self._backfill(ctx.guild, since, until, status))
 
     async def _backfill(self, guild: discord.Guild, since: float, until: float, status: discord.Message):
@@ -1890,18 +2064,21 @@ class ActivityStats(commands.Cog):
                 except discord.HTTPException as e:
                     log.debug("Skipped #%s during backfill: %s", channel, e)
                 if i % 5 == 0:
-                    await status.edit(content=f"⏳ Counting messages… {i}/{len(channels)} channels, {done:,} so far")
+                    await status.edit(content=ui.line(ui.WAIT, f"Counting messages… {i} of {len(channels)} channels, "
+                                                               f"{done:,} so far"))
             await self.db.execute_many(
                 "INSERT INTO messages VALUES (?, ?, ?, ?, ?) ON CONFLICT (guild, channel, user, hour) "
                 "DO UPDATE SET count = count + excluded.count", [(*k, n) for k, n in counts.items()])
             await self.config.guild(guild).backfilled_from.set(int(since))
-            await status.edit(content=f"✅ Backfill done: **{done:,}** messages in {len(channels)} channels, "
-                                      f"from <t:{int(since)}:D>.")
+            await status.edit(content=ui.line(
+                ui.DONE, f"Backfill done: counted {fmt_messages(done)} in {ui.plural(len(channels), 'channel')}, "
+                         f"back to <t:{int(since)}:D>."))
         except asyncio.CancelledError:
             raise
         except Exception:
             log.exception("Backfill failed in %s", guild)
-            await status.edit(content="❌ The backfill failed. The error was logged; nothing was saved.")
+            await status.edit(content=ui.line(ui.FAIL, "The backfill failed, so nothing was saved.",
+                                              "The error is in the bot's log. Try again later."))
 
     # ---------- weekly digest ----------
 
@@ -1909,34 +2086,45 @@ class ActivityStats(commands.Cog):
     async def admin_digest(self, ctx: commands.Context):
         """The weekly digest for admins. Turn it on, pick the channel and time, or preview it."""
         p = f"{ctx.clean_prefix}stats admin digest"
-        await ctx.send(f"`{p} on` / `{p} off` · `{p} channel #channel` · `{p} time <day> <hour>` "
-                       f"(for example `{p} time monday 9am`) · `{p} preview`")
+        data = await self.config.guild(ctx.guild).all()
+        _, tz_name = await self._guild_tz(ctx.guild)
+        rows = ui.settings_text([
+            ("Weekly digest", bool(data["digest_enabled"])),
+            ("Channel", self._channel_name(ctx.guild, data["digest_channel"]) if data["digest_channel"] else None),
+            ("When", f"{WEEKDAYS[data['digest_day']]} {hour_label(data['digest_hour'])} ({tz_name})"),
+        ])
+        footer = (f"`{p} on|off` · `{p} channel #channel` · `{p} time monday 9am` · `{p} preview`\n{STAFF_HINT}")
+        view = ui.CardView(ui.card(rows, ui.SEPARATOR, title="📊 Digest settings", color=ui.BRAND, footer=footer))
+        await ui.send_card(ctx, view)
 
     @admin_digest.command(name="on")
     async def digest_on(self, ctx: commands.Context):
         """Turn the weekly digest on."""
         conf = self.config.guild(ctx.guild)
         if await conf.digest_channel() is None:
-            return await ctx.send(f"⚠️ Pick a channel first: `{ctx.clean_prefix}stats admin digest channel #channel`")
+            return await ctx.send(ui.line(ui.WARN, "Pick a channel for the digest first.",
+                                          f"`{ctx.clean_prefix}stats admin digest channel #channel`"))
         await conf.digest_enabled.set(True)
-        await ctx.send("✅ The weekly digest is on.")
+        await ctx.send(ui.line(ui.DONE, "The weekly digest is on."))
 
     @admin_digest.command(name="off")
     async def digest_off(self, ctx: commands.Context):
         """Turn the weekly digest off."""
         await self.config.guild(ctx.guild).digest_enabled.set(False)
-        await ctx.send("✅ The weekly digest is off.")
+        await ctx.send(ui.line(ui.DONE, "The weekly digest is off."))
 
     @admin_digest.command(name="channel")
     async def digest_channel(self, ctx: commands.Context, channel: discord.TextChannel):
         """Choose where the digest is posted. Pick an admin-only channel."""
         perms = channel.permissions_for(ctx.guild.me)
         if not (perms.send_messages and perms.attach_files):
-            return await ctx.send(f"❌ I need to send messages and attach files in {channel.mention}.")
+            return await ctx.send(ui.line(ui.FAIL, f"I can't post the digest in {channel.mention}.",
+                                          "I need Send Messages and Attach Files there."))
         await self.config.guild(ctx.guild).digest_channel.set(channel.id)
-        note = "" if not channel.permissions_for(ctx.guild.default_role).view_channel else (
-            "\n⚠️ Everyone can see that channel, and the digest includes admin-only stats.")
-        await ctx.send(f"✅ The digest will be posted in {channel.mention}.{note}")
+        public = channel.permissions_for(ctx.guild.default_role).view_channel
+        await ctx.send(ui.line(ui.DONE, f"The digest will be posted in {channel.mention}.") + (
+            "\n" + ui.line(ui.WARN, "Everyone can see that channel, and the digest includes admin-only stats.")
+            if public else ""))
 
     @admin_digest.command(name="time")
     async def digest_time(self, ctx: commands.Context, day: str, hour: str):
@@ -1951,7 +2139,8 @@ class ActivityStats(commands.Cog):
         await self.config.guild(ctx.guild).digest_day.set(weekday)
         await self.config.guild(ctx.guild).digest_hour.set(value)
         _, tz_name = await self._guild_tz(ctx.guild)
-        await ctx.send(f"✅ The digest will go out on **{WEEKDAYS[weekday]}** at **{hour_label(value)}** ({tz_name}).")
+        await ctx.send(ui.line(ui.DONE, f"The digest will go out on **{WEEKDAYS[weekday]}** at "
+                                        f"**{hour_label(value)}** ({tz_name})."))
 
     @admin_digest.command(name="preview", aliases=["now"])
     async def digest_preview(self, ctx: commands.Context):

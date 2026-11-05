@@ -93,7 +93,8 @@ COG_NAMES = {
     "customcommands": "Custom commands", "buttongreeter": "Welcome flow", "modlog": "Mod log",
     "clearchannel": "Clear channel",
 }
-HELP_FOOTER = "{p}help <command> for any command · {p}butler to ask in plain English"
+# The footer hint on help cards: one thing (the butler is the AI chat now, and the home card mentions it).
+HELP_FOOTER = "`{p}help <command>` for details"
 GAME_NIGHT_COMMANDS = {"session", "sessions", "endsession", "sessionvote", "results", "endvote", "recurring", "lfg",
                        "shared", "installed", "top"}
 # Right-click options have no help text of their own: (description, handbook topic) for the reference.
@@ -186,19 +187,21 @@ def fit(text: str, limit: int) -> str:
     return text + "\n```" if text.count("```") % 2 else text
 
 
-def rows_per_page(lines: List[str], room: int) -> int:
-    """
-    How many rows a help board can show a page so that no page's rows go over `room` characters. A board budgets
-    about 3,400 characters for its rows alone, but a help card's header (usage, description) shares the card's
-    4,000, so a long header needs shorter pages.
-    """
-    per_page = ui.PAGE_SIZE
-    while per_page > 3:
-        # Any run of rows, not just the first page's: the board may also break a page early by size.
-        if all(sum(len(r) + 1 for r in lines[i:i + per_page]) <= room for i in range(len(lines))):
-            break
-        per_page -= 1
-    return per_page
+def first_sentence(text: str, limit: int = 100) -> str:
+    """The first sentence of a command's short help, without its full stop, for a row's detail line."""
+    text = " ".join((text or "").split())
+    text = re.split(r"(?<=[.!?])\s+(?=[A-Z`(\[])", text, maxsplit=1)[0]
+    if text.endswith(".") and not text.endswith(".."):
+        text = text[:-1]
+    return ui.truncate(text, limit)
+
+
+def who_text(who: str, aliases: List[str]) -> str:
+    """A command card's detail line: who can use it, and its other names."""
+    parts = [f"Who: {who[:1].upper() + who[1:]}"]
+    if aliases:
+        parts.append("Also: " + ", ".join(f"`{a}`" for a in aliases))
+    return " · ".join(parts)
 
 
 def anchor(command: commands.Command) -> str:
@@ -331,25 +334,31 @@ class Handbook(commands.Cog):
     def _bot_name(self, ctx: commands.Context) -> str:
         return ctx.me.display_name if ctx.guild else self.bot.user.name
 
-    async def _send_card(self, ctx: commands.Context, *parts, title: str, links: List[Tuple[str, str]]):
-        """One help card: the 📖 title, the parts, its link buttons inside, and the shared footer. Ping-free."""
+    async def _send_card(self, ctx: commands.Context, *parts, title: str, links: List[Tuple[str, str]],
+                         footer: Optional[str] = None):
+        """One help card: the 📖 title, the parts, its link buttons inside, and a footer hint. Ping-free."""
         container = ui.card(*parts, self._link_buttons(links) or None, title=title, color=ui.BRAND,
-                            footer=HELP_FOOTER.format(p=ctx.clean_prefix))
+                            footer=footer or HELP_FOOTER.format(p=ctx.clean_prefix))
         return await ui.send_card(ctx, ui.CardView(container))
 
-    async def _send_board(self, ctx: commands.Context, header: Optional[str], rows: List[str], *, title: str,
+    async def _send_board(self, ctx: commands.Context, header: Optional[str], rows: List[tuple], *, title: str,
                           links: List[Tuple[str, str]], empty: str = "No commands.", divider: bool = False):
         """
-        A help card whose command lines page with ◀ ▶; the link buttons sit beside the arrows. Ping-free.
+        A help card whose command rows page with ◀ ▶; the link buttons sit beside the arrows. Ping-free.
         `divider` puts a line between the header and the rows (the board's media slot, which every page repeats).
+        The board keeps each page within the card's limit by itself, header included.
         """
-        footer = HELP_FOOTER.format(p=ctx.clean_prefix)
-        # Room for one page of rows: the card's ~4,000 characters less the title, header and footer.
-        room = 3800 - len(title) - len(header or "") - len(footer) - len("Page 99 of 99 · ")
-        board = ui.Board(title, rows, color=ui.BRAND, header=header, footer=footer, empty=empty,
-                         per_page=rows_per_page(rows, max(room, 600)), extra=self._link_buttons(links),
+        board = ui.Board(title, rows, color=ui.BRAND, header=header, footer=HELP_FOOTER.format(p=ctx.clean_prefix),
+                         empty=empty, extra=self._link_buttons(links),
                          media=discord.ui.Separator() if divider else None)
         return await board.send(ctx)
+
+    def _command_row(self, command: commands.Command, prefix: str, bot_name: str, who: Optional[str] = None) -> tuple:
+        """A help board row: the command to type, then the first sentence of what it does (and who, if not all)."""
+        detail = first_sentence(fill(command.short_doc, prefix, bot_name)) or "No description"
+        if who:
+            detail += f" · {who}"
+        return ui.row(f"`{usage(command, prefix)}`", detail)
 
     # ---------- cards ----------
 
@@ -359,19 +368,19 @@ class Handbook(commands.Cog):
         return (await self.bot.is_owner(ctx.author) or ctx.author.guild_permissions.manage_messages
                 or await self.bot.is_mod(ctx.author) or await self.bot.is_admin(ctx.author))
 
-    async def _topic_lines(self, staff: bool) -> List[str]:
-        """`emoji [Title](url): about` for the members' topics, or for the mod and admin ones."""
-        return [f"{emoji} [{title}]({await self.topic_url(path)}): {about}"
+    async def _topic_blocks(self, staff: bool) -> List[str]:
+        """A block per topic (the linked title, what it covers underneath), for members or for mods and admins."""
+        return [ui.two_line(f"{emoji} **[{title}]({await self.topic_url(path)})**", about)
                 for path, emoji, title, about, audience in TOPICS if (audience != "everyone") == staff]
 
     async def send_home(self, ctx: commands.Context):
         p = ctx.clean_prefix
-        intro = (f"Everything I can do, explained by task. Pick a topic, or try `{p}help <command>` for one command."
-                 f"\nNot sure what to type? Ask me: `{p}butler how do I…`")
-        staff = None
+        intro = ui.two_line("Everything I can do, explained by task.",
+                            f"Not sure what to type? Ask me: `{p}butler how do I…`")
+        staff = []
         if await self._is_staff(ctx):
-            staff = "**For mods and admins**\n" + "\n".join(await self._topic_lines(staff=True))
-        await self._send_card(ctx, intro, ui.SEPARATOR, "\n".join(await self._topic_lines(staff=False)), staff,
+            staff = [ui.SEPARATOR, "**For mods and admins**", *await self._topic_blocks(staff=True)]
+        await self._send_card(ctx, intro, ui.SEPARATOR, *await self._topic_blocks(staff=False), *staff,
                               title=f"📖 {self._bot_name(ctx)} handbook",
                               links=[("Open the handbook", await self.base_url()),
                                      ("Browse all commands", await self.topic_url("reference/"))])
@@ -379,11 +388,8 @@ class Handbook(commands.Cog):
     async def send_command_card(self, ctx: commands.Context, command: commands.Command):
         prefix, bot_name = ctx.clean_prefix, self._bot_name(ctx)
         who, owner_only = requirement(command)
-        meta = [f"**Who:** {who.capitalize()}"]
-        if command.aliases:
-            meta.append("**Also:** " + ", ".join(f"`{prefix}{(command.full_parent_name + ' ' + a).strip()}`"
-                                                 for a in command.aliases))
-        head = f"`{usage(command, prefix)}`\n" + " · ".join(meta)
+        aliases = [f"{prefix}{(command.full_parent_name + ' ' + a).strip()}" for a in command.aliases]
+        head = ui.two_line(f"`{usage(command, prefix)}`", who_text(who, aliases))
         text = fit(fill(command.help, prefix, bot_name), 1500) or "No description."
         links = []
         topic = self.topic_for(command, None)
@@ -394,38 +400,48 @@ class Handbook(commands.Cog):
         title = f"📖 {prefix}{command.qualified_name}"
         subs = visible_commands(command) if isinstance(command, commands.Group) else []
         if not subs:
-            return await self._send_card(ctx, head, text, title=title, links=links)
-        # A group's subcommands page with ◀ ▶ under the usage and description, which every page repeats.
-        lines = [f"`{s.name}`: {ui.truncate(fill(s.short_doc, prefix, bot_name), 90)}" for s in subs]
-        header = f"{head}\n\n{text}\n\n**Subcommands** · `{prefix}{command.qualified_name} <subcommand>`"
-        await self._send_board(ctx, header, lines, title=title, links=links)
+            return await self._send_card(ctx, head, text, title=title, links=links,
+                                         footer=self._related_hint(command, prefix))
+        # A group's subcommands page with ◀ ▶ under the usage and description, which every page repeats. A
+        # subcommand says who can use it only when that differs from the group.
+        rows = []
+        for sub in subs:
+            sub_who = requirement(sub)[0]
+            rows.append(self._command_row(sub, prefix, bot_name, None if sub_who in (who, "everyone") else sub_who))
+        await self._send_board(ctx, f"{head}\n\n{text}\n\n**Subcommands**", rows, title=title, links=links)
+
+    def _related_hint(self, command: commands.Command, prefix: str) -> str:
+        """A single command's footer: where to find the commands around it."""
+        if command.parent is not None:
+            return f"`{prefix}help {command.parent.qualified_name}` for related commands"
+        if command.cog is not None:
+            return f"`{prefix}help {friendly_name(command.cog)}` for related commands"
+        return HELP_FOOTER.format(p=prefix)
 
     async def send_cog_card(self, ctx: commands.Context, cog: commands.Cog):
         prefix, bot_name = ctx.clean_prefix, self._bot_name(ctx)
         about = fit(fill(getattr(cog, "help", None) or cog.description, prefix, bot_name), 600)
-        lines = []
+        rows = []
         for command in visible_commands(cog):
             who, owner_only = requirement(command)
             if owner_only and not await self.bot.is_owner(ctx.author):
                 continue
-            note = "" if who == "everyone" else f" *({who})*"
-            lines.append(f"`{prefix}{command.qualified_name}`: "
-                         f"{ui.truncate(fill(command.short_doc, prefix, bot_name), 100)}{note}")
+            rows.append(self._command_row(command, prefix, bot_name, None if who == "everyone" else who))
         links = []
         topic = self.topic_for(None, cog)
         if topic:
             links.append(("Open handbook page", await self.topic_url(topic)))
         links.append(("Open the reference", await self.reference_url(cog)))
         # The commands page with ◀ ▶ under the category's description, which every page repeats.
-        await self._send_board(ctx, about or None, lines, title=f"📖 {friendly_name(cog)}", links=links,
+        await self._send_board(ctx, about or None, rows, title=f"📖 {friendly_name(cog)}", links=links,
                                divider=bool(about))
 
     async def send_not_found(self, ctx: commands.Context, text: str):
         names = [c.qualified_name for c in self.bot.walk_commands() if not c.hidden] + list(self.bot.cogs)
         close = difflib.get_close_matches(text.lower(), [n.lower() for n in names], n=3, cutoff=0.6)
         hint = (" Did you mean " + ", ".join(f"`{ctx.clean_prefix}help {c}`" for c in close) + "?") if close else ""
-        await ctx.send(f"❓ There's no command or category called `{text[:80]}`.{hint}\n"
-                       f"Or ask me in plain English: `{ctx.clean_prefix}butler {text[:60]}`",
+        await ctx.send(ui.line(ui.ASK, f"There's no command or category called `{text[:80]}`.{hint}",
+                               hint=f"Or ask me in plain English: `{ctx.clean_prefix}butler {text[:60]}`"),
                        allowed_mentions=ui.NO_PINGS)
 
     # ==========================================
@@ -451,8 +467,8 @@ class Handbook(commands.Cog):
         if score < 0.5:
             return await ctx.send(f"❓ No handbook topic matches **{topic[:60]}**. `{ctx.clean_prefix}handbook` lists "
                                   "them all.", allowed_mentions=ui.NO_PINGS)
-        # The link is the button; the card just names the page.
-        await self._send_card(ctx, f"{emoji} {about}", title=f"📖 {title}",
+        # The link is the button; the card just says what the page covers.
+        await self._send_card(ctx, about, title=f"📖 {title}",
                               links=[("Open this page", await self.topic_url(path))])
 
     @handbook.command(name="seturl")

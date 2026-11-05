@@ -55,7 +55,7 @@ To answer, just type in the channel; capitalization doesn't matter.
 !maketrivia redo our games                throw it away and write it again
 ```
 
-`show` with a quiz name sends the questions and answers to your DMs, so players can't see them, and puts a ✅ on your command. If your DMs are closed, it's posted in the channel instead, with the answers behind spoilers. Long quizzes page 15 questions at a time with ◀ ▶. A failed `redo` leaves the old quiz as it was.
+`show` with a quiz name sends the questions and answers to your DMs, so players can't see them, and puts a ✅ on your command. If your DMs are closed, it's posted in the channel instead, with the answers behind spoilers. Long quizzes page 8 questions at a time with ◀ ▶, plus a **Jump to** menu. A failed `redo` leaves the old quiz as it was.
 
 {: .staff }
 > **Trivia settings** (mods): `!triviaset maxscore`, `timelimit`, `stopafter`, `revealanswer`, `usespoilers`, `botplays`, `showsettings`.

@@ -76,7 +76,7 @@ When everyone's in, the host presses **Start vote** on the session, or runs:
 **The options:** games everyone has installed. If there are none, games everyone owns; failing that, games at least two players have installed.
 
 **How it runs:**
-- The session card switches to voting: the games appear as buttons inside it, with who has voted, who's still to vote, and when voting ends.
+- The session card switches to voting: the games appear as buttons inside it, each showing its votes so far, with how many have voted, who's still to vote, and when voting ends.
 - Everyone in the session gets a one-line ping linking to the card. It's deleted when the vote ends.
 - Press a game to vote. Press it again to take the vote back.
 - The vote ends when everyone has voted or time runs out.

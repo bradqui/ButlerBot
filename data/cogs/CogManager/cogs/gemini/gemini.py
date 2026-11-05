@@ -222,8 +222,8 @@ class GeminiChat(commands.Cog):
         """Refine the last image generated in this channel."""
         key = self._channel_key(ctx.channel)
         if key not in self.image_sessions:
-            return await ctx.send(f"❓ There's no recent image here to edit. Start one with "
-                                  f"`{ctx.clean_prefix}draw <prompt>`.")
+            return await ctx.send(ui.line(ui.ASK, "There's no recent image here to edit.",
+                                          hint=f"Start one with `{ctx.clean_prefix}draw <prompt>`."))
         async with ctx.typing():
             await self.generate_image(changes, key, ctx.message, channel=ctx.channel, user=ctx.author, new=False)
 
@@ -253,13 +253,27 @@ class GeminiChat(commands.Cog):
         async with ctx.channel.typing():
             models = await self.image_models()
         if models is None:
-            return await ctx.send(ui.line(ui.FAIL, "I couldn't get the model list from Google. Try again in a minute."))
+            return await ctx.send(ui.line(ui.FAIL, "I couldn't get the model list from Google.",
+                                          hint="Try again in a minute."))
         if not models:
             return await ctx.send(ui.line(ui.ASK, "Google didn't list any image models."))
-        # One model a row; a long list pages with ◀ ▶.
-        shortcuts = "Shortcuts: " + ", ".join(f"{a} = {m}" for a, m in self.model_aliases.items())
-        await ui.Board("🎨 Image models", [f"`{m}`" for m in models], color=ui.BRAND,
-                       footer=ui.truncate(shortcuts, 300)).send(ctx)
+        # One model a row: its name, then what it's used for here and its shortcut name in small text underneath.
+        user_model = await self.config.user(ctx.author).image_model()
+        channel_model = await self.config.channel(ctx.channel).image_model()
+        rows = []
+        for m in models:
+            notes = [f"shortcut `{a}`" for a, target in self.model_aliases.items() if target == m]
+            if m == DEFAULT_IMAGE_MODEL:
+                notes.append("default")
+            if m == channel_model:
+                notes.append("this channel")
+            if m == user_model:
+                notes.append("your private requests")
+            detail = " · ".join(notes)
+            rows.append(ui.row(f"`{m}`", detail[:1].upper() + detail[1:]))
+        p = ctx.clean_prefix
+        await ui.Board("🎨 Image models", rows, color=ui.BRAND,
+                       footer=f"Pick one with {p}gemini model or {p}gemini channelmodel").send(ctx)
 
     @gemini.command(name="settings")
     async def show_settings(self, ctx):
@@ -271,7 +285,7 @@ class GeminiChat(commands.Cog):
             ui.settings_text([(f"Your private requests (`{p}myai draw …`)", f"`{u_img}`"),
                               ("This channel", f"`{c_img}`")]),
             ui.SEPARATOR, title="🎨 Image settings", color=ui.BRAND,
-            footer=f"Change with {p}gemini model or {p}gemini channelmodel · {p}gemini list shows the models")
+            footer=f"Change with {p}gemini model or {p}gemini channelmodel")
         await ui.send_card(ctx, ui.CardView(container))
 
     async def _check_model(self, ctx, model_name: str):
@@ -286,7 +300,7 @@ class GeminiChat(commands.Cog):
         async with ctx.channel.typing():
             models = await self.image_models()
         if models is None:
-            return name,"I couldn't check that name with Google, so make sure it's right."
+            return name, "I couldn't check that name with Google, so make sure it's right."
         if name not in models:
             shown = ", ".join(models[:10]) or "none right now"
             return None, ui.line(ui.FAIL, f"`{name[:80]}` isn't an image model I can use.",

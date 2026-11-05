@@ -225,11 +225,16 @@ def read_trivia(path) -> Tuple[dict, dict]:
             {str(k): v for k, v in data.items() if k not in TRIVIA_META_KEYS})
 
 
-def trivia_row(number: int, question: str, answers) -> str:
-    """One numbered board row with the answers behind a spoiler, short enough that the board never cuts the spoiler."""
+def trivia_row(number: int, question: str, answers) -> tuple:
+    """
+    A board row: the numbered question, then its answers behind a spoiler on the small line underneath. Both are
+    capped (420 + 150 characters) so the row stays under the board's 600 and the spoiler is never cut. Pipes become
+    slashes so nothing can close the spoiler early, and line breaks become spaces so the question stays one line.
+    """
     answer = ", ".join(map(str, answers)) if isinstance(answers, list) else str(answers)
-    answer = ui.truncate(answer.replace("|", "/"), 150)
-    return f"{number}. {ui.truncate(str(question), 420)} ||{answer}||"
+    answer = ui.truncate(" ".join(answer.replace("|", "/").split()), 150)
+    question = ui.truncate(" ".join(str(question).replace("|", "/").split()), 420)
+    return ui.row(f"**{number}.** {question}", f"||{answer}||")
 
 
 def write_trivia(path, meta: dict, questions: dict):
@@ -280,7 +285,7 @@ class ButlerFun(commands.Cog):
                    ) -> Tuple[Optional[str], Optional[str]]:
         claude = self._claude()
         if claude is None:
-            return None, "⚠️ The AI features need the Claude cog loaded."
+            return None, "⚠️ This needs the AI chat, which isn't running right now."
         return await claude.complete(member, channel, system=system, messages=messages, **kwargs)
 
     # ==========================================
@@ -309,8 +314,8 @@ class ButlerFun(commands.Cog):
                                          fast=True, max_tokens=700, persona=False)
         if summary is None:
             return None, error
-        header = (f"📰 **Catch-up for {channel.mention}**: {ui.plural(len(history), 'message')} since "
-                  f"<t:{int(since.timestamp())}:R>")
+        header = ui.two_line(f"📰 **Catch-up for {channel.mention}**",
+                             f"{ui.plural(len(history), 'message')} since <t:{int(since.timestamp())}:R>")
         return f"{header}\n{summary}", None
 
     @commands.command(name="catchup")
@@ -329,7 +334,7 @@ class ButlerFun(commands.Cog):
                 await ctx.author.send(page)
             await ctx.tick()
         except discord.HTTPException:
-            await ctx.send("❌ I couldn't DM you. Use `/catchup` instead, which only you can see.", delete_after=20)
+            await ctx.send("❌ I couldn't DM you. Use `/catchup` instead, which only you can see.")
 
     @app_commands.command(name="catchup", description="A summary of this channel since you last spoke (only you see it)")
     @app_commands.guild_only()
@@ -396,7 +401,7 @@ class ButlerFun(commands.Cog):
         adventures = await self.config.guild(ctx.guild).adventures()
         live = {tid: a for tid, a in adventures.items() if ctx.guild.get_thread(int(tid))}
         if len(live) >= MAX_ADVENTURES:
-            return await ctx.send(f"⚠️ {MAX_ADVENTURES} adventures are already running. Finish one with "
+            return await ctx.send(f"⏳ {MAX_ADVENTURES} adventures are already running. Finish one with "
                                   f"`{ctx.clean_prefix}adventure stop` in its thread.")
         setting = setting.strip()[:500]
         try:
@@ -466,7 +471,7 @@ class ButlerFun(commands.Cog):
         if mentioned:
             member = ctx.guild.get_member(int(mentioned.group(2)))
             if member is None:
-                return await ctx.send("❌ I can't find that member.")
+                return await ctx.send("❓ I can't find that member.")
             if mentioned.group(1):
                 mod = ctx.channel.permissions_for(ctx.author).manage_messages or await self.bot.is_mod(ctx.author)
                 if member != ctx.author and not mod:
@@ -495,7 +500,7 @@ class ButlerFun(commands.Cog):
             verdict, error = await self._ask(ctx.author, ctx.channel, BIO_CHECK, [{"role": "user", "content": text}],
                                              fast=True, max_tokens=60, persona=False, count_toward_limit=False)
         if verdict is None and error and not self._is_refusal(error):
-            return await ctx.send(ui.line(ui.WARN, "I couldn't check your bio right now, so it isn't saved.",
+            return await ctx.send(ui.line(ui.FAIL, "I couldn't check your bio right now, so it isn't saved.",
                                           hint=bare(error)), allowed_mentions=ui.NO_PINGS)
         if verdict is None or not verdict.strip().upper().startswith("OK"):
             reason = re.sub(r"^NO\s*:?\s*", "", (verdict or "").strip(), flags=re.I)[:150] or "it doesn't fit the game."
@@ -648,7 +653,7 @@ class ButlerFun(commands.Cog):
 
     def _no_list(self, name: str) -> str:
         lists = self._trivia_lists()
-        return (f"❌ I don't have a trivia list called `{name}`."
+        return (f"❓ I don't have a trivia list called `{name}`."
                 + (f" Mine: {', '.join(f'`{n}`' for n in lists[:15])}." if lists else ""))
 
     async def _trivia_subject(self, ctx: commands.Context, topic: str) -> Optional[str]:
@@ -658,7 +663,7 @@ class ButlerFun(commands.Cog):
         gm = self.bot.get_cog("GameManager")
         games = sorted(g["name"] for g in (await gm.config.guild(ctx.guild).games()).values()) if gm else []
         if not games:
-            await ctx.send("❌ The server's game library is empty (or GameManager isn't loaded).")
+            await ctx.send("❌ The server's game library is empty (or the games feature isn't loaded).")
             return None
         return "these video games (mix questions across them): " + ", ".join(games[:80])
 
@@ -747,12 +752,11 @@ class ButlerFun(commands.Cog):
             text = f"✅ Added {ui.plural(len(new), 'question')} to `{name}`, which now has {len(questions)}."
         else:
             text = f"✅ Wrote {ui.plural(len(new), 'question')} about **{topic[:100]}**."
+        text += (f" Start the quiz with `{p}trivia {name}`." if self.bot.get_cog("Trivia") is not None else
+                 f" Load Red's trivia cog (`{p}load trivia`), then `{p}trivia {name}`.")
         if len(new) < count:
             text += f"\n-# Only {len(new)} of the {count} I asked for came out new." + (f" {bare(error)}" if error else "")
-        text += ("\n" + (f"Start the quiz with `{p}trivia {name}`." if self.bot.get_cog("Trivia") is not None else
-                         f"Load Red's trivia cog (`{p}load trivia`), then `{p}trivia {name}`.")
-                 + f"\n-# `{p}maketrivia {topic[:60]}` again adds more. `{p}maketrivia show {name}` lists them, "
-                   f"`remove` drops one, `redo` starts over.")
+        text += f"\n-# Run it again to add more. `{p}maketrivia show {name}` lists them."
         await reply(text)
 
     @commands.group(name="maketrivia", aliases=["trivia-make", "writetrivia"], invoke_without_command=True)
@@ -802,22 +806,21 @@ class ButlerFun(commands.Cog):
             lists = self._trivia_lists()
             if not lists:
                 return await ctx.send(f"❓ I haven't written any trivia lists yet. Try `{p}maketrivia <topic>`.")
-            lines = [f"`{n}`: {ui.plural(len(read_trivia(self._trivia_path(n))[1]), 'question')}" for n in lists]
-            return await ui.Board("🧠 Trivia lists", lines,
-                                  footer=f"`{p}maketrivia show <name>` lists one · `{p}trivia <name>` plays it"
-                                  ).send(ctx)
+            rows = [ui.row(f"**`{n}`**", ui.plural(len(read_trivia(self._trivia_path(n))[1]), "question"))
+                    for n in lists]
+            return await ui.Board("🧠 Trivia lists", rows, footer=f"`{p}maketrivia show <name>` shows one").send(ctx)
         name = trivia_name(name)
         _, questions = read_trivia(self._trivia_path(name))
         if not questions:
             return await ctx.send(self._no_list(name))
         rows = [trivia_row(i, q, a) for i, (q, a) in enumerate(questions.items(), 1)]
         count = ui.plural(len(questions), "question")
-        remove = f"`{p}maketrivia remove {name} <numbers>` drops some"
-        # The answers go to the mod's DMs. If those are closed, post the list here after all, saying why.
+        # The answers go to the mod's DMs. If those are closed, post the list here after all, saying why (and
+        # swapping the removal hint for a warning that the spoilers are open to everyone here).
         await ui.send_private(ctx, lambda in_dm: ui.Board(
             f"🧠 {name}", rows,
-            footer=f"{count} · Answers are spoilered · {remove}" if in_dm else
-            f"{count} · Answers are spoilered, but anyone here can reveal them · {remove}\n{ui.DM_FALLBACK}"))
+            footer=f"{count} · `{p}maketrivia remove {name} <numbers>` drops some" if in_dm else
+            f"{count} · anyone here can reveal the answers\n{ui.DM_FALLBACK}"))
 
     @maketrivia.command(name="remove", aliases=["delete"])
     @commands.guild_only()
@@ -853,7 +856,7 @@ class ButlerFun(commands.Cog):
             exact = [k for k in matches if simplify(k) == needle]
             doomed = exact[:1] or matches
             if not doomed:
-                return await ctx.send(f"❌ No question in `{name}` matches that. "
+                return await ctx.send(f"❓ No question in `{name}` matches that. "
                                       f"`{p}maketrivia show {name}` lists them with numbers.")
             if len(doomed) > 1:
                 lines = [f"{keys.index(k) + 1}. {k}" for k in doomed[:8]]
@@ -889,7 +892,7 @@ class ButlerFun(commands.Cog):
             return await ctx.send("⏳ A round is already running here.")
         gm, gemini = self.bot.get_cog("GameManager"), self.bot.get_cog("GeminiChat")
         if gm is None or gemini is None or not hasattr(gemini, "generate_image"):
-            return await ctx.send("❌ This needs the GameManager and Gemini cogs loaded.")
+            return await ctx.send("⚠️ Guess the game needs the game library and image generation running.")
         games = await gm.config.guild(ctx.guild).games()
         users = await gm.config.guild(ctx.guild).users()
         if len(games) < 3:
@@ -959,10 +962,12 @@ class ButlerFun(commands.Cog):
                          if d.get("guess_wins") and ctx.guild.get_member(uid)), reverse=True)
         if not ranked:
             return await ctx.send(f"❓ No winners yet. Start a round with `{ctx.clean_prefix}guessgame`.")
-        medals = ["🥇", "🥈", "🥉"]
-        lines = [f"{medals[i] if i < 3 else f'`{i + 1}.`'} <@{uid}>: **{wins}**" for i, (wins, uid) in enumerate(ranked)]
-        # A board's mentions highlight names without pinging anyone (send_card's default).
-        await ui.Board("🎨 Guess the game: top players", lines, color=ui.HIGHLIGHT,
+        medals = ["🥇", "🥈", "🥉"]   # markers at the end of the name line
+        rows = []
+        for i, (wins, uid) in enumerate(ranked):
+            name = discord.utils.escape_markdown(ctx.guild.get_member(uid).display_name)
+            rows.append(ui.row(f"**{i + 1}. {name}**" + (f" {medals[i]}" if i < 3 else ""), ui.plural(wins, "win")))
+        await ui.Board("🎨 Guess the game: top players", rows, color=ui.HIGHLIGHT,
                        footer=f"Start a round with `{ctx.clean_prefix}guessgame`").send(ctx)
 
     @guessgame.command(name="stop")

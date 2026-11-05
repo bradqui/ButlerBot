@@ -36,7 +36,7 @@ None of these are tracked by Downloader. Two first-run steps are still needed on
 |---|---|---|---|
 | `activitystats` | `ActivityStats` | `7734152096` | Activity stats (new 2026-11-04; needs `!load activitystats`). Counts go to **SQLite** at `data/cogs/ActivityStats/stats.db`, not Config: hourly message counts per (guild, channel, user), voice visits, games from "Playing" presence, joins/leaves, command uses, unmet guide questions and game-session attendance. Settings (exclusions, game tracking, digest) are in Config. Threads count toward their parent channel. Channel arguments go through `ChannelArg` (mention, ID or name); a name several channels share, like a text and a voice channel, opens a `ChannelPicker`. Messages are buffered in RAM and flushed every 60 s. Each report is one `report_*` method returning a `Report` (title, lines, optional chart callable drawn with matplotlib's `Figure` API in a worker thread). Commands render it as an embed, and the `stats_report` guide tool renders it as plain text via `_plain`. Member reports only show channels the viewer can see; admin reports (`!stats admin …`, or tool reports in `ADMIN_REPORTS`) need admin or manage server. `!stats ignoreme` deletes a member's rows and stops tracking. `!stats admin backfill <days>` reads channel history from before tracking started (messages only). |
 | `speakup` | `SpeakUp` | `6029481735` | **The bot chiming in** (new 2026-11-04; needs `!load speakup`). Every feature can be switched off: per server with `!speakup feature`, per channel with `!speakup off` (`quiet_channels`), and per person with `!speakup me off`. All of them check `allowed()`. Nothing in it pings. **Times** (`find_time`): am/pm and HH:MM times always count; a bare "at 9" counts only with planning words (`PLANNING_RE`) and is read as PM unless the message says "morning". The time is read in the author's GameManager timezone. The bot adds a 🕘 reaction (5-min channel cooldown); a click replies with Discord timestamps plus a persistent **Schedule a session** button (`sp:sched:<ts>`) that calls GameManager's `post_session`. **Steam links** get a card (no image, since Discord already embeds one) with own/want buttons (`sp:own|want:<appid>`), once per game per channel per 6 h. **Other links** get a 📄 reaction. `summary_links` skips media files, Discord, Steam and known GIF/image hosts. `_article_links` also waits `EMBED_WAIT` s for Discord's link previews and drops links previewed as `image`/`gifv`; videos still count. a click posts a summary in the channel. The **Summarize link** message context menu (`summarize_menu`, added to `bot.tree` in `cog_load`; it needs `[p]slash enable "Summarize link" message` and `[p]slash sync`) answers the same privately (ephemeral). Both go through `summarize()`, which caches a URL's summary for an hour, and `_summary_allowed()` (10 per person per hour). **Mistakes:** `CommandNotFound`, or an argument-less group given an unknown word (`unknown_subcommand` reads the leftover text, because discord.py clears `subcommand_passed`). It tries `fuzzy_suggestion` (difflib on the first 1–3 words) first, then Claude's `suggest_command`, and replies with a Run-it view. GameManager's `games` group stays quiet when `handles_mistakes(ctx)` is true. **Reminders** are in Config global `reminders`. Relative times are parsed here; absolute ones use GameManager's module `split_when` (via `sys.modules`). A 30 s loop delivers them, falling back to DM. Reaction offers are tracked in RAM for 24 h. A click on an unknown offer, after a reload or restart, re-fetches the message, checks that the bot's own reaction is on it (`me`), and rebuilds the offer from the text (`_rebuild_offer`; times are read as of the message's timestamp). Unexpected errors while answering are logged and reported in the channel instead of failing silently. 🗑️ **Remove** buttons (`RemoveButton`, custom ID `sp:x:<uid>`, formerly labeled Dismiss) delete the reply for everyone, after a private `ConfirmRemoveView`. The person it was for, or anyone with Manage Messages, can use one. It's labeled Remove because people read "Dismiss" as hide-for-me. |
-| `butlerfun` | `ButlerFun` | `4418350927` | **AI extras** (new 2026-11-04; needs `!load butlerfun`, plus `!slash enable catchup` and `!slash sync` for `/catchup`). All Claude calls go through the Claude cog's public `complete()`. **Catch-up:** reads up to 400 messages back to the asker's last message and summarizes them with Haiku; `/catchup` is ephemeral and `!catchup` sends a DM. **Judge:** the last 20–60 human messages, ruled on in the persona (Sonnet). **Adventure:** a thread per adventure, listed in guild Config `adventures`. Players' messages are buffered for `ADVENTURE_DEBOUNCE` seconds, then narrated in one turn. The story lives in RAM, keeps `ADVENTURE_HISTORY` (200) messages, and is re-seeded from thread history after a restart. Each adventure's Config entry lists its `players`; their member-Config `adventure_bio` (up to 200 characters, checked by Haiku against `BIO_CHECK` when set) goes into the narrator's system prompt, and the story overrides a bio for that adventure. A refused turn posts `ADVENTURE_DEFLECT` and drops that round's moves. `!adventure stop` writes a final scene; Haiku turns it into a safe, wordless picture description (`FINAL_SCENE_PROMPT`) and Gemini draws it with `quiet=True`, then the thread is archived. **maketrivia** (mods): Claude returns JSON, which is written as YAML into Red's trivia folder (`cog_data_path(raw_name="Trivia")/bb_<topic>.yaml`) so `!trivia bb_<topic>` works at once. `our games` uses the GameManager library. Lists are written in batches of `TRIVIA_BATCH` (25), each prompt listing every question so far, and duplicates are dropped by normalized text. Running it on an existing topic **adds** (10–100 per run, default 30, up to `TRIVIA_LIST_MAX` = 300 per list); `redo` replaces, `show` lists with spoilered answers (a `.txt` file when long), and `remove` takes numbers or unique question text. Subcommands carry their own mod check, because the group's isn't applied to them. **guessgame:** picks a library game weighted by owners. Haiku describes a scene without names (rejected if the name leaks), and Gemini draws it in a random `ART_STYLES` style. Gemini posts images without a caption. A `wait_for` loop gives hints at 60 and 120 s and reveals the answer at 180 s; wins are stored per member. |
+| `butlerfun` | `ButlerFun` | `4418350927` | **AI extras** (new 2026-11-04; needs `!load butlerfun`, plus `!slash enable catchup` and `!slash sync` for `/catchup`). All Claude calls go through the Claude cog's public `complete()`. **Catch-up:** reads up to 400 messages back to the asker's last message and summarizes them with Haiku; `/catchup` is ephemeral and `!catchup` sends a DM. **Judge:** the last 20–60 human messages, ruled on in the persona (Sonnet). **Adventure:** a thread per adventure, listed in guild Config `adventures`. Players' messages are buffered for `ADVENTURE_DEBOUNCE` seconds, then narrated in one turn. The story lives in RAM, keeps `ADVENTURE_HISTORY` (200) messages, and is re-seeded from thread history after a restart. Each adventure's Config entry lists its `players`; their member-Config `adventure_bio` (up to 200 characters, checked by Haiku against `BIO_CHECK` when set) goes into the narrator's system prompt, and the story overrides a bio for that adventure. A refused turn posts `ADVENTURE_DEFLECT` and drops that round's moves. `!adventure stop` writes a final scene; Haiku turns it into a safe, wordless picture description (`FINAL_SCENE_PROMPT`) and Gemini draws it with `quiet=True`, then the thread is archived. **maketrivia** (mods): Claude returns JSON, which is written as YAML into Red's trivia folder (`cog_data_path(raw_name="Trivia")/bb_<topic>.yaml`) so `!trivia bb_<topic>` works at once. `our games` uses the GameManager library. Lists are written in batches of `TRIVIA_BATCH` (25), each prompt listing every question so far, and duplicates are dropped by normalized text. Running it on an existing topic **adds** (10–100 per run, default 30, up to `TRIVIA_LIST_MAX` = 300 per list); `redo` replaces, `show` lists with spoilered answers (a board, sent by DM), and `remove` takes numbers or unique question text. Subcommands carry their own mod check, because the group's isn't applied to them. **guessgame:** picks a library game weighted by owners. Haiku describes a scene without names (rejected if the name leaks), and Gemini draws it in a random `ART_STYLES` style. Gemini posts images without a caption. A `wait_for` loop gives hints at 60 and 120 s and reveals the answer at 180 s; wins are stored per member. |
 | `handbook` | `Handbook` | `3357204816` | **Help and docs** (new 2026-11-04). It installs a Red help formatter (`HandbookHelp`) in `cog_load`; Red allows only one, so **unload customhelp first**, or `set_help_formatter` raises and the cog only logs a warning (`!handbook status`). `!help` shows a topic card, `!help <command>` a compact card (usage, aliases, who, subcommands) with a link to its topic page and reference anchor, and `!help <cog>` a list. `TOPICS`, `COG_TOPICS` and `GAME_NIGHT_COMMANDS` map cogs and commands to `docs/` permalinks, so **keep them in step with the pages**. `guide_links()` feeds the butler's prompt (`_handbook_lines` in the Claude cog), so answers end with "More: <url>". `!handbook export` (owner) zips `reference/*.md` built from the live bot: one page per cog, anchors `<qualified-name-with-dashes>`, owner-only commands left out, help wrapped in `{% raw %}`. It also writes `reference/custom-commands.md` from the CustomCommands and Alias configs. Unzip it into `docs/`. `requirement()` duplicates the guide's permission-label logic, and also reads `requires.checks`, where Red's `permissions_check` helpers like `admin_or_can_manage_channel` live (`known_check`). The export skips cogs and commands that a Permissions default rule denies (`denied_by_default`). |
 | `buttongreeter` | `ButtonGreeter` | `8473829102` | Welcome flow on `on_member_join`: alliance/role buttons → nickname tag `[TAG] Name` → rules agreement → rules role. Commands: `!bg …`, `!changerole`, and the mod-role-gated `!forceclass` / `!forcerulesremove`. Errors go to a configured admin channel. |
 | `censord` | `Censord` | `8473829201` | Word filter with `off/low/high` levels. Word lists are **CSV files** in `data/cogs/Censord/{low,high}.csv` (single row, `*` = wildcard; without one the word gets `\b` boundaries). Has a per-channel override, include/exclude strategy, and a threshold (N hits in T seconds) that triggers delete/kick/ban. Commands: `!censor …`. Mods and admins are immune. |
@@ -116,7 +116,7 @@ Quirks to know:
     - A refusal returns exactly `ClaudeChat.REFUSAL` (`"❌ I can't help with that one."`), and callers compare `error == claude.REFUSAL`. An empty reply returns `NO_REPLY`, which isn't a refusal.
     - Other public helpers: `limit_reached(member) -> Optional[int]`, which ButlerFun uses to name whose limit stopped an adventure round, and `limit_text(limit)`, the single wording for the daily limit.
     - A missing API key shows "⚠️ AI chat isn't set up yet…", with the setup command shown to the bot owner only.
-    - `ActionConfirmView` is an `ExpiringView`; after running, its "Running…" note changes to "Done.".
+    - `ActionConfirmView` is an `ExpiringView` (`expired_note` "Expired. Nothing was run."); after running, its "Running…" note changes to "Done.".
     - Long replies use `ui.split_text`; `split_for_discord` is gone.
   - `summarize_link(url, member)` reads the page with Anthropic's **web fetch** server tool, so the bot never requests user-posted URLs itself (no SSRF into the Docker host's network). It follows the same fallback pattern (`LINK_READERS`: Haiku `web_fetch_20260209`, then `_20250910`, then Sonnet, with `max_content_tokens` 12000) and keeps only the text after the last tool block.
   - `suggest_command(message, typed)` sends the quick model the whole command reference (`_command_catalog`) as a cached system prompt, with no tools. It accepts the reply only if it starts with the prefix and names a real, non-hidden command.
@@ -201,7 +201,16 @@ Rules for using them:
 **Message sizes:**
 - **Line:** one sentence, with an optional `-#` hint under it. It's private when there's an interaction. Text-command errors stay in the channel (the user's choice, so don't auto-delete them).
 - **Card:** a V2 container with an accent color, a short title, the details, its buttons inside, and a `-#` footer hint.
-- **Board:** a card that pages, 15 rows with ◀ ▶.
+- **Board:** a card that pages, 8 rows with ◀ ▶, and a **Jump to** menu past 5 pages.
+
+**Readable rows and blocks** (Phase 5, 2026-11-05; approved design: https://claude.ai/artifact/KkhZn2GtYB15WMQoueEKeN). Discord can't put small or colored text in the middle of a line (`-#` only works on a whole line) and has no columns, so:
+- **One main line, details underneath.** The thing a row or block is about (a game, a person, a command, a fact) is the main line, usually **bold**. Its counts, explanations and secondary names go on a `-#` line under it, never after a `·` on the same line. Build board rows with `ui.row(main, detail)` and card blocks with `ui.two_line(main, detail)`.
+- **Every list is two-line rows, short lists included.** A name-only row is just the bold main line. Each row is its own text block, so Discord adds space between rows.
+- **Markers go at the end of the main line** (`**Barony** 💾`), so they line up and never sit between a name and its details.
+- **Cards are short blocks**, each a bold main line plus a small detail line (for example a session card: when, who, the vote). Instructions people only need once go into the private reply they get when they press a button, not into the card.
+- **At most one emoji per card body line**, and only where it means something; the title keeps the topic emoji. Fact lists (stats reports) drop per-line emoji.
+- **Footers say one thing:** the page count plus at most one hint. Lists of commands belong in help, not footers.
+- **Settings cards are the exception:** `settings_text` keeps `**Name** · value` rows, since those are key-value pairs read as a table.
 
 AI answers, adventure narration and butler replies stay plain text, split with `split_text()` (never by slicing).
 
@@ -218,7 +227,9 @@ AI answers, adventure narration and butler replies stay plain text, split with `
 - **`settings_text([(name, value)])`** writes `**Name** · value` rows, with On/Off for booleans.
 - **`send_card(target, view, ephemeral=…, reply_to=…)`** sends to a Context, channel, user or interaction.
 - **`is_card(message)`** tells you whether a message is a card.
-- **`Board(title, rows, *, color, header, footer, per_page=15, media, empty, owner_id=None, timeout=900, extra)`** is a paged card (Phase 3). Send it with `await board.send(target, ephemeral=…)`.
+- **`Board(title, rows, *, color, header, footer, per_page=8, media, empty, owner_id=None, timeout=900, extra)`** is a paged card (Phase 3, two-line rows since Phase 5). Send it with `await board.send(target, ephemeral=…)`.
+  - Rows are `ui.row(main, detail=None)` tuples (or plain strings, which are a main line with no details). `ui.row_text(r)` gives a row's markdown; `ui.plain(text)` strips markdown and mentions for labels.
+  - Each row on a page is its own `TextDisplay`. More than `JUMP_AFTER` (5) pages adds a **Jump to** select above the rows (`board:<id>:jump`): one option per page, labeled "Page N" with "first – last" row names, grouped into ranges past 25 pages.
   - Anyone can page it with ◀ ▶. Paging redraws the same message, and the custom IDs are stable per board.
   - A single page has no buttons and no timeout.
   - Pages also break by size, at about 3,400 characters of rows.
@@ -268,7 +279,7 @@ Rules for card messages:
 - **Gemini:** the public `image_models()` lists the image models. `!gemini model` and `channelmodel` check names against it: aliases always pass, and a ⚠️ hint appears when the list can't be fetched.
 - **Handbook:**
   - Cards use friendly cog names (`COG_NAMES`, `friendly_name()`), and `!help <friendly name>` finds the cog.
-  - Every card uses 📖 and one footer (`HELP_FOOTER`); `fit()` shortens long text.
+  - Every card uses 📖; `fit()` shortens long text. Boards use `HELP_FOOTER` ("`!help <command>` for details"); single-command cards point at related commands instead (Phase 5).
   - Topic emoji: filters 🛡️, moderation 🔨.
 - **Censord:**
   - `addword`/`delword` delete the command when they can, never repeat the word, and report honestly; `_update_csv` returns whether the list changed.
@@ -296,7 +307,7 @@ Rules for card messages:
 - **ButtonGreeter:** `welcome_card(member, roles)` and `rules_card(member, rules)`. The welcome card is the only card sent with a ping (just the newcomer).
 - **Censord:** the `censor config` card lists channels by name and shows per-channel overrides.
 - **Handbook:** every help reply is a card from `_send_card`, with link buttons inside.
-  - `fit_lines()` keeps command lists under about 3,400 characters, ending with "…and N more".
+  - (Superseded in Phase 3 and 5: help lists are boards of two-line rows.)
   - If Discord rejects a card, the ❌ fallback line is sent instead.
   - The export format is unchanged.
 - **Claude:** `!claude settings`, `models` and `usage` are cards. Usage for another member, and the server totals, carry "Staff only". The persona is shown in full only by `!claude persona`, as text.
@@ -307,7 +318,7 @@ Rules for card messages:
 - **GameManager:**
   - `send_list(target, items, title, footer, ephemeral, *, header, empty)` posts a `ui.Board`. An empty list sends a ❓ line unless `empty=` is passed.
   - Private boards sent through an interaction time out at `LIST_PRIVATE_TIMEOUT` (840 s), before the 15-minute token dies; others at `LIST_TIMEOUT` (900 s).
-  - `library_rows()` writes `Name 💾 · N own, M installed` and counts current members only.
+  - `library_rows()` counts current members only. Since Phase 5 its rows are `ui.row("**Name** 💾", "4 own · 3 installed")`.
   - Every list title uses 🎮, and vote tallies use 🗳️. `top` and `wanted` have no cap; paging handles the length.
 - **ActivityStats:**
   - **Rendering:** reports and the digest are boards built by `_report_card(report, footer) -> (Board, file)`. The chart is `attachment://stats.png` with alt text from `Report.alt`.
@@ -325,7 +336,7 @@ Rules for card messages:
 - **SpeakUp:** `!reminders` is a board.
 - **Handbook:**
   - Help for groups and cogs is a board from `_send_board()`. The header repeats on each page, link buttons go in `extra`, and the cog card's divider goes in `media`.
-  - `rows_per_page()` replaced `fit_lines()`. Plain command cards and the home card are single cards.
+  - Plain command cards and the home card are single cards. (`rows_per_page()` was removed in Phase 5; the Board's size paging is enough.)
 - **Gemini:** `!gemini list` is one board.
 - **Claude:** `usage` and `models` stay cards, since neither can pass one page.
 
@@ -349,6 +360,46 @@ Rules for card messages:
 - **Tests:**
   - `enable_dms()` in the harness gives fake members a `send` (`member.dms`, `member.dms_closed`).
   - `FakeMessage.delete()` records into `channel.deleted`.
+
+**Phase 5 notes (readable rows, 2026-11-05).** The rules are under "Readable rows and blocks" above. Every list and card was converted and reviewed against the whole style guide.
+- **butlerui:**
+  - `row()`, `row_text()` (main line and details capped separately at `ROW_PART_LIMIT`, 600 characters), `two_line()` and `plain()` (strips markdown, links, mentions and emoji, but keeps escaped characters).
+  - `Board` defaults to 8 rows, each its own text block, with a Jump to menu past 5 pages.
+- **GameManager:**
+  - **Lists:** every `send_list` takes `ui.row`s. The module helpers are `details(*parts)` (" · " joined, capitalized), `name_list()`, `repeat_short()` and `tz_note_parts()`.
+  - **Session card:** `session_card(..., guild=)` draws short blocks: when, who, and the vote. `vote_status(vote, guild)` returns one block.
+  - **Vote buttons:** `vote_buttons(vote)` labels buttons with running tallies ("Deep Rock Galactic · 2"; none at zero). New votes store plain names in `labels`.
+  - **Voting guidance:** it's in the private reply after a vote, not in the card. Older vote cards keep their lines via `vote_lines()`.
+  - **Request card:** always titled "🎮 Game request: X", with an Approved or Denied block.
+  - **Menus:** the profile summary uses `settings_text`. Wizard and name-check buttons have short verb labels ("Pick games", "Type names", "Keep my spelling", "Add to library", "Skip it").
+- **ActivityStats:**
+  - **Report contents:** `Report.lines` hold `ui.row` tuples or strings, and every report title uses 📊 with no per-line emoji.
+  - **Rendering:** `ReportBoard` draws each summary block as its own text block. `report_layout` returns `(blocks, rows)`, and `_plain` writes `main — detail`.
+  - **Helpers:** `trend()`, `ranked_main()` (`**1. Alex** 🥇`, medal at the end) and `leader_row()`.
+  - **Smaller changes:** the overview footer is "More with `!help stats`". `ChannelPicker` uses a select menu for 6 or more channels. `!stats admin digest` with no subcommand shows a "📊 Digest settings" card.
+- **Handbook:**
+  - Help rows are the usage in code as the main line, with the first sentence of the help as the detail (`first_sentence()`, `_command_row()`). Who can run it is added only when that isn't everyone.
+  - Each home card topic is its own block.
+- **SpeakUp:**
+  - The reminders board rows are the bold text, with the time, place and ID underneath.
+  - The Steam card puts its price and owners on small lines.
+  - The settings footer is a single line.
+- **ButlerFun:**
+  - Trivia rows are the question, with the `||answer||` underneath.
+  - `guessgame top` rows are `**1. Mira** 🥇` with the wins underneath.
+  - The catch-up header uses two lines.
+  - Status symbols are fixed (❓ for not found, ⏳ for the adventure limit).
+- **Claude:**
+  - `!claude models` is a board of two-line rows.
+  - `!claude usage` (server) lists every member who has usage, paged, under a header of totals.
+  - `limit_text()` adds a `-#` "resets <t:R>" line.
+  - Error replies are one line plus a hint.
+- **Gemini:** `!gemini list` rows are the model, with its shortcut and where it's used underneath. Footers are a single hint.
+- **Censord:**
+  - Each channel override in the config card is its own block, capped at `MAX_OVERRIDES_SHOWN` (10).
+  - The kick and ban reason is "Word filter: repeated offensive language".
+- **ButtonGreeter:** the welcome and rules cards use `two_line()`, and replies are one line plus a hint (`TOLD`).
+- **Settings card footers** may say "`!help <group>` shows how to change these" in place of listing commands, plus "Staff only".
 
 ## Secrets (never print, log, or copy out)
 

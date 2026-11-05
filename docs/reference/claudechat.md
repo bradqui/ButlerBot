@@ -216,8 +216,8 @@ Show the current Claude settings for you, this channel, and this server.
 
 Show AI usage and estimated cost.
 
-Your own usage is sent to you by DM, with a ✅ on your command. Admins see the server's totals and top users,
-or name a member to see theirs, right where they ask.
+Your own usage is sent to you by DM, with a ✅ on your command. Admins see the server's totals and each
+member's usage, or name a member to see theirs, right where they ask.
 
 <a id="claude-websearch"></a>
 ### !claude websearch

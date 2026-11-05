@@ -37,7 +37,7 @@ Run it again any time to update things. Menus like this expire after a while: th
 | `!games usergames <member>` | Someone else's library. |
 | `!games list` / `!games search <text>` | The whole server library, with how many people own and have installed each game. |
 
-Long lists show 15 games at a time. Anyone can page through them with ◀ ▶ for 15 minutes after they're posted. `/games library` and `/games wishlist` show your own list just to you.
+Long lists show 8 games at a time, each with its numbers in small text underneath. Anyone can page through them with ◀ ▶, or skip ahead with the **Jump to** menu on long lists, for 15 minutes after they're posted. `/games library` and `/games wishlist` show your own list just to you.
 
 **Name matching:**
 - Names match loosely: "counterstrike 2" finds "Counter-Strike 2".

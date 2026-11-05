@@ -52,8 +52,9 @@ log = logging.getLogger("red.buttongreeter")
 
 MAX_ROLE_BUTTONS = 18           # four rows of role buttons, plus the two built-in ones
 MAX_NICK = 32                   # Discord's nickname limit
+TOLD = "A moderator has been told."
 NOT_YOURS = "🔒 These buttons are only for the member this message welcomes."
-SOMETHING_WRONG = "❌ Something went wrong on my side. A moderator has been told."
+SOMETHING_WRONG = "❌ Something went wrong on my side.\n-# A moderator has been told."
 TAG_RE = re.compile(r"^\s*\[[^\]]*\]\s*")
 
 
@@ -183,7 +184,8 @@ def welcome_card(member: discord.Member, roles: dict) -> discord.ui.LayoutView:
     group_buttons = [RoleItem(int(role_id), member.id, label)
                      for label, role_id in list(roles.items())[:MAX_ROLE_BUTTONS]]
     return ui.CardView(ui.card(
-        f"{member.mention}, select your identity below to proceed.",
+        ui.two_line(f"{member.mention}, select your identity below to proceed.",
+                    "Your alliance's tag goes in front of your nickname."),
         group_buttons,
         [CustomItem(member.id), NoneItem(member.id)],
         title=f"👋 Welcome to {discord.utils.escape_markdown(member.guild.name)}",
@@ -195,7 +197,8 @@ def welcome_card(member: discord.Member, roles: dict) -> discord.ui.LayoutView:
 def rules_card(member: discord.Member, rules: str) -> discord.ui.LayoutView:
     """The rules agreement: it mentions the member, so send it ping-free (they were pinged by the welcome)."""
     return ui.CardView(ui.card(
-        f"Identity accepted, {member.mention}. Do you agree to the rules in {rules}?",
+        ui.two_line(f"{member.mention}, do you agree to the rules in {rules}?",
+                    "Identity accepted. Agreeing finishes your welcome."),
         [RulesItem("yes", member.id), RulesItem("no", member.id)],
         title="👋 Protocol agreement",
         color=ui.ATTENTION,
@@ -310,15 +313,15 @@ class ButtonGreeter(commands.Cog):
         label = next((lbl for lbl, rid in roles.items() if int(rid) == role_id), None)
         role = guild.get_role(role_id)
         if label is None or role is None:
-            await ui.respond(interaction, "❌ That option isn't available any more. Ask a moderator to set your "
-                                          "group.")
+            await ui.respond(interaction, ui.line(ui.FAIL, "That option isn't available any more.",
+                                                  "Ask a moderator to set your group."))
             return await self.report(guild, f"A welcome button points to a role that no longer exists or was "
                                             f"removed (ID {role_id}).", member)
         try:
             await self._swap_group_role(member, roles, role)
         except discord.HTTPException as e:
             log.info("Couldn't give role %s in %s: %s", role_id, guild.id, e)
-            await ui.respond(interaction, "❌ I couldn't give you that role. A moderator has been told.")
+            await ui.respond(interaction, ui.line(ui.FAIL, "I couldn't give you that role.", TOLD))
             return await self.report(guild, f"I couldn't give the **{role.name}** role. My role needs to be above "
                                             "it, with Manage Roles.", member)
         await self.set_tag(member, label)
@@ -332,8 +335,8 @@ class ButtonGreeter(commands.Cog):
         if not tag:
             return await ui.respond(interaction, "❓ Type a tag, like KVK.")
         nick = await self.set_tag(member, tag)
-        await ui.respond(interaction, f"✅ Your nickname is now **{nick}**." if nick else
-                         f"⚠️ Noted **{tag}**, but I couldn't change your nickname. A moderator has been told.")
+        await ui.respond(interaction, ui.line(ui.DONE, f"Your nickname is now **{nick}**.") if nick else
+                         ui.line(ui.WARN, f"Noted **{tag}**, but I couldn't change your nickname.", TOLD))
         await self.show_rules(interaction, member)
 
     async def on_none_click(self, interaction: discord.Interaction):
@@ -360,18 +363,19 @@ class ButtonGreeter(commands.Cog):
             await ui.send_card(interaction.channel, rules_card(member, rules), allowed_mentions=ui.NO_PINGS)
         except discord.HTTPException as e:
             log.info("Couldn't post the rules prompt in %s: %s", guild.id, e)
-            await ui.respond(interaction, "❌ I couldn't post the rules prompt. A moderator has been told.")
+            await ui.respond(interaction, ui.line(ui.FAIL, "I couldn't post the rules prompt.", TOLD))
             await self.report(guild, f"I couldn't post the rules prompt in {interaction.channel.mention}.", member)
 
     async def on_rules_click(self, interaction: discord.Interaction, agree: bool):
         guild, member = interaction.guild, interaction.user
         if not agree:
-            return await ui.respond(interaction, "⚠️ You need to agree to the rules to finish joining. This prompt "
-                                                 "stays here, so press **Yes, I agree** whenever you're ready.")
+            return await ui.respond(interaction, ui.line(
+                ui.WARN, "You need to agree to the rules to finish joining.",
+                "This prompt stays here, so press Yes, I agree whenever you're ready."))
         role = guild.get_role(await self.config.guild(guild).rules_role() or 0)
         if role is None:
-            await ui.respond(interaction, "❌ The rules role is missing, so I can't finish your welcome. A moderator "
-                                          "has been told.")
+            await ui.respond(interaction, ui.line(ui.FAIL, "The rules role is missing, so I can't finish your "
+                                                           "welcome.", TOLD))
             return await self.report(guild, "The rules role isn't set or was deleted, so a member couldn't finish "
                                             f"joining. Set it with `{await self.prefix(guild)}bg setrulesrole "
                                             "<role>`.", member)
@@ -379,10 +383,11 @@ class ButtonGreeter(commands.Cog):
             await member.add_roles(role)
         except discord.HTTPException as e:
             log.info("Couldn't give the rules role in %s: %s", guild.id, e)
-            await ui.respond(interaction, "❌ I couldn't give you the rules role. A moderator has been told.")
+            await ui.respond(interaction, ui.line(ui.FAIL, "I couldn't give you the rules role.", TOLD))
             return await self.report(guild, f"I couldn't give the **{role.name}** role. My role needs to be above "
                                             "it, with Manage Roles.", member)
-        await ui.respond(interaction, f"✅ Thanks for agreeing. You now have the **{role.name}** role.")
+        await ui.respond(interaction, ui.line(ui.DONE, f"You now have the **{role.name}** role.",
+                                              "Thanks for agreeing, and welcome!"))
         try:
             await interaction.message.delete()
         except (discord.HTTPException, AttributeError):
@@ -417,17 +422,15 @@ class ButtonGreeter(commands.Cog):
         roles = ui.settings_text([("Rules role", role_text(data["rules_role"])), ("Mod roles", mods)])
         buttons = ui.settings_text([(f"[{discord.utils.escape_markdown(label)}]", f"gives {role_text(rid)}")
                                     for label, rid in data["roles"].items()]) or "None yet."
-        p = f"{await self.prefix(ctx.guild)}bg"
         view = ui.CardView(ui.card(
             f"**Channels**\n{channels}",
             f"**Roles**\n{roles}",
             f"**Group buttons**\n{ui.truncate(buttons, 2000)}\n"
-            "Every welcome also has **Custom alliance** (type a tag) and **No alliance**.",
+            + ui.hint("Every welcome also has **Custom alliance** (type a tag) and **No alliance**."),
             ui.SEPARATOR,
             title="👋 Welcome settings",
             color=ui.BRAND,
-            footer=f"`{p} setchannel` · `{p} setruleschannel` · `{p} setadminchannel` · `{p} setrulesrole` · "
-                   f"`{p} addrole` · `{p} removerole` · `{p} addmodrole`\nStaff only",
+            footer=f"`{await self.prefix(ctx.guild)}help bg` shows how to change these · Staff only",
         ))
         await ui.send_card(ctx, view)   # ping-free: the role mentions only show the roles
 
@@ -477,16 +480,17 @@ class ButtonGreeter(commands.Cog):
     async def addrole(self, ctx: commands.Context, role: discord.Role, *, button_label: str):
         """Add a group button to the welcome message. Its label becomes the nickname tag."""
         if role >= ctx.guild.me.top_role:
-            await ctx.send(f"❌ I can't give **{role.name}** because it's at or above my highest role. Move my role "
-                           "above it first.")
+            await ctx.send(ui.line(ui.FAIL, f"I can't give **{role.name}** because it's at or above my highest "
+                                            "role.", "Move my role above it first."))
             return await self.report(ctx.guild, f"Someone tried to add a button for **{role.name}**, which is above "
                                                 "my highest role.")
         if len(button_label) > 80:
             return await ctx.send("❌ Button labels can be up to 80 characters.")
         async with self.config.guild(ctx.guild).roles() as roles:
             if button_label not in roles and len(roles) >= MAX_ROLE_BUTTONS:
-                return await ctx.send(f"⏳ The welcome message has room for {MAX_ROLE_BUTTONS} group buttons. Remove "
-                                      f"one first with `{await self.prefix(ctx.guild)}bg removerole <label>`.")
+                return await ctx.send(ui.line(
+                    ui.WAIT, f"The welcome message has room for {MAX_ROLE_BUTTONS} group buttons.",
+                    f"Remove one first with `{await self.prefix(ctx.guild)}bg removerole <label>`."))
             roles[button_label] = role.id
         await ctx.send(f"✅ Added the **[{button_label}]** button, which gives **{role.name}**.")
 
@@ -495,8 +499,8 @@ class ButtonGreeter(commands.Cog):
         """Remove a group button."""
         async with self.config.guild(ctx.guild).roles() as roles:
             if button_label not in roles:
-                return await ctx.send(f"❓ There's no button called **{button_label}**. See "
-                                      f"`{await self.prefix(ctx.guild)}bg settings` for the list.")
+                return await ctx.send(ui.line(ui.ASK, f"There's no button called **{button_label}**.",
+                                              f"`{await self.prefix(ctx.guild)}bg settings` lists them."))
             del roles[button_label]
         await ctx.send(f"✅ Removed the **[{button_label}]** button.")
 
@@ -509,12 +513,12 @@ class ButtonGreeter(commands.Cog):
         roles = await self.config.guild(ctx.guild).roles()
         if label not in roles:
             options = ", ".join(f"`{name}`" for name in roles) or "none yet"
-            await ctx.send(f"❓ There's no group called **{label}**. Options: {options}.",
+            await ctx.send(ui.line(ui.ASK, f"There's no group called **{label}**.", f"Options: {options}."),
                            allowed_mentions=ui.NO_PINGS)
             return None
         role = ctx.guild.get_role(roles[label])
         if role is None:
-            await ctx.send(f"❌ The role for **{label}** no longer exists. A moderator has been told.")
+            await ctx.send(ui.line(ui.FAIL, f"The role for **{label}** no longer exists.", TOLD))
             await self.report(ctx.guild, f"The **{label}** button's role no longer exists (ID {roles[label]}).",
                               ctx.author)
             return None
@@ -531,7 +535,7 @@ class ButtonGreeter(commands.Cog):
         try:
             await self._swap_group_role(ctx.author, roles, role)
         except discord.Forbidden:
-            await ctx.send("❌ I couldn't change your roles. A moderator has been told.")
+            await ctx.send(ui.line(ui.FAIL, "I couldn't change your roles.", TOLD))
             return await self.report(ctx.guild, f"I couldn't switch a member to **{role.name}**. My role needs to be "
                                                 "above the group roles, with Manage Roles.", ctx.author)
         nick = await self.set_tag(ctx.author, exact_label)
@@ -551,8 +555,8 @@ class ButtonGreeter(commands.Cog):
         try:
             await self._swap_group_role(member, roles, role)
         except discord.Forbidden:
-            await ctx.send(f"❌ I couldn't change {member.display_name}'s roles. My role needs to be above theirs.",
-                           allowed_mentions=ui.NO_PINGS)
+            await ctx.send(ui.line(ui.FAIL, f"I couldn't change {member.display_name}'s roles.",
+                                   "My role needs to be above theirs."), allowed_mentions=ui.NO_PINGS)
             return await self.report(ctx.guild, f"{ctx.author.display_name} tried to move a member to "
                                                 f"**{role.name}**, but I lack the permissions.", member)
         nick = await self.set_tag(member, exact_label)
@@ -568,15 +572,15 @@ class ButtonGreeter(commands.Cog):
         rid = await self.config.guild(ctx.guild).rules_role()
         role = ctx.guild.get_role(rid or 0)
         if role is None:
-            return await ctx.send(f"⚠️ No rules role is set. Set one with "
-                                  f"`{await self.prefix(ctx.guild)}bg setrulesrole <role>`.")
+            return await ctx.send(ui.line(ui.WARN, "No rules role is set.",
+                                          f"Set one with `{await self.prefix(ctx.guild)}bg setrulesrole <role>`."))
         if role not in member.roles:
             return await ctx.send(f"⚠️ **{member.display_name}** doesn't have **{role.name}**.",
                                   allowed_mentions=ui.NO_PINGS)
         try:
             await member.remove_roles(role)
         except discord.Forbidden:
-            await ctx.send(f"❌ I couldn't remove **{role.name}**. My role needs to be above it.")
+            await ctx.send(ui.line(ui.FAIL, f"I couldn't remove **{role.name}**.", "My role needs to be above it."))
             return await self.report(ctx.guild, f"I couldn't remove **{role.name}** (permissions).", member)
         await ctx.send(f"✅ Removed **{role.name}** from **{member.display_name}**.", allowed_mentions=ui.NO_PINGS)
 

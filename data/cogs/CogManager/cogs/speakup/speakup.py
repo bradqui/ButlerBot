@@ -213,7 +213,7 @@ async def steam_details(appid: int) -> Optional[dict]:
 
 
 def price_text(details: dict) -> str:
-    """The price part of a Steam card's first line: `40% off, $17.99`, `$29.99`, `Free to play`."""
+    """The price line under a Steam card's name: `40% off, $17.99`, `$29.99`, `Free to play`."""
     price = details.get("price")
     if details.get("free"):
         return "Free to play"
@@ -803,17 +803,18 @@ class SpeakUp(commands.Cog):
 
     async def steam_card(self, guild: discord.Guild, appid: int, details: dict, remove_uid: int) -> ui.CardView:
         """
-        The Steam card: the linked name and price on one line, who here owns or wants it under that, and the buttons.
-        No image: Discord's own link preview already shows one. Gold when on sale, blurple otherwise.
+        The Steam card: the linked name, then the price and who here owns or wants it in small lines underneath,
+        and the buttons. No image: Discord's own link preview already shows one. Gold when on sale, blurple otherwise.
         """
         title = plain_name(details["name"]).replace("[", "\\[").replace("]", "\\]")
-        text = f"**[{title}]({STEAM_APP_URL.format(appid)})** · {price_text(details)}"
+        details_lines = [price_text(details)]
         buttons = []
         gm = self.bot.get_cog("GameManager")
         if gm is not None:
-            text += "\n" + ui.hint(await self._steam_people(gm, guild, appid, details["name"]))
+            details_lines.append(await self._steam_people(gm, guild, appid, details["name"]))
             buttons += [SteamButton("own", appid), SteamButton("want", appid)]
         buttons.append(RemoveButton(remove_uid, compact=True))
+        text = ui.two_line(f"**[{title}]({STEAM_APP_URL.format(appid)})**", "\n".join(details_lines))
         return ui.CardView(ui.card(text, buttons, color=ui.HIGHLIGHT if on_sale(details) else ui.BRAND))
 
     async def _steam_people(self, gm, guild: discord.Guild, appid: int, name: str) -> str:
@@ -1062,12 +1063,18 @@ class SpeakUp(commands.Cog):
         if not mine:
             return await ctx.send(ui.line(ui.ASK, "You have no reminders. Set one with "
                                                   f"`{ctx.clean_prefix}remindme 2h check the oven`."))
-        lines = [f"`{r['id']}` · {stamp(r['due'])} ({stamp(r['due'], 'R')}): {ui.truncate(r['text'], 100)}"
-                 for r in mine]
         p = ctx.clean_prefix
-        board = ui.Board("⏰ Your reminders", lines, color=ui.BRAND,
-                         footer=f"`{p}reminders cancel <id>` · `{p}reminders clear`")
+        board = ui.Board("⏰ Your reminders", [self._reminder_row(r) for r in mine], color=ui.BRAND,
+                         footer=f"`{p}reminders cancel <id>` cancels one")
         await board.send(ctx)   # ping-free (send_card's default): reminder text can hold mentions
+
+    @staticmethod
+    def _reminder_row(reminder: dict) -> tuple:
+        """A board row: what to remember, then when (Discord timestamps), where it'll go off, and its ID."""
+        what = discord.utils.escape_markdown(" ".join(ui.truncate(reminder["text"], 100).split()))
+        where = f"in <#{reminder['channel']}>" if reminder.get("guild") else "by DM"
+        return ui.row(f"**{what}**", f"{stamp(reminder['due'])} ({stamp(reminder['due'], 'R')}) · {where} · "
+                                     f"ID `{reminder['id']}`")
 
     @reminders.command(name="cancel", aliases=["delete", "remove"])
     async def reminders_cancel(self, ctx: commands.Context, reminder_id: str):
@@ -1156,8 +1163,7 @@ class SpeakUp(commands.Cog):
         features = ui.settings_text([(label, conf["features"].get(k, True)) for k, label in FEATURES.items()])
         here = ui.settings_text([("This channel", "Quiet" if quiet else "On"),
                                  ("Your messages", "Opted out" if opted_out else "On")])
-        footer = (f"`{p}speakup me off` stops it for your messages · `{p}speakup off` quiets this channel (mods)\n"
-                  f"`{p}speakup feature <{'|'.join(FEATURES)}> <on|off>` (admins)")
+        footer = f"Change with `{p}speakup me off`, `{p}speakup off` (mods) or `{p}speakup feature` (admins)"
         view = ui.CardView(ui.card(features, here, ui.SEPARATOR, title="🗣️ SpeakUp settings", color=ui.BRAND,
                                    footer=footer))
         await ui.send_card(ctx, view)

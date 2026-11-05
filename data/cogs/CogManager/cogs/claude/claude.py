@@ -11,7 +11,7 @@ import time
 from collections import OrderedDict
 from copy import copy
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -291,6 +291,7 @@ class ActionConfirmView(ui.ExpiringView):
     """Run / Cancel buttons for guide actions that need elevated permissions. Only the asker can press them."""
 
     not_yours = f"{ui.LOCKED} Only the person who asked can confirm this."
+    expired_note = "Expired. Nothing was run."
 
     def __init__(self, user_id: int):
         super().__init__(user_id, timeout=ACTION_CONFIRM_TIMEOUT)
@@ -317,10 +318,6 @@ class ActionConfirmView(ui.ExpiringView):
         """After the commands ran: "Running…" becomes "Done." (their own output follows in the channel)."""
         if self.message is not None and self.final_content:
             await ui.edit_quietly(self.message, content=self.final_content.replace("Running…", "Done."))
-
-    async def on_timeout(self):
-        if self.message is not None:
-            await ui.edit_quietly(self.message, add_note="Timed out. Nothing was run.", view=None)
 
 
 def sniff_image_type(data: bytes) -> Optional[str]:
@@ -525,13 +522,14 @@ class ClaudeChat(commands.Cog):
             prefix = await self._prefix(member.guild)
             return ui.line(ui.WARN, "AI chat isn't set up yet.",
                            hint=f"Add an Anthropic API key with `{prefix}set api anthropic api_key,<key>`.")
-        return ui.line(ui.WARN, "AI chat isn't set up yet. Ask the bot owner to add an API key.")
+        return ui.line(ui.WARN, "AI chat isn't set up yet.", hint="Ask the bot owner to add an API key.")
 
     @staticmethod
     def limit_text(limit: int) -> str:
-        """The one wording for a reached daily limit."""
-        return ui.line(ui.WAIT, f"You've used all {ui.plural(limit, 'AI message')} for today. "
-                                "The limit resets at midnight UTC.")
+        """The one wording for a reached daily limit, with the reset time (midnight UTC) as a Discord timestamp."""
+        midnight = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)
+        return ui.line(ui.WAIT, f"You've used all {ui.plural(limit, 'AI message')} for today.",
+                       hint=f"The limit resets <t:{int(midnight.timestamp())}:R>.")
 
     async def limit_reached(self, member: discord.Member) -> Optional[int]:
         """For other cogs: the daily AI limit `member` has reached, or None (no limit, exempt, or not reached)."""
@@ -1114,7 +1112,7 @@ class ClaudeChat(commands.Cog):
         """
         if isinstance(e, anthropic.AuthenticationError):
             log.warning("Anthropic rejected the API key: %s", e)
-            return "⚠️ The AI's API key was rejected, so the bot owner needs to update it.", False
+            return ui.line(ui.WARN, "The AI's API key was rejected, so the bot owner needs to update it."), False
         if isinstance(e, anthropic.PermissionDeniedError):
             log.warning("Anthropic denied a request: %s", e)
             return (ui.line(ui.WARN, "The AI's API key isn't allowed to use this model.",
@@ -1124,28 +1122,31 @@ class ClaudeChat(commands.Cog):
             return (ui.line(ui.FAIL, "That model wasn't found.",
                             hint=f"Pick another with `{prefix}claude channelmodel` or `{prefix}claude mymodel`."), False)
         if isinstance(e, anthropic.RateLimitError):
-            return "⏳ Claude is getting too many requests right now. Try again in a minute.", False
+            return ui.line(ui.WAIT, "Claude is getting too many requests right now.", "Try again in a minute."), False
         if isinstance(e, anthropic.BadRequestError):
             msg = e.message or ""
             if "credit balance" in msg.lower():
                 log.warning("Anthropic account is out of credits")
-                return "⚠️ The AI account is out of credits, so the bot owner needs to top it up.", False
+                return ui.line(ui.WARN, "The AI account is out of credits, so the bot owner needs to top it up."), False
             if "too long" in msg.lower():
-                return "⚠️ This conversation got too long, so I started a fresh one. Ask again.", True
+                return ui.line(ui.WARN, "This conversation got too long, so I started a fresh one.", "Ask again."), True
             log.warning("Claude rejected a request: %s", msg)
-            return "❌ Claude couldn't process that request. Try rewording it, or leave out the attachments.", False
+            return ui.line(ui.FAIL, "Claude couldn't process that request.",
+                           "Try rewording it, or leave out the attachments."), False
         if isinstance(e, anthropic.APIStatusError):
             log.warning("Anthropic API error %s: %s", e.status_code, e.message)
             if e.status_code >= 500:
-                return "⏳ Claude is overloaded or having trouble right now. Try again in a minute.", False
-            return "❌ The AI service returned an error. Try again shortly; the error was logged.", False
+                return ui.line(ui.WAIT, "Claude is overloaded or having trouble right now.",
+                               "Try again in a minute."), False
+            return ui.line(ui.FAIL, "The AI service returned an error.",
+                           "Try again shortly; the error was logged."), False
         if isinstance(e, anthropic.APITimeoutError):
-            return "⏳ Claude took too long to answer. Try again.", False
+            return ui.line(ui.WAIT, "Claude took too long to answer.", "Try again."), False
         if isinstance(e, anthropic.APIConnectionError):
             log.warning("Couldn't reach the Anthropic API: %s", e)
-            return "❌ I couldn't reach Claude. Try again shortly.", False
+            return ui.line(ui.FAIL, "I couldn't reach Claude.", "Try again shortly."), False
         log.exception("Unexpected error in Claude cog", exc_info=e)
-        return "❌ Something went wrong while talking to Claude. The error was logged.", False
+        return ui.line(ui.FAIL, "Something went wrong while talking to Claude.", "The error was logged."), False
 
     async def _send(self, message: discord.Message, channel, text: str,
                     view: Optional[discord.ui.View] = None, *, suppress_embeds: bool = False) -> List[discord.Message]:
@@ -1779,14 +1780,15 @@ class ClaudeChat(commands.Cog):
         Inside the thread, @mention me or reply to my messages to keep talking.
         """
         if isinstance(ctx.channel, discord.Thread):
-            return await ctx.send("❌ We're already in a thread. @mention me or reply to my messages to keep talking here.")
+            return await ctx.send(ui.line(ui.FAIL, "We're already in a thread.",
+                                          "@mention me or reply to my messages to keep talking here."))
         name = "🤖 " + (prompt[:80] + "…" if len(prompt) > 80 else prompt)
         try:
             thread = await ctx.message.create_thread(name=name, auto_archive_duration=1440)
         except discord.HTTPException as e:
             log.warning("Couldn't create an AI thread in %s: %s", ctx.channel.id, e)
-            return await ctx.send("❌ I couldn't create a thread here. Check that I'm allowed to create public "
-                                  "threads in this channel.")
+            return await ctx.send(ui.line(ui.FAIL, "I couldn't create a thread here.",
+                                          "Check that I'm allowed to create public threads in this channel."))
         await self._register_thread(thread.id)
 
         model = await self._model_for(f"THREAD_{thread.id}", ctx.author, ctx.channel)
@@ -1914,26 +1916,28 @@ class ClaudeChat(commands.Cog):
         container = ui.card(
             "**Models**\n" + models, "**This server**\n" + server, "**Bot-wide**\n" + bot_wide, ui.SEPARATOR,
             title="🤖 AI chat settings", color=ui.BRAND,
-            footer=f"Change with {p}claude channelmodel, websearch, limit or persona · {p}help claude lists them all")
+            footer=f"{p}help claude shows how to change these")
         await ui.send_card(ctx, ui.CardView(container))
 
     @claude.command(name="models")
     async def claude_models(self, ctx: commands.Context):
         """List the available Claude models and their prices."""
         allowed = await self.config.allowed_models()
+        default = await self.config.default_model()
         alias_for = {v: k for k, v in MODEL_ALIASES.items()}
-        lines = []
+        rows = []
         for model, info in MODELS.items():
-            status = ui.TICK if model in allowed else ui.UNTICK
-            lines.append(
-                f"{status} **{info.name}** (`{alias_for.get(model, model)}`): ${info.input:g} in / ${info.output:g} out "
-                f"per 1M tokens{'' if info.web_search else ', no web search'}"
-            )
-        container = ui.card(
-            "\n".join(lines), ui.SEPARATOR, title="🤖 AI models", color=ui.BRAND,
-            footer=f"{ui.TICK} = admins (for their private chats) and channel managers can choose it. "
-                   "The bot owner manages the list.")
-        await ui.send_card(ctx, ui.CardView(container))
+            # The model, then its alias, prices and status underneath.
+            detail = [f"`{alias_for.get(model, model)}`",
+                      f"${info.input:g} in, ${info.output:g} out per 1M tokens",
+                      "allowed" if model in allowed else "not allowed"]
+            if model == default:
+                detail.append("default")
+            if not info.web_search:
+                detail.append("no web search")
+            rows.append(ui.row(f"**{info.name}**", " · ".join(detail)))
+        await ui.Board("🤖 AI models", rows, color=ui.BRAND,
+                       footer="Admins (for their private chats) and channel managers can pick allowed models").send(ctx)
 
     @claude.command(name="mymodel")
     @checks.admin_or_permissions(manage_guild=True)
@@ -1949,7 +1953,8 @@ class ClaudeChat(commands.Cog):
             return await ctx.send("✅ Your private chats now use the default model.")
         resolved = self._resolve_model(model)
         if resolved is None or resolved not in await self.config.allowed_models():
-            return await ctx.send(f"❌ That model isn't available. See `{ctx.clean_prefix}claude models`.")
+            return await ctx.send(ui.line(ui.FAIL, "That model isn't available.",
+                                          f"`{ctx.clean_prefix}claude models` lists the allowed ones."))
         await self.config.user(ctx.author).model.set(resolved)
         self._get_session(f"USER_{ctx.author.id}").reset()
         await ctx.send(f"✅ Your private chats now use {self._model_label(resolved)}.")
@@ -1964,7 +1969,8 @@ class ClaudeChat(commands.Cog):
             return await ctx.send(f"✅ {channel.mention} now uses the default model.")
         resolved = self._resolve_model(model)
         if resolved is None or resolved not in await self.config.allowed_models():
-            return await ctx.send(f"❌ That model isn't available. See `{ctx.clean_prefix}claude models`.")
+            return await ctx.send(ui.line(ui.FAIL, "That model isn't available.",
+                                          f"`{ctx.clean_prefix}claude models` lists the allowed ones."))
         await self.config.channel(channel).model.set(resolved)
         await ctx.send(f"✅ {channel.mention} now uses {self._model_label(resolved)}.")
 
@@ -2002,7 +2008,7 @@ class ClaudeChat(commands.Cog):
         resolved = self._resolve_model(model)
         if resolved is None:
             names = ", ".join(f"`{alias}`" for alias in MODEL_ALIASES)
-            return await ctx.send(ui.line(ui.FAIL, f"There's no model called `{model[:60]}`.",
+            return await ctx.send(ui.line(ui.ASK, f"There's no model called `{model[:60]}`.",
                                           hint=f"Use one of {names}, or a full model ID from "
                                                f"`{ctx.clean_prefix}claude models`."))
         async with self.config.allowed_models() as allowed:
@@ -2010,9 +2016,9 @@ class ClaudeChat(commands.Cog):
             if was_allowed:
                 allowed.remove(resolved)
         if not was_allowed:
-            return await ctx.send(f"✅ {self._model_label(resolved)} already can't be chosen.")
-        await ctx.send(f"✅ {self._model_label(resolved)} can no longer be chosen. Private chats using it "
-                       "now use the default model.")
+            return await ctx.send(ui.line(ui.WARN, f"{self._model_label(resolved)} already can't be chosen."))
+        await ctx.send(ui.line(ui.DONE, f"{self._model_label(resolved)} can no longer be chosen.",
+                               "Private chats using it now use the default model."))
 
     @claude.command(name="effort")
     @checks.is_owner()
@@ -2025,7 +2031,7 @@ class ClaudeChat(commands.Cog):
         """
         level = level.lower()
         if level not in EFFORT_LEVELS:
-            return await ctx.send("❌ Effort must be `low`, `medium`, or `high`.")
+            return await ctx.send(ui.line(ui.ASK, "Effort can be `low`, `medium` or `high`."))
         await self.config.effort.set(level)
         await ctx.send(f"✅ Effort set to **{level}**.")
 
@@ -2039,10 +2045,11 @@ class ClaudeChat(commands.Cog):
         `idle_minutes`: start fresh after this long without activity (5-1440).
         """
         if not 4 <= max_messages <= 100 or not 5 <= idle_minutes <= 1440:
-            return await ctx.send("❌ Use 4-100 messages and 5-1440 idle minutes.")
+            return await ctx.send(ui.line(ui.ASK, "Use 4–100 messages and 5–1440 idle minutes."))
         await self.config.max_history.set(max_messages)
         await self.config.idle_minutes.set(idle_minutes)
-        await ctx.send(f"✅ Claude now remembers the last {max_messages} messages and resets after {idle_minutes} idle minutes.")
+        await ctx.send(ui.line(ui.DONE, f"Claude now remembers the last {ui.plural(max_messages, 'message')} and "
+                                        f"resets after {ui.plural(idle_minutes, 'idle minute')}."))
 
     @claude.command(name="websearch")
     @checks.admin_or_permissions(manage_guild=True)
@@ -2061,8 +2068,8 @@ class ClaudeChat(commands.Cog):
         always continue that chat. The AI stays quiet when a reply is meant for other people ("I'm in!").
         """
         await self.config.guild(ctx.guild).guide_mentions.set(enabled)
-        await ctx.send(f"✅ @mentioning me {'now asks' if enabled else 'no longer asks'} the AI chat. "
-                       f"`{ctx.clean_prefix}ai` and `{ctx.clean_prefix}butler` always work.")
+        await ctx.send(ui.line(ui.DONE, f"@mentioning me {'now asks' if enabled else 'no longer asks'} the AI chat.",
+                               f"`{ctx.clean_prefix}ai` and `{ctx.clean_prefix}butler` always work."))
 
     @claude.command(name="guideactions", aliases=["butleractions"])
     @checks.admin_or_permissions(manage_guild=True)
@@ -2117,7 +2124,8 @@ class ClaudeChat(commands.Cog):
             await conf.persona.set(None)
             return await self._send_persona(ctx, "✅ Persona reset to the default:", await self._persona(ctx.guild))
         await conf.persona.set(persona)
-        await ctx.send(f"✅ Persona updated ({len(persona):,} characters). It applies to the next message.")
+        await ctx.send(ui.line(ui.DONE, f"Persona updated ({len(persona):,} characters).",
+                               "It applies to the next message."))
 
     async def _persona_input(self, ctx: commands.Context, typed: Optional[str]) -> Tuple[Optional[str], Optional[str]]:
         """(persona text from the command or an attached text file, error message)."""
@@ -2129,7 +2137,7 @@ class ClaudeChat(commands.Cog):
             try:
                 text = (await att.read()).decode("utf-8", errors="replace").strip()
             except discord.HTTPException:
-                return None, "❌ I couldn't download that file. Try again?"
+                return None, ui.line(ui.FAIL, "I couldn't download that file.", "Try again?")
             if not text:
                 return None, "❌ That file is empty."
         if text is not None and len(text) > MAX_PERSONA_CHARS:
@@ -2166,8 +2174,8 @@ class ClaudeChat(commands.Cog):
         if lowered == "current":
             persona = await self._persona(ctx.guild)
         await conf.default_persona.set(persona)
-        await ctx.send(f"✅ Saved as the default persona ({len(persona):,} characters). "
-                       f"`{ctx.clean_prefix}claude persona reset` returns to it.")
+        await ctx.send(ui.line(ui.DONE, f"Saved as the default persona ({len(persona):,} characters).",
+                               f"`{ctx.clean_prefix}claude persona reset` returns to it."))
 
     @claude.command(name="limit")
     @checks.admin_or_permissions(manage_guild=True)
@@ -2178,7 +2186,7 @@ class ClaudeChat(commands.Cog):
         Mods, admins, and the bot owner are exempt. Resets at midnight UTC.
         """
         if messages_per_day < 0:
-            return await ctx.send("❌ Use 0 or more.")
+            return await ctx.send(ui.line(ui.ASK, "Use 0 or more (0 means no limit)."))
         await self.config.guild(ctx.guild).daily_limit.set(messages_per_day)
         await ctx.send("✅ Daily limit removed." if messages_per_day == 0
                        else f"✅ Members can now send {ui.plural(messages_per_day, 'AI message')} a day.")
@@ -2188,8 +2196,8 @@ class ClaudeChat(commands.Cog):
         """
         Show AI usage and estimated cost.
 
-        Your own usage is sent to you by DM, with a ✅ on your command. Admins see the server's totals and top users,
-        or name a member to see theirs, right where they ask.
+        Your own usage is sent to you by DM, with a ✅ on your command. Admins see the server's totals and each
+        member's usage, or name a member to see theirs, right where they ask.
         """
         is_admin = await self._is_exempt(ctx.author) or ctx.author.guild_permissions.manage_guild
         if member is not None and member != ctx.author and not is_admin:
@@ -2205,7 +2213,7 @@ class ClaudeChat(commands.Cog):
                 ("Estimated cost", f"${u['cost']:.2f}"),
             ]
 
-        prices = "Estimates from published API prices"
+        # Costs are labeled "Estimated" (from published API prices), so footers keep to one thing each.
         if member is not None or not is_admin:
             target = member or ctx.author
             usage = await self.config.member(target).usage()
@@ -2214,28 +2222,34 @@ class ClaudeChat(commands.Cog):
             rows = ui.settings_text(describe(usage) + [("Messages today", humanize_number(today))])
             title = f"🤖 AI usage: {target.display_name}"
             if target != ctx.author:
-                container = ui.card(rows, ui.SEPARATOR, title=title, color=ui.BRAND, footer=f"{prices} · Staff only")
+                container = ui.card(rows, ui.SEPARATOR, title=title, color=ui.BRAND, footer="Staff only")
                 return await ui.send_card(ctx, ui.CardView(container))
             # Your own numbers go to your DMs. If those are closed, post them here after all, saying why.
             return await ui.send_private(ctx, lambda in_dm: ui.CardView(ui.card(
                 rows, ui.SEPARATOR, title=title, color=ui.BRAND,
-                footer=f"In {ctx.guild.name} · {prices}" if in_dm else f"{prices}\n{ui.DM_FALLBACK}")))
+                footer=f"From {ctx.guild.name}" if in_dm else ui.DM_FALLBACK)))
 
+        # The server's totals on top, then one row per member who has used it, highest cost first.
         g = await self.config.guild(ctx.guild).all()
+        since = g["usage_since"]
+        try:
+            since = f"<t:{int(datetime.strptime(since, '%Y-%m-%d').replace(tzinfo=timezone.utc).timestamp())}:D>"
+        except (TypeError, ValueError):
+            since = since or "the start"
         members = await self.config.all_members(ctx.guild)
-        top = sorted(members.items(), key=lambda kv: kv[1]["usage"]["cost"], reverse=True)[:10]
-        lines = []
-        for user_id, data in top:
+        ranked = sorted(members.items(), key=lambda kv: kv[1]["usage"]["cost"], reverse=True)
+        rows = []
+        for user_id, data in ranked:
             if data["usage"]["requests"] == 0:
                 continue
             m = ctx.guild.get_member(user_id)
-            name = m.display_name if m else "Someone who left"
-            lines.append(f"{name}: ${data['usage']['cost']:.2f} ({ui.plural(data['usage']['requests'], 'request')})")
-        container = ui.card(
-            ui.settings_text(describe(g["usage"])), ("**Top users**\n" + "\n".join(lines)) if lines else None,
-            ui.SEPARATOR, title=f"🤖 AI usage: {ctx.guild.name}", color=ui.BRAND,
-            footer=f"Since {g['usage_since'] or 'the start'} · {prices} · Staff only")
-        await ui.send_card(ctx, ui.CardView(container))
+            name = discord.utils.escape_markdown(m.display_name) if m else "Someone who left"
+            rows.append(ui.row(f"**{name}**", f"{ui.plural(data['usage']['requests'], 'request')} · "
+                                              f"${data['usage']['cost']:.2f}"))
+        header = ui.settings_text(describe(g["usage"]) + [("Counting since", since)])
+        await ui.Board(f"🤖 AI usage: {ctx.guild.name}", rows, color=ui.BRAND,
+                       header=header + ("\n\n**Members**" if rows else ""), footer="Staff only",
+                       empty="No one has used the AI chat yet.").send(ctx)
 
     @claude.command(name="resetusage")
     @checks.admin_or_permissions(manage_guild=True)

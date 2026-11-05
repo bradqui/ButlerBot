@@ -32,6 +32,7 @@ log = logging.getLogger("red.censord")
 LEVELS = ("off", "low", "high")
 ACTIONS = ("delete", "kick", "ban")
 STRATEGIES = ("include", "exclude")
+MAX_OVERRIDES_SHOWN = 10    # channel overrides listed on the settings card (each is its own text block)
 
 class Censord(commands.Cog):
     """
@@ -173,7 +174,7 @@ class Censord(commands.Cog):
     async def _execute_punishment(self, message: discord.Message, action: str):
         guild = message.guild
         user = message.author
-        reason = "Censord Bot: Chat Threshold Exceeded"
+        reason = "Word filter: repeated offensive language"
         
         try:
             if action == "kick":
@@ -269,7 +270,7 @@ class Censord(commands.Cog):
     @commands.guild_only()
     async def censord(self, ctx):
         """
-        Main configuration command for the Censord bot.
+        Word filter settings.
         """
         if ctx.invoked_subcommand is None:
             # If no subcommand invoke, show help
@@ -353,25 +354,29 @@ class Censord(commands.Cog):
             ("Exceptions", channel_list(settings["excluded_channels"])),
         ])
 
+        # Each override is a two-line block: the channel, then its own level and action underneath.
         overrides = []
         for channel in guild.text_channels:
             data = await self.config.channel(channel).all()
             parts = [f"level {data['override_level']}" if data["override_level"] else None,
                      f"action {data['override_action']}" if data["override_action"] else None]
-            if any(parts):
-                overrides.append(f"{channel.mention} · " + ", ".join(p for p in parts if p))
-        override_text = ui.truncate("\n".join(overrides), 1500) if overrides else "None"
+            parts = [part for part in parts if part]
+            if parts:
+                detail = " · ".join(parts)
+                overrides.append(ui.two_line(channel.mention, detail[:1].upper() + detail[1:]))
+        shown = overrides[:MAX_OVERRIDES_SHOWN]
+        if len(overrides) > len(shown):
+            shown.append(ui.hint(f"…and {ui.plural(len(overrides) - len(shown), 'more channel')}"))
 
-        p = f"{await self._prefix(ctx)}censor"
         view = ui.CardView(ui.card(
             main,
             f"**Channels**\n{channels}",
-            f"**Channel overrides**\n{override_text}",
+            "**Channel overrides**" + ("" if overrides else "\nNone"),
+            *shown,
             ui.SEPARATOR,
             title="🛡️ Word filter settings",
             color=ui.BRAND,
-            footer=f"`{p} level` · `{p} action` · `{p} threshold` · `{p} strategy` · `{p} includechan` · "
-                   f"`{p} exceptchan` · `{p} setrole`\nStaff only",
+            footer=f"`{await self._prefix(ctx)}help censor` shows how to change these · Staff only",
         ))
         await ui.send_card(ctx, view)   # ping-free: the role mention only shows the role
 
@@ -429,8 +434,8 @@ class Censord(commands.Cog):
         (Punishes if 5 bad messages are sent in 10 seconds).
         """
         if count < 1 or seconds < 1:
-            return await ctx.send("❓ Both numbers need to be at least 1, like "
-                                  f"`{await self._prefix(ctx)}censor threshold 3 60`.")
+            return await ctx.send(ui.line(ui.ASK, "Both numbers need to be at least 1.",
+                                          hint=f"For example `{await self._prefix(ctx)}censor threshold 3 60`."))
         await self.config.guild(ctx.guild).threshold_count.set(count)
         await self.config.guild(ctx.guild).threshold_time.set(seconds)
         await ctx.send(f"✅ The punishment now comes after {ui.plural(count, 'violation')} within "
@@ -516,8 +521,8 @@ class Censord(commands.Cog):
                     else ui.line(ui.WARN, f"That word is already on the **{level}** list.", note))
         else:
             text = (ui.line(ui.DONE, f"Removed that word from the **{level}** list.", note) if changed
-                    else ui.line(ui.ASK, f"That word wasn't on the **{level}** list. It has to match the entry "
-                                         "exactly.", note))
+                    else ui.line(ui.ASK, f"That word wasn't on the **{level}** list.",
+                                         " ".join(filter(None, ["It has to match the entry exactly.", note]))))
         await ctx.send(text)
 
     @censord.command()

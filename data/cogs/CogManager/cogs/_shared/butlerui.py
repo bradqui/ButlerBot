@@ -23,6 +23,8 @@ The style, in short (the full guide is the "Message style" section of CLAUDE.md)
 - Six colors, one meaning each. Six status symbols, one meaning each, only at the start of a line.
 - Three message sizes: a line (one sentence, private where Discord allows), a card (one thing with its buttons
   inside it) and a board (a card that pages). AI answers and narration stay plain text.
+- Readable rows: the thing a row or block is about goes on its own line, usually bold; its details go on a small
+  grey line underneath (row(), two_line()), never after a dot on the same line.
 - Buttons: a verb label, blurple for the one main action, grey for the rest, red only to confirm something
   destructive. Menus that expire grey out and say so.
 - Pings only on purpose: every helper here defaults to no pings.
@@ -352,21 +354,71 @@ def image(url: str, description: Optional[str] = None) -> discord.ui.MediaGaller
 # ==========================================
 #                  BOARDS
 # ==========================================
+# Every list is a board of rows. A row is the thing it's about on one line (a game, a person, a command), usually
+# bold, and optionally its details on a small grey line underneath. Each row is its own text block, so Discord puts
+# a little space between rows. Build rows with row(); a plain string is a row with no details.
 
-PAGE_SIZE = 15
+PAGE_SIZE = 8             # rows a page
+JUMP_AFTER = 5            # a board with more pages than this gets a "Jump to" menu
 _BOARD_TEXT_ROOM = 3400   # characters of rows per page, leaving room for title, header and footer
+Row = Union[str, tuple]
+
+
+def row(main: str, detail: Optional[str] = None) -> tuple:
+    """A board row: `main` (format it yourself, usually **bold**) and an optional small-text `detail` line."""
+    return (main, detail or None)
+
+
+ROW_PART_LIMIT = 600      # characters kept of a row's main line and of its details, each
+
+
+def row_text(r: Row) -> str:
+    """
+    A row as the markdown of its text block. The main line and the details are capped separately, so markup at the
+    end of one (a ||spoiler||) is never cut because the other is long.
+    """
+    main, detail = (r, None) if isinstance(r, str) else (r[0], r[1] if len(r) > 1 else None)
+    main = truncate(main, ROW_PART_LIMIT)
+    return f"{main}\n{hint(truncate(detail, ROW_PART_LIMIT))}" if detail else main
+
+
+def two_line(main: str, detail: Optional[str] = None) -> str:
+    """
+    A text block for a card in the same shape as a board row: the main line, then details in small text. A detail
+    with line breaks becomes several small lines.
+    """
+    return row_text((main, detail))
+
+
+def plain(text: str) -> str:
+    """Text without markdown, links, mentions or emoji, for menu labels."""
+    kept: List[str] = []   # escaped characters (Mr\_Bean) survive the markdown stripping below
+
+    def keep(match) -> str:
+        kept.append(match.group(1))
+        return f"\x00{len(kept) - 1}\x00"
+
+    text = re.sub(r"\\([^A-Za-z0-9\s])", keep, text)
+    text = re.sub(r"\[([^\]]*)\]\(<?[^)\s]+>?\)", r"\1", text)   # [text](url) -> text
+    text = re.sub(r"<(@[!&]?|#)\d+>", "", text)
+    text = re.sub("[\U0001F000-\U0001FAFF\u2600-\u27BF\uFE0F\u200D]", "", text)
+    text = re.sub(r"<t:\d+(:[a-zA-Z])?>", "", text)
+    text = re.sub(r"^-# ", "", text, flags=re.M)
+    text = re.sub(r"[*_`~|]", "", text)
+    return " ".join(re.sub("\x00(\\d+)\x00", lambda m: kept[int(m.group(1))], text).split())
 
 
 class Board(ExpiringCard):
     """
-    A card that pages through rows with ◀ ▶ (15 a page). Anyone can page it: it's the same list for everyone, and
-    paging just redraws the message. One page means no buttons and no timeout. `header` goes above the rows on every
-    page, `media` (e.g. image(...)) under the header. Send with `await board.send(target)`.
+    A card that pages through rows (8 a page) with ◀ ▶, plus a "Jump to" menu when there are more than 5 pages.
+    Anyone can page it: it's the same list for everyone, and paging just redraws the message. One page means no
+    buttons and no timeout. `header` goes above the rows on every page, `media` (e.g. image(...)) under the header.
+    Rows are row(main, detail) tuples or plain strings. Send with `await board.send(target)`.
     """
 
     expired_note = "Run the command again to page through it."
 
-    def __init__(self, title: Optional[str], rows: List[str], *, color: discord.Color = BRAND,
+    def __init__(self, title: Optional[str], rows: List[Row], *, color: discord.Color = BRAND,
                  header: Optional[str] = None, footer: Optional[str] = None, per_page: int = PAGE_SIZE,
                  media: Optional[discord.ui.Item] = None, empty: str = "Nothing to show yet.",
                  owner_id: Optional[int] = None, timeout: Optional[float] = 900, extra: Optional[list] = None):
@@ -381,25 +433,43 @@ class Board(ExpiringCard):
         self.redraw()
 
     @staticmethod
-    def paginate(rows: List[str], per_page: int, room: int = _BOARD_TEXT_ROOM) -> List[List[str]]:
+    def paginate(rows: List[Row], per_page: int, room: int = _BOARD_TEXT_ROOM) -> List[List[str]]:
         """Split rows into pages of at most `per_page`, also keeping each page's text within `room` characters."""
         pages: List[List[str]] = []
         current: List[str] = []
         size = 0
-        for row in rows:
-            row = truncate(row, 600)
-            if current and (len(current) >= per_page or size + len(row) + 1 > room):
+        for r in rows:
+            text = row_text(r)
+            if current and (len(current) >= per_page or size + len(text) + 1 > room):
                 pages.append(current)
                 current, size = [], 0
-            current.append(row)
-            size += len(row) + 1
+            current.append(text)
+            size += len(text) + 1
         if current:
             pages.append(current)
         return pages
 
+    def _jump_menu(self) -> Optional[discord.ui.Select]:
+        """Jump to a page: one option per page, or per few pages when there are more than Discord's 25 options."""
+        count = len(self.pages)
+        if count <= JUMP_AFTER:
+            return None
+        step = -(-count // 25)
+        options = []
+        for start in range(0, count, step):
+            end = min(start + step, count) - 1
+            first = plain(self.pages[start][0].split("\n")[0]) or "…"
+            last = plain(self.pages[end][-1].split("\n")[0]) or "…"
+            label = f"Page {start + 1}" if start == end else f"Pages {start + 1}–{end + 1}"
+            options.append(discord.SelectOption(label=label, value=str(start), description=truncate(f"{first} – {last}", 100),
+                                                default=start <= self.page <= end))
+        menu = discord.ui.Select(custom_id=f"{self._key}:jump", placeholder="Jump to…", options=options)
+        menu.callback = self._jump(menu)
+        return menu
+
     def build(self) -> discord.ui.Container:
         many = len(self.pages) > 1
-        body = "\n".join(self.pages[self.page]) if self.pages else self.empty
+        blocks = [discord.ui.TextDisplay(text) for text in self.pages[self.page]] if self.pages else [self.empty]
         footer_parts = []
         if many:
             footer_parts.append(f"Page {self.page + 1} of {len(self.pages)}")
@@ -414,13 +484,21 @@ class Board(ExpiringCard):
             prev.callback = self._go(-1)
             nxt.callback = self._go(1)
             nav = [prev, nxt]
+        jump = self._jump_menu()
         buttons = nav + self.extra
-        return card(self.header, self.media, body, SEPARATOR if buttons else None, buttons or None,
-                    title=self.title, color=self.color, footer=" · ".join(footer_parts) or None)
+        return card(self.header, self.media, [jump] if jump else None, *blocks, SEPARATOR if buttons else None,
+                    buttons or None, title=self.title, color=self.color, footer=" · ".join(footer_parts) or None)
 
     def _go(self, step: int):
         async def callback(interaction: discord.Interaction):
             self.page = max(0, min(len(self.pages) - 1, self.page + step))
+            self.redraw()
+            await interaction.response.edit_message(view=self, allowed_mentions=NO_PINGS)
+        return callback
+
+    def _jump(self, menu: discord.ui.Select):
+        async def callback(interaction: discord.Interaction):
+            self.page = max(0, min(len(self.pages) - 1, int((menu.values or ["0"])[0])))
             self.redraw()
             await interaction.response.edit_message(view=self, allowed_mentions=NO_PINGS)
         return callback

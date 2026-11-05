@@ -1523,6 +1523,14 @@ class ActivityStats(commands.Cog):
         board, file = await self._report_card(report, footer)
         await board.send(target, **({"file": file} if file is not None else {}))
 
+    async def _send_private(self, ctx: commands.Context, report: Report):
+        """
+        Send a report to the asker's DMs (personal numbers stay private) and tick the command. If their DMs are
+        closed, post it in the channel after all, saying why.
+        """
+        await ui.send_private(ctx, lambda in_dm: self._report_card(
+            report, footer=f"From {ctx.guild.name}" if in_dm else ui.DM_FALLBACK))
+
     async def _channel_id(self, ctx: commands.Context, channel) -> Optional[int]:
         """The tracked channel ID for a channel argument, or None after telling the user it's unavailable."""
         if not channel.permissions_for(ctx.author).view_channel:
@@ -1593,12 +1601,21 @@ class ActivityStats(commands.Cog):
     @stats.command(name="me")
     async def stats_me(self, ctx: commands.Context, member: Optional[discord.Member] = None,
                        period: Optional[Period] = None):
-        """Your own stats: messages, channels, usual hours, voice, games and game nights. Admins can name a member."""
+        """
+        Your own stats: messages, channels, usual hours, voice, games and game nights.
+
+        Your numbers are sent to you by DM, with a ✅ on your command. Admins can name a member to see theirs right
+        where they ask.
+        """
         member = member or ctx.author
         if member != ctx.author and not await self._is_admin(ctx.author):
             return await ctx.send(ui.line(ui.LOCKED, "You can only see your own stats. Leaderboards are in "
                                                      f"`{ctx.clean_prefix}stats top`."))
-        await self._send(ctx, await self.report_me(ctx.author, member, period or 30))
+        report = await self.report_me(ctx.author, member, period or 30)
+        if member == ctx.author:
+            return await self._send_private(ctx, report)
+        report.admin = True   # someone else's numbers: staff only
+        await self._send(ctx, report)
 
     @stats.command(name="ignoreme", aliases=["optout"])
     async def stats_ignoreme(self, ctx: commands.Context):

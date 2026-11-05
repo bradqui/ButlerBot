@@ -59,7 +59,7 @@ Or use Gemini directly:
 - AI use costs real money, so admins may set a **daily limit** per person (`!claude limit`).
   - Mods and admins aren't limited.
   - When you hit it, ButlerBot says so; it resets at midnight UTC.
-- `!claude usage` shows your own usage and estimated cost.
+- `!claude usage` sends your own usage and estimated cost to your DMs, and puts a ✅ on your command. If your DMs are closed, it's posted in the channel instead.
 
 ## Personality
 
@@ -70,7 +70,7 @@ ButlerBot's personality (a slightly put-upon robot butler) is set by the server'
 > - `persona [text]` and `defaultpersona [text|current|clear]` set the personality. You can attach a `.txt` file for long ones (up to 3,000 characters).
 > - `websearch on|off`
 > - `limit <per day>`
-> - `usage [member]`
+> - `usage [member]`: the server's totals and top users, or one member's usage, shown where you ask
 > - `resetusage`
 > - `mymodel <model>` (admins' private chats)
 >

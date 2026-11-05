@@ -792,8 +792,8 @@ class ButlerFun(commands.Cog):
         """
         Show a trivia list ButlerBot wrote, numbered, with the answers behind spoilers (mods).
 
-        Leave out the name to see every list. Long lists page with ◀ ▶. Run it where players can't see it if you
-        don't want to spoil the quiz.
+        A list is sent to you by DM, so players don't see the answers, with a ✅ on your command. Leave out the name
+        to see every list, right here. Long lists page with ◀ ▶.
 
         **Example:** `[p]maketrivia show our games`
         """
@@ -811,10 +811,13 @@ class ButlerFun(commands.Cog):
         if not questions:
             return await ctx.send(self._no_list(name))
         rows = [trivia_row(i, q, a) for i, (q, a) in enumerate(questions.items(), 1)]
-        board = ui.Board(f"🧠 {name}", rows,
-                         footer=f"{ui.plural(len(questions), 'question')} · Answers are spoilered, but anyone here "
-                                f"can reveal them · `{p}maketrivia remove {name} <numbers>` drops some")
-        await board.send(ctx)
+        count = ui.plural(len(questions), "question")
+        remove = f"`{p}maketrivia remove {name} <numbers>` drops some"
+        # The answers go to the mod's DMs. If those are closed, post the list here after all, saying why.
+        await ui.send_private(ctx, lambda in_dm: ui.Board(
+            f"🧠 {name}", rows,
+            footer=f"{count} · Answers are spoilered · {remove}" if in_dm else
+            f"{count} · Answers are spoilered, but anyone here can reveal them · {remove}\n{ui.DM_FALLBACK}"))
 
     @maketrivia.command(name="remove", aliases=["delete"])
     @commands.guild_only()

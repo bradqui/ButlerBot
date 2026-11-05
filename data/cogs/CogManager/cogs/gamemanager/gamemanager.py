@@ -63,8 +63,10 @@ PICKER_PAGE_SIZE = 25           # Discord's limit for one select menu
 LIST_TIMEOUT = 900              # seconds a list board can be paged before its buttons grey out
 LIST_PRIVATE_TIMEOUT = 840      # private boards expire before their 15-minute interaction token does
 
-PING = discord.AllowedMentions(everyone=False, roles=False, users=True)   # plain-text pings: reminders, LFG, winners
-# Cards that ping (vote, sale alert, install request) pass pings([...]) with exactly the people meant.
+PING = discord.AllowedMentions(everyone=False, roles=False, users=True)   # the LFG ping (everyone it names)
+# Cards that ping (sale alert, install request, votes on old embed sessions) pass pings([...]) with exactly the
+# people meant. A game night pings with short ping_line() messages that link to its card; their IDs are kept on
+# the session ("pings") or the vote ("ping_id") and deleted when the session or the vote ends.
 NO_PING = ui.NO_PINGS
 INSTALLED = "💾"                # marks installed games in lists
 
@@ -574,6 +576,27 @@ def pings(user_ids) -> discord.AllowedMentions:
     ids = list(dict.fromkeys(str(u) for u in user_ids))[:100]
     return discord.AllowedMentions(everyone=False, roles=False, replied_user=False,
                                    users=[discord.Object(int(u)) for u in ids])
+
+
+def message_link(guild_id: int, channel_id, message_id) -> str:
+    """A message's jump URL (what message.jump_url gives), built from a record's IDs. Empty without a message."""
+    if not channel_id or not message_id:
+        return ""
+    return f"https://discord.com/channels/{guild_id}/{channel_id}/{message_id}"
+
+
+def ping_line(emoji: str, user_ids, text: str, link: str = "") -> str:
+    """
+    One short ping that points at a card: `🎮 <@1> <@2> **Raid night** is starting: <link>`. Mentions come first
+    (at most 100, as pings() allows), cut further only if the line would pass Discord's 2,000 characters.
+    """
+    ids = list(dict.fromkeys(str(u) for u in user_ids))[:100]
+    tail = f" {text}" + (f": {link}" if link else ".")
+    mentions = [f"<@{u}>" for u in ids]
+    while mentions and len(emoji) + len(" ".join(mentions)) + len(tail) + 20 > ui.MESSAGE_LIMIT:
+        mentions.pop()
+    more = len(ids) - len(mentions)
+    return f"{emoji} " + " ".join(mentions) + (f" and {more} more" if more else "") + tail
 
 
 def mention_list(user_ids, limit: int = 40) -> str:
@@ -1597,6 +1620,31 @@ class GameManager(commands.Cog):
         except discord.HTTPException:
             pass
 
+    async def _ping(self, guild: discord.Guild, channel_id, emoji: str, user_ids, text: str,
+                    link: str = "") -> Optional[int]:
+        """Send a one-line ping (ping_line) that pings exactly `user_ids`. Returns its message ID, or None."""
+        channel = guild.get_channel_or_thread(channel_id or 0)
+        ids = list(dict.fromkeys(str(u) for u in user_ids))[:100]
+        if channel is None or not ids:
+            return None
+        try:
+            message = await channel.send(ping_line(emoji, ids, text, link), allowed_mentions=pings(ids))
+        except discord.HTTPException as e:
+            log.debug("Couldn't send a ping in %s: %s", channel_id, e)
+            return None
+        return message.id
+
+    async def _delete_messages(self, guild: discord.Guild, channel_id, message_ids):
+        """Delete ping lines that are done with. Messages already gone, or missing permissions, are skipped."""
+        channel = guild.get_channel_or_thread(channel_id or 0)
+        if channel is None:
+            return
+        for mid in dict.fromkeys(m for m in message_ids or [] if m):
+            try:
+                await channel.get_partial_message(int(mid)).delete()
+            except discord.HTTPException as e:   # NotFound (someone deleted it) or Forbidden
+                log.debug("Couldn't delete ping %s: %s", mid, e)
+
     # ==========================================
     #                 LIBRARY
     # ==========================================
@@ -2013,8 +2061,11 @@ class GameManager(commands.Cog):
         return discord.Embed(description=text, color=ui.SUCCESS if created else ui.MUTED)
 
     def request_card(self, request: dict, approver: Optional[discord.abc.User] = None,
-                     approved: Optional[bool] = None) -> ui.CardView:
-        """A game request: ATTENTION with Approve/Deny while pending, then SUCCESS (approved) or DANGER (denied)."""
+                     approved: Optional[bool] = None, note: Optional[str] = None) -> ui.CardView:
+        """
+        A game request: ATTENTION with Approve/Deny while pending, then SUCCESS (approved) or DANGER (denied), with
+        an optional `note` hint (what happened to the requester's library).
+        """
         name, requester = request["name"], request["requested_by"]
         link = ([store_button(STEAM_APP_URL.format(request["steam_appid"]), "View on Steam")]
                 if request.get("steam_appid") else [])
@@ -2028,7 +2079,7 @@ class GameManager(commands.Cog):
         verb = "approved" if approved else "denied"
         by = f", {verb} by {approver.mention}" if approver is not None else ""
         return ui.CardView(ui.card(
-            f"Requested by <@{requester}>{by}.", link or None,
+            f"Requested by <@{requester}>{by}." + (f"\n{ui.hint(note)}" if note else ""), link or None,
             title=f"✅ Approved: {name}" if approved else f"❌ Denied: {name}",
             color=ui.SUCCESS if approved else ui.DANGER))
 
@@ -2091,24 +2142,31 @@ class GameManager(commands.Cog):
             if game is not None and action in ("own", "install"):
                 async with self.config.guild(guild).users() as users:
                     apply_change(user_entry(users, requester), game["id"], action)
-            embed = discord.Embed(title=f"✅ Approved: {name}", color=ui.SUCCESS,
-                                  description=f"Requested by <@{requester}>, approved by {approver.mention}.")
-        else:
-            embed = discord.Embed(title=f"❌ Denied: {name}", color=ui.DANGER,
-                                  description=f"Requested by <@{requester}>, denied by {approver.mention}.")
-        await self._edit_record(guild, request, lambda: self.request_card(request, approver, approve),
+        note = None
+        if approve and action == "own":
+            note = (f"It's in their library, not marked installed. If it's installed: "
+                    f"{await self.cmd(guild, 'games install ' + name)}")
+        elif approve and action == "install":
+            note = "It's marked installed for them."
+        verb = "approved" if approve else "denied"
+        embed = discord.Embed(title=f"✅ Approved: {name}" if approve else f"❌ Denied: {name}",
+                              color=ui.SUCCESS if approve else ui.DANGER,
+                              description=f"Requested by <@{requester}>, {verb} by {approver.mention}."
+                                          + (f"\n-# {note}" if note else ""))
+        await self._edit_record(guild, request, lambda: self.request_card(request, approver, approve, note),
                                 embed=embed, view=None)
+        # One short line that pings the requester and points at the card, which has the details.
+        link = message_link(guild.id, request.get("channel_id"), request.get("message_id"))
+        text = (f"**{name}** was added to the server library" if approve
+                else f"your request for **{name}** was denied")
+        emoji = "✅" if approve else "❌"
         channel = guild.get_channel_or_thread(request.get("channel_id") or 0)
         if channel is not None:
-            note = {
-                "own": f" and it's in your library (not marked installed; if you have it installed, run "
-                       f"{await self.cmd(guild, 'games install ' + name)})",
-                "install": " and it's marked installed for you",
-            }.get(action, "")
-            text = (f"✅ <@{requester}>, **{name}** was added to the server library{note}." if approve
-                    else f"❌ <@{requester}>, your request for **{name}** was denied.")
+            # Without a card (it couldn't be posted) the line says it all, note included.
+            line = f"{emoji} <@{requester}>, {text}" + (f": {link}" if link else
+                                                         "." + (f"\n-# {note}" if note else ""))
             try:
-                await channel.send(text, allowed_mentions=PING)
+                await channel.send(line, allowed_mentions=pings([requester]))
             except discord.HTTPException:
                 pass
         return name
@@ -2359,21 +2417,25 @@ class GameManager(commands.Cog):
                     and int(entry["appid"]) not in self._owned_appids(games, users.get(u, {}))]
             if not fans:
                 continue
-            line = (f"**[{entry['name']}]({STEAM_APP_URL.format(entry['appid'])})**: {price_text(entry['price'])}"
-                    f"\n-# Wanted by {', '.join(f'<@{u}>' for u in fans)}")
-            if sum(len(l) + 1 for l in lines) + len(line) > 3500:
-                break   # a card holds about 4,000 characters; people named in the text are the ones pinged
+            line = f"**[{entry['name']}]({STEAM_APP_URL.format(entry['appid'])})**: {price_text(entry['price'])}"
+            new_fans = [u for u in fans if u not in pinged][:100 - len(pinged)]
+            size = sum(len(l) + 1 for l in lines) + len(line) + 23 * (len(pinged) + len(new_fans))
+            if lines and (size > 3400 or len(new_fans) < len([u for u in fans if u not in pinged])):
+                break   # a card holds about 4,000 characters, and a message pings at most 100 people
             lines.append(line)
             shown.append(entry)
-            pinged += [u for u in fans if u not in pinged]
+            pinged += new_fans
         if not lines:
             return 0
         prefix = await self.prefix(guild)
         link = [store_button(STEAM_APP_URL.format(shown[0]["appid"]), "View on Steam")] if len(shown) == 1 else None
-        view = ui.CardView(ui.card("\n".join(lines), link, title="🎮 On sale on Steam", color=ui.HIGHLIGHT,
+        # Each person is named (and pinged) once, however many of their wishes are on sale.
+        wanted = ui.hint("Wanted by " + ", ".join(f"<@{u}>" for u in pinged))
+        view = ui.CardView(ui.card("\n".join(lines) + "\n" + wanted, link, title="🎮 On sale on Steam",
+                                   color=ui.HIGHLIGHT,
                                    footer=f"From your wishlists · {prefix}games want / {prefix}games unwant"))
         try:
-            # The card's "Wanted by" mentions are the ping (same people as before: everyone who wants a game on sale).
+            # The "Wanted by" mentions are the ping: everyone who wants a game on sale, as before.
             await self.send_card(channel, view, allowed_mentions=pings(pinged))
         except discord.HTTPException as e:
             log.info("Couldn't post sale alerts in %s: %s", guild, e)
@@ -2434,11 +2496,13 @@ class GameManager(commands.Cog):
     #                 SESSIONS
     # ==========================================
 
-    def session_card(self, session: dict, ended: bool = False) -> ui.CardView:
+    def session_card(self, session: dict, ended: bool = False, vote: Optional[dict] = None) -> ui.CardView:
         """
         A session's card: title, start time, who's playing, the buttons, and a footer with what happens next.
-        SUCCESS while it's open, MUTED once it has ended (then without buttons). Player mentions in it don't ping:
-        it's always sent and edited with NO_PING.
+        The whole game night happens in this one card: a vote started from it runs inside it (pass the running
+        `vote`, a record with "in_card"), and the result stays in it ("vote_result"). SUCCESS while it's open,
+        ATTENTION while voting, MUTED once it has ended (then without buttons). Player mentions in it don't ping:
+        it's always sent and edited with NO_PING. The pings are short ping_line() messages that link here.
         """
         starts = parse_iso(session.get("starts_at"))
         host = session["host_id"]
@@ -2451,11 +2515,34 @@ class GameManager(commands.Cog):
         if len(players) > 40:
             players = players[:40] + [f"and {len(players) - 40} more"]
         lines.append(f"{'Played' if ended else 'Playing'}: " + (", ".join(players) or "nobody yet"))
-        if session.get("winner"):
+        if session.get("tz_note") and starts and not ended and not session.get("started"):
+            lines.append(ui.hint(session["tz_note"]))
+        title = f"🎮 {session['title']}"
+
+        if vote is not None and vote.get("in_card") and not ended:   # voting: the options are in this card
+            labels = vote.get("labels") or vote.get("names") or {}
+            buttons = [VoteButton(vote["id"], g, labels.get(g) or "Vote") for g in vote["games"][:MAX_VOTE_OPTIONS]]
+            body = "\n".join(["🗳️ **What should we play?**"] + self.vote_status(vote))
+            return ui.CardView(ui.card("\n".join(lines), ui.SEPARATOR, body, buttons, ui.SEPARATOR,
+                                       [SessionButton("end", session["id"])], title=title, color=ui.ATTENTION,
+                                       footer="Only players who joined before the vote can vote"))
+
+        result = session.get("vote_result")
+        result_text = None
+        if result and not ended:
+            if result.get("winner"):
+                head = f"🏆 **{result['winner']}** won the vote." + (f" {result['tie']}" if result.get("tie") else "")
+            else:
+                head = "🗳️ The vote ended without any votes."
+            parts = [head] + result.get("lines", [])
+            if result.get("footer"):
+                parts.append(ui.hint(result["footer"]))
+            result_text = "\n".join(parts)
+        elif session.get("winner"):
             lines.append(f"🏆 **{session['winner']}** won the vote.")
         if ended:
             lines.append("This session has ended.")
-        elif session.get("vote_id"):
+        elif session.get("vote_id"):   # a vote posted as its own card (sessions from before Phase 4 / old votes)
             lines.append("🗳️ Voting now: pick a game on the vote below.")
         notes = []
         if not ended:
@@ -2464,14 +2551,16 @@ class GameManager(commands.Cog):
                              else "starting soon")
             if session.get("event_id"):
                 notes.append("on the server's events")
-            if not starts and not session.get("vote_id") and not session.get("winner"):
+            if not starts and not session.get("vote_id") and not session.get("winner") \
+                    and not session.get("vote_result"):
                 notes.append("when everyone's in, the host presses Start vote")
         footer = " · ".join(notes)
         footer = footer[:1].upper() + footer[1:] if footer else None
         if ended:
-            return ui.CardView(ui.card("\n".join(lines), title=f"🎮 {session['title']}", color=ui.MUTED))
-        return ui.CardView(ui.card("\n".join(lines), ui.SEPARATOR, session_buttons(session["id"]),
-                                   title=f"🎮 {session['title']}", color=ui.SUCCESS, footer=footer))
+            return ui.CardView(ui.card("\n".join(lines), title=title, color=ui.MUTED))
+        return ui.CardView(ui.card("\n".join(lines), ui.SEPARATOR if result_text else None, result_text,
+                                   ui.SEPARATOR, session_buttons(session["id"]),
+                                   title=title, color=ui.SUCCESS, footer=footer))
 
     def session_embed(self, session: dict, ended: bool = False) -> discord.Embed:
         """The pre-card look, for session messages posted as embeds before 2026-11-05."""
@@ -2503,15 +2592,21 @@ class GameManager(commands.Cog):
         embed.set_footer(text=f"Session ID: {session['id']}")
         return embed
 
+    async def session_card_now(self, guild: discord.Guild, session: dict, ended: bool = False) -> ui.CardView:
+        """session_card with the session's running vote looked up (so a vote inside the card is drawn)."""
+        vote = None
+        if session.get("vote_id") and not ended:
+            vote = (await self.config.guild(guild).votes()).get(session["vote_id"])
+        return self.session_card(session, ended, vote)
+
     async def refresh_session_message(self, guild: discord.Guild, session: dict, ended: bool = False):
-        await self._edit_record(guild, session, lambda: self.session_card(session, ended),
+        view = await self.session_card_now(guild, session, ended) if session.get("card") else None
+        await self._edit_record(guild, session, lambda: view,
                                 embed=self.session_embed(session, ended),
                                 view=None if ended else session_view(session["id"]))
 
     def session_link(self, guild: discord.Guild, session: dict) -> str:
-        if not session.get("message_id"):
-            return ""
-        return f"https://discord.com/channels/{guild.id}/{session['channel_id']}/{session['message_id']}"
+        return message_link(guild.id, session.get("channel_id"), session.get("message_id"))
 
     async def create_session(self, target: Target, text: Optional[str]):
         guild, member, channel = who(target)
@@ -2525,19 +2620,21 @@ class GameManager(commands.Cog):
         if starts_at is not None and starts_at > now + timedelta(days=60):
             return await self.reply(target, content="⚠️ Sessions can be scheduled up to 60 days ahead.", ephemeral=True)
         title = (title.strip() or f"{member.display_name}'s game session")[:200]
-        await self.post_session(guild, channel, member, title, starts_at)
         note = None
-        if starts_at and not personal:
-            note = (f"⚠️ I read that time as **{tz_name}**. If that's wrong, set your timezone with "
+        if starts_at and not personal:   # a hint in the card, instead of a message of its own
+            note = (f"Time read as **{tz_name}**: the host hasn't set a timezone. If that's wrong, set one with "
                     f"{await self.cmd(guild, 'games timezone <zone>')} and start the session again.")
+        await self.post_session(guild, channel, member, title, starts_at, tz_note=note)
         if isinstance(target, discord.Interaction):
-            await self.reply(target, content=note or "✅ Session posted.", ephemeral=True)
-        elif note:
-            await self.reply(target, content=note)
+            await self.reply(target, content="✅ Session posted.", ephemeral=True)
 
     async def post_session(self, guild: discord.Guild, channel, host: discord.Member, title: str,
-                           starts_at: Optional[datetime], schedule: Optional[dict] = None) -> dict:
-        """Post a session message (and its Discord event when it has a start time). Returns the session."""
+                           starts_at: Optional[datetime], schedule: Optional[dict] = None, *,
+                           tz_note: Optional[str] = None) -> dict:
+        """
+        Post a session card (and its Discord event when it has a start time). Returns the session. `tz_note` is a
+        hint shown in the card until the session starts (the time was read in a timezone the host didn't choose).
+        """
         now = utcnow()
         sid = generate_id()
         session = {
@@ -2550,6 +2647,9 @@ class GameManager(commands.Cog):
             "recurring_id": schedule["id"] if schedule else None,
             "repeat": repeat_label(schedule) if schedule else None,
             "card": True,   # posted as a card (older sessions are embeds and are still edited as embeds)
+            "tz_note": tz_note,
+            "pings": [],          # IDs of this session's ping lines (in its channel), deleted when it ends
+            "vote_result": None,  # the last vote's result, shown in the card: {winner, tie, lines, footer}
         }
         async with self.config.guild(guild).play_sessions() as sessions:
             sessions[sid] = session
@@ -2707,9 +2807,11 @@ class GameManager(commands.Cog):
         if session is None:
             return None
         if session.get("vote_id"):
-            await self.cancel_vote(guild, session["vote_id"])
+            await self.cancel_vote(guild, session["vote_id"])   # also deletes the vote's ping line
         session["vote_id"] = None
         await self.refresh_session_message(guild, session, ended=True)
+        await self._delete_messages(guild, session["channel_id"], session.get("pings"))   # reminders, start, winner
+        session["pings"] = []
         await self.update_event(guild, session, "finish")
         self.bot.dispatch("gm_session_ended", guild, session)  # ActivityStats records attendance
         return session
@@ -2743,7 +2845,8 @@ class GameManager(commands.Cog):
                     players.remove(uid)
                 session = dict(session)
             if ui.is_card(interaction.message):
-                await interaction.response.edit_message(view=self.session_card(session), allowed_mentions=NO_PING)
+                await interaction.response.edit_message(view=await self.session_card_now(guild, session),
+                                                        allowed_mentions=NO_PING)
             else:   # posted before sessions became cards
                 await interaction.response.edit_message(embed=self.session_embed(session), view=session_view(sid))
             return
@@ -2764,34 +2867,42 @@ class GameManager(commands.Cog):
             return
         if starts is None:
             return
-        updates = {}
+        updates, new_pings = {}, []
         if not session.get("reminded") and starts - timedelta(minutes=REMINDER_MINUTES) <= now < starts:
-            await self.announce(guild, session, f"⏰ **{session['title']}** starts {stamp(starts, 'R')}!")
+            new_pings.append(await self.announce(guild, session, f"**{session['title']}** starts {stamp(starts, 'R')}"))
             updates["reminded"] = True
         elif not session.get("started") and now >= starts:
             if now - starts < timedelta(minutes=30):  # don't announce stale starts after downtime
-                await self.announce(guild, session, f"🎮 **{session['title']}** is starting now!")
+                new_pings.append(await self.announce(guild, session, f"**{session['title']}** is starting"))
             await self.update_event(guild, session, "start")
             updates.update(reminded=True, started=True)
         if updates:
-            current = None
-            async with self.config.guild(guild).play_sessions() as sessions:
-                if sid in sessions:
-                    sessions[sid].update(updates)
-                    current = dict(sessions[sid])
+            current = await self._update_session(guild, session, updates, new_pings)
             if current is not None and current.get("card"):   # the footer says "Reminder 15 min before" until then
                 await self.refresh_session_message(guild, current)
 
-    async def announce(self, guild: discord.Guild, session: dict, text: str):
-        channel = guild.get_channel_or_thread(session["channel_id"])
-        if channel is None:
-            return
-        mentions = " ".join(f"<@{uid}>" for uid in session["participants"])
-        link = self.session_link(guild, session)
-        try:
-            await channel.send(f"{text} {mentions}" + (f"\n-# {link}" if link else ""), allowed_mentions=PING)
-        except discord.HTTPException as e:
-            log.debug("Couldn't announce session %s: %s", session["id"], e)
+    async def _update_session(self, guild: discord.Guild, session: dict, updates: dict,
+                              new_pings: List[Optional[int]]) -> Optional[dict]:
+        """
+        Save changes and new ping-line IDs on a session; returns the saved session. If it ended meanwhile, its new
+        ping lines are deleted right away (nothing would clean them up later).
+        """
+        new_pings = [p for p in new_pings if p]
+        current = None
+        async with self.config.guild(guild).play_sessions() as sessions:
+            if session["id"] in sessions:
+                saved = sessions[session["id"]]
+                saved.update(updates)
+                saved["pings"] = saved.get("pings", []) + new_pings
+                current = dict(saved)
+        if current is None:
+            await self._delete_messages(guild, session["channel_id"], new_pings)
+        return current
+
+    async def announce(self, guild: discord.Guild, session: dict, text: str) -> Optional[int]:
+        """Ping a session's players with one short line linking to its card. Returns the line's message ID."""
+        return await self._ping(guild, session["channel_id"], "🎮", session["participants"], text,
+                                self.session_link(guild, session))
 
     @tasks.loop(minutes=1)
     async def session_loop(self):
@@ -2844,14 +2955,12 @@ class GameManager(commands.Cog):
             return best_first(popular), "nobody has a game in common, so these are installed by the most players", counts
         return [], "", counts
 
-    def vote_card(self, vote: dict) -> ui.CardView:
-        """
-        A running vote: how to vote, who has voted and who hasn't, and the game buttons (up to 20, in rows of five).
-        The "Waiting on" mentions are the ping when it's posted (pings(players)); every redraw is NO_PING.
-        """
+    @staticmethod
+    def vote_status(vote: dict) -> List[str]:
+        """A running vote's lines: how to vote, when it ends, who has voted and who hasn't, and what the options are."""
         ends = parse_iso(vote.get("ends_at"))
         lines = [f"Pick up to **{vote['max_choices']}**. Press a game again to take your vote back."]
-        if ends:
+        if ends:   # (this replaced the old "30 seconds left" ping)
             lines.append(f"Voting ends {stamp(ends, 'R')}, or as soon as everyone has voted.")
         voters = vote["allowed_voters"]
         voted = [u for u in voters if u in vote["user_votes"]]
@@ -2861,6 +2970,15 @@ class GameManager(commands.Cog):
             lines.append("**Waiting on:** " + mention_list(waiting, 90))
         if vote.get("basis"):
             lines.append(ui.hint(f"Options: {vote['basis']}."))
+        return lines
+
+    def vote_card(self, vote: dict) -> ui.CardView:
+        """
+        A vote as a card of its own: only for sessions posted as embeds (before cards) and votes started before
+        Phase 4. Votes on card sessions run inside the session card (session_card). The "Waiting on" mentions were
+        the ping when one was posted (pings(players)); every redraw is NO_PING.
+        """
+        lines = self.vote_status(vote)
         labels = vote.get("labels") or vote.get("names") or {}
         buttons = [VoteButton(vote["id"], g, labels.get(g) or "Vote") for g in vote["games"][:MAX_VOTE_OPTIONS]]
         return ui.CardView(ui.card("\n".join(lines), ui.SEPARATOR, buttons,
@@ -2924,27 +3042,43 @@ class GameManager(commands.Cog):
 
         vid = generate_id()
         ends_at = utcnow() + timedelta(seconds=seconds)
+        # A session posted as a card holds its vote (Phase 4); an old embed session can't, so its vote is a card
+        # of its own, as before.
+        in_card = bool(session.get("card") and session.get("message_id"))
         vote = {
             "id": vid, "session_id": session["id"], "title": session["title"], "games": options,
             "names": {g: games[g]["name"] for g in options}, "basis": basis, "tallies": {}, "user_votes": {},
-            "allowed_voters": list(players), "channel_id": channel.id, "message_id": None,
-            "max_choices": max_choices, "created_at": utcnow().isoformat(), "created_by": str(member.id),
-            "ends_at": ends_at.isoformat(), "timeout": seconds,
+            "allowed_voters": list(players), "max_choices": max_choices, "created_at": utcnow().isoformat(),
+            "created_by": str(member.id), "ends_at": ends_at.isoformat(), "timeout": seconds,
             "labels": dict(labels), "card": True,   # labels redraw the buttons; older votes are embeds
+            # In the card: the vote's message is the session's, and "ping_id" is its one-line ping.
+            "in_card": in_card, "ping_id": None,
+            "channel_id": session["channel_id"] if in_card else channel.id,
+            "message_id": session["message_id"] if in_card else None,
         }
         async with self.config.guild(guild).votes() as all_votes:
             all_votes[vid] = vote
-        # Pings every player, as before: they're all named under "Waiting on".
-        message = await self.send_card(channel, self.vote_card(vote), allowed_mentions=pings(players))
-        async with self.config.guild(guild).votes() as all_votes:
-            if vid in all_votes:
-                all_votes[vid]["message_id"] = message.id
+        if not in_card:
+            # Pings every player: they're all named under "Waiting on".
+            message = await self.send_card(channel, self.vote_card(vote), allowed_mentions=pings(players))
+            async with self.config.guild(guild).votes() as all_votes:
+                if vid in all_votes:
+                    all_votes[vid]["message_id"] = message.id
         async with self.config.guild(guild).play_sessions() as all_sessions:
             if session["id"] in all_sessions:
                 all_sessions[session["id"]]["vote_id"] = vid
                 session = dict(all_sessions[session["id"]])
-        await self.refresh_session_message(guild, session)
+        await self.refresh_session_message(guild, session)   # in the card: the options appear
         self.schedule_vote(guild.id, vid, ends_at)
+        if in_card:
+            ping = await self._ping(guild, session["channel_id"], "🗳️", players, "Vote on what to play",
+                                    self.session_link(guild, session))
+            async with self.config.guild(guild).votes() as all_votes:
+                if vid in all_votes:
+                    all_votes[vid]["ping_id"] = ping
+                    ping = None
+            if ping:   # everyone voted before the line was saved: it's already done with
+                await self._delete_messages(guild, session["channel_id"], [ping])
         if isinstance(target, discord.Interaction):
             await self.reply(target, content="✅ Vote started.", ephemeral=True)
 
@@ -2984,7 +3118,12 @@ class GameManager(commands.Cog):
             return
         if not everyone_voted:   # (otherwise the results replace it right away)
             try:
-                if ui.is_card(interaction.message):
+                if vote.get("in_card"):   # the vote is inside the session card: redraw the whole card
+                    session = (await self.config.guild(guild).play_sessions()).get(vote.get("session_id"))
+                    if session is not None and ui.is_card(interaction.message):
+                        await interaction.message.edit(view=self.session_card(session, vote=vote),
+                                                       allowed_mentions=NO_PING)
+                elif ui.is_card(interaction.message):
                     await interaction.message.edit(view=self.vote_card(vote), allowed_mentions=NO_PING)
                 else:   # posted before votes became cards
                     await interaction.message.edit(embed=self.vote_embed(vote, guild))
@@ -3000,20 +3139,8 @@ class GameManager(commands.Cog):
         self.vote_tasks[vid] = asyncio.create_task(self._vote_timer(guild_id, vid, ends_at))
 
     async def _vote_timer(self, guild_id: int, vid: str, ends_at: datetime):
+        # No "30 seconds left" ping any more: the card's "Voting ends <t:R>" line counts down instead.
         try:
-            remaining = (ends_at - utcnow()).total_seconds()
-            if remaining > 45:
-                await asyncio.sleep(remaining - 30)
-                guild = self.bot.get_guild(guild_id)
-                vote = (await self.config.guild_from_id(guild_id).votes()).get(vid)
-                channel = guild.get_channel_or_thread(vote["channel_id"]) if guild and vote else None
-                if channel is not None:
-                    waiting = [f"<@{u}>" for u in vote["allowed_voters"] if u not in vote["user_votes"]]
-                    text = "⏰ **30 seconds** left to vote!" + (f" Still waiting on {' '.join(waiting)}" if waiting else "")
-                    try:
-                        await channel.send(text, allowed_mentions=PING)
-                    except discord.HTTPException:
-                        pass
             await asyncio.sleep(max(0.0, (ends_at - utcnow()).total_seconds()))
             guild = self.bot.get_guild(guild_id)
             if guild is not None:
@@ -3076,25 +3203,19 @@ class GameManager(commands.Cog):
             medal = MEDALS[i] if i < len(MEDALS) else "▫️"
             lines.append(f"{medal} **{names.get(gid, 'Unknown game')}**: {ui.plural(count, 'vote')} "
                          f"({count / total * 100:.0f}%)")
-        title = f"🗳️ Results: {vote.get('title', 'Vote')}"
-        body = "\n".join(lines) or "No votes were cast."
         footer = f"{len(vote['user_votes'])} of {len(voters)} voted" + (f" · {reason}" if reason else "")
-        embed = discord.Embed(title=title, description=body, color=ui.HIGHLIGHT)
-        embed.set_footer(text=footer)
-        await self._edit_record(guild, vote, lambda: final_card(body, title=title, color=ui.HIGHLIGHT, footer=footer),
-                                embed=embed, view=None)
-
-        channel = guild.get_channel_or_thread(vote["channel_id"])
         winner_name = names.get(winner) if winner else None
-        if channel is not None and winner_name:
-            reference = None
-            if vote.get("message_id"):
-                reference = channel.get_partial_message(vote["message_id"]).to_reference(fail_if_not_exists=False)
-            try:
-                await channel.send(f"🏆 **{winner_name}** wins!{tie_note} " + " ".join(f"<@{u}>" for u in voters),
-                                   reference=reference, allowed_mentions=PING)
-            except discord.HTTPException:
-                pass
+        in_card = vote.get("in_card")
+        if in_card:   # the vote's ping line is done with; the result goes into the session card below
+            await self._delete_messages(guild, vote["channel_id"], [vote.get("ping_id")])
+        else:         # a vote card of its own (old embed sessions, votes from before Phase 4): it shows the results
+            title = f"🗳️ Results: {vote.get('title', 'Vote')}"
+            body = "\n".join(lines) or "No votes were cast."
+            embed = discord.Embed(title=title, description=body, color=ui.HIGHLIGHT)
+            embed.set_footer(text=footer)
+            await self._edit_record(guild, vote,
+                                    lambda: final_card(body, title=title, color=ui.HIGHLIGHT, footer=footer),
+                                    embed=embed, view=None)
 
         async with self.config.guild(guild).play_sessions() as sessions:
             session = sessions.get(vote.get("session_id"))
@@ -3102,22 +3223,47 @@ class GameManager(commands.Cog):
                 session["vote_id"] = None
                 if winner_name:
                     session["winner"] = winner_name
+                if in_card:
+                    session["vote_result"] = {"winner": winner_name, "tie": tie_note.strip(), "lines": lines,
+                                              "footer": footer}
                 session = dict(session)
             else:
                 session = None
         if session is not None:
             await self.refresh_session_message(guild, session)
+
+        if winner_name:
+            # One short line that pings the voters (as before) and points at the result: the session card, or
+            # the old vote card.
+            link = message_link(guild.id, vote["channel_id"], vote.get("message_id"))
+            ping = await self._ping(guild, vote["channel_id"], "🏆", voters, f"We're playing **{winner_name}**", link)
+            if session is not None and ping and vote["channel_id"] == session["channel_id"]:
+                await self._update_session(guild, session, {}, [ping])   # deleted when the session ends
         return winner_name
 
     async def cancel_vote(self, guild: discord.Guild, vid: str):
+        """Stop a vote without a winner. A vote inside a session card just leaves it (the card is redrawn)."""
         async with self.config.guild(guild).votes() as votes:
             vote = votes.pop(vid, None)
         self._stop_timer(vid)
-        if vote is not None:
+        if vote is None:
+            return
+        if not vote.get("in_card"):
             await self._edit_record(
                 guild, vote, lambda: final_card(f"**{vote.get('title', 'Vote')}**: no game was picked.",
                                                 title="🗳️ Vote cancelled", color=ui.MUTED),
                 view=None, embed=discord.Embed(title="🗳️ Vote cancelled", color=ui.MUTED))
+            return
+        await self._delete_messages(guild, vote["channel_id"], [vote.get("ping_id")])
+        async with self.config.guild(guild).play_sessions() as sessions:
+            session = sessions.get(vote.get("session_id"))
+            if session is not None and session.get("vote_id") == vid:
+                session["vote_id"] = None
+                session = dict(session)
+            else:
+                session = None   # ended (end_session redraws it) or already moved on
+        if session is not None:
+            await self.refresh_session_message(guild, session)
 
     async def pick_vote(self, ctx: commands.Context, vote_id: Optional[str]) -> Optional[dict]:
         votes = await self.config.guild(ctx.guild).votes()

@@ -36,9 +36,11 @@ A session is a post people join with a button. Start one now, or schedule it:
 - Accepted forms: `9pm`, `9:30 pm`, `21:00`, `tonight 9pm`, `friday 9pm`, `11/14 7pm`, `in 1h30m`, or a pasted Discord timestamp.
 
 **What happens next:**
-- The post shows the start time (in your timezone) and who's playing. Players press **Join** (or **Leave**).
-- Everyone who joined gets a reminder 15 minutes before and a ping at the start.
-- Sessions end on their own 12 hours after they start. An ended session's post turns grey and loses its buttons.
+- The post is a card that shows the start time (in everyone's own timezone) and who's playing. Players press **Join** (or **Leave**).
+- The whole game night happens in that one card: the vote and its result show up in it too, so there's one place to look.
+- Everyone who joined gets a short ping 15 minutes before and another at the start. Each ping is one line with a link back to the card.
+- If you haven't set a timezone, the card says which one your time was read in, with how to fix it.
+- Sessions end on their own 12 hours after they start. An ended session's card turns grey and loses its buttons, and its pings are cleaned up.
 
 **Discord events:**
 - Scheduled sessions also show up in the server's **Events** list.
@@ -74,10 +76,13 @@ When everyone's in, the host presses **Start vote** on the session, or runs:
 **The options:** games everyone has installed. If there are none, games everyone owns; failing that, games at least two players have installed.
 
 **How it runs:**
-- Everyone in the session is pinged when the vote starts. The vote shows who has voted and who's still to vote.
+- The session card switches to voting: the games appear as buttons inside it, with who has voted, who's still to vote, and when voting ends.
+- Everyone in the session gets a one-line ping linking to the card. It's deleted when the vote ends.
 - Press a game to vote. Press it again to take the vote back.
 - The vote ends when everyone has voted or time runs out.
+- The result stays in the card: the 🏆 winner and how many votes each game got. Players get a one-line ping with the winner.
 - **Ties** go to the game the players rank higher, then to a random pick.
+- Only people who joined before the vote started can vote.
 
 | Command | What it does |
 |---|---|

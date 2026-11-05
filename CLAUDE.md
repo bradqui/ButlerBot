@@ -327,6 +327,27 @@ Rules for card messages:
 - **Gemini:** `!gemini list` is one board.
 - **Claude:** `usage` and `models` stay cards, since neither can pass one page.
 
+**Phase 4 notes (less noise, 2026-11-05):**
+- **GameManager game nights are one card.**
+  - **Votes run inside the card.** A vote on a card session runs inside the session card. The vote record has `in_card: True`, points at the session message, and stores `ping_id`.
+    - While voting, the card turns `ATTENTION`, shows "Voting ends <t:R>" and puts the `gm:v:` buttons inside.
+    - Afterwards it's `SUCCESS` again and shows the session's `vote_result` (🏆 winner and medals).
+    - `session_card(session, ended, vote)`, `vote_status()` and `session_card_now()` draw it.
+    - `vote_card` is only for older records and embed sessions.
+    - There's no "30 seconds left" ping any more.
+  - **Pings are short lines.** `ping_line()` and `_ping()` build them, linking to the card with `message_link()` and pinging the same people as before through `pings()`. They're tracked in the session's `pings` and the vote's `ping_id`, and `_delete_messages()` deletes them when the vote or session ends. A game night leaves only its card behind.
+  - **Other cleanups:**
+    - The host-timezone note is a hint in the card (session `tz_note`; `post_session(..., tz_note=)`).
+    - A request result is a one-line ping to the requester. `request_card(..., note=)` carries the owned/installed note.
+    - Sale alerts name each person once.
+- **SpeakUp offers clean up.** `_take_back()` removes the bot's own 🕘/📄 once the answer is posted. `sweep_offers()` runs in `reminder_loop` every `SWEEP_SECONDS` (600) and takes back offers unused after `TRACK_SECONDS`. Tracked entries store `channel` and `guild`. Reactions from before a restart aren't tracked and stay.
+- **Personal numbers go to DMs** with a ✅ tick on the command: `!stats me` (yourself), `!claude usage` (yourself) and `!maketrivia show <list>`.
+  - Each uses `ui.send_private(ctx, build)`, where `build(in_dm)` returns a view or `(view, file)`. If DMs are closed, the reply goes to the channel with `ui.DM_FALLBACK` in its footer.
+  - Staff views of other people stay where they were asked, marked "Staff only". `!stats me @member` now shows that too.
+- **Tests:**
+  - `enable_dms()` in the harness gives fake members a `send` (`member.dms`, `member.dms_closed`).
+  - `FakeMessage.delete()` records into `channel.deleted`.
+
 ## Secrets (never print, log, or copy out)
 
 - `data/core/settings.json` → `GLOBAL.token` (Discord bot token) and `SHARED_API_TOKENS` (e.g. openweathermap)

@@ -49,13 +49,13 @@ To answer, just type in the channel; capitalization doesn't matter.
 
 ```
 !maketrivia show                          every quiz ButlerBot wrote
-!maketrivia show our games                numbered questions, answers behind spoilers
+!maketrivia show our games                numbered questions and answers, sent to your DMs
 !maketrivia remove our_games 4 17         drop questions by number
 !maketrivia remove our_games release year drop the one question containing those words
 !maketrivia redo our games                throw it away and write it again
 ```
 
-`show` reveals the answers, so run it somewhere players won't see it. Long quizzes page 15 questions at a time with ◀ ▶. A failed `redo` leaves the old quiz as it was.
+`show` with a quiz name sends the questions and answers to your DMs, so players can't see them, and puts a ✅ on your command. If your DMs are closed, it's posted in the channel instead, with the answers behind spoilers. Long quizzes page 15 questions at a time with ◀ ▶. A failed `redo` leaves the old quiz as it was.
 
 {: .staff }
 > **Trivia settings** (mods): `!triviaset maxscore`, `timelimit`, `stopafter`, `revealanswer`, `usespoilers`, `botplays`, `showsettings`.

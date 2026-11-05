@@ -63,7 +63,8 @@ FEATURES = {
 }
 TIME_EMOJI = "🕘"
 LINK_EMOJI = "📄"
-TRACK_SECONDS = 24 * 3600        # reactions can be clicked for this long
+TRACK_SECONDS = 24 * 3600        # reactions can be clicked for this long; then the bot takes its reaction back
+SWEEP_SECONDS = 10 * 60          # how often expired offers are looked for (in the reminder loop)
 MAX_TRACKED = 2000
 TIME_COOLDOWN = 5 * 60           # one clock reaction per channel per 5 minutes
 STEAM_COOLDOWN = 6 * 3600        # one card per game per channel per 6 hours
@@ -431,6 +432,7 @@ class SpeakUp(commands.Cog):
         self.config.register_user(opted_out=False)
         self.config.register_global(reminders={})
         self._tracked: Dict[int, dict] = {}            # message ID -> what its reaction offers
+        self._last_sweep = time.monotonic()            # when expired offers were last cleared away
         self._cooldowns: Dict[tuple, float] = {}
         self._summaries: Dict[int, List[float]] = {}   # user ID -> recent summary times
         self._steam_names: Dict[int, str] = {}
@@ -481,10 +483,40 @@ class SpeakUp(commands.Cog):
         return True
 
     def _track(self, message: discord.Message, data: dict):
-        self._tracked[message.id] = {**data, "at": time.time()}
+        self._tracked[message.id] = {**data, "at": time.time(), "channel": message.channel.id,
+                                     "guild": message.guild.id if message.guild else None}
         if len(self._tracked) > MAX_TRACKED:
+            # Forget used offers that have expired. Unused ones stay until the sweep takes their reaction back.
             cutoff = time.time() - TRACK_SECONDS
-            self._tracked = {k: v for k, v in self._tracked.items() if v["at"] > cutoff}
+            self._tracked = {k: v for k, v in self._tracked.items() if v["at"] > cutoff or not v.get("done")}
+
+    # ---------- cleaning up offers ----------
+
+    async def _take_back(self, channel, message_id: int, kind: str):
+        """
+        Remove the bot's own 🕘/📄 from a message once its offer is used or expired, so finished offers don't sit
+        there looking clickable. Removing our own reaction needs no permissions; a deleted message is fine too.
+        """
+        if channel is None:
+            return
+        emoji = TIME_EMOJI if kind == "time" else LINK_EMOJI
+        me = channel.guild.me if getattr(channel, "guild", None) else self.bot.user
+        try:
+            await channel.get_partial_message(message_id).remove_reaction(emoji, me)
+        except (discord.HTTPException, AttributeError) as e:
+            log.debug("Couldn't take back the %s on %s: %s", emoji, message_id, e)
+
+    async def sweep_offers(self, now: Optional[float] = None):
+        """Forget offers older than TRACK_SECONDS, taking back the reaction on any that nobody used."""
+        now = time.time() if now is None else now
+        expired = [(mid, entry) for mid, entry in self._tracked.items() if now - entry["at"] > TRACK_SECONDS]
+        for mid, entry in expired:
+            self._tracked.pop(mid, None)
+            if entry.get("done"):
+                continue   # already taken back when it was used
+            guild = self.bot.get_guild(entry.get("guild") or 0)
+            channel = guild.get_channel_or_thread(entry["channel"]) if guild and entry.get("channel") else None
+            await self._take_back(channel, mid, entry["kind"])
 
     async def _tz(self, member: discord.Member) -> Tuple[tzinfo, str, bool]:
         gm = self.bot.get_cog("GameManager")
@@ -591,15 +623,19 @@ class SpeakUp(commands.Cog):
             return
         if time.time() - entry["at"] > TRACK_SECONDS:
             self._tracked.pop(payload.message_id, None)
+            if not entry.get("done"):
+                await self._take_back(channel, payload.message_id, entry["kind"])
             return
         entry["done"] = True
         message = channel.get_partial_message(payload.message_id)
         try:
             if entry["kind"] == "time":
                 await self._answer_time(channel, message, entry, member)
-            else:
-                if not await self._answer_link(channel, message, entry, member):
-                    entry["done"] = False   # let someone else try (e.g. after a rate limit)
+            elif not await self._answer_link(channel, message, entry, member):
+                entry["done"] = False   # let someone else try (e.g. after a rate limit)
+            if entry["done"]:
+                # The answer is posted: the offer is used up, so take our reaction back.
+                await self._take_back(channel, payload.message_id, entry["kind"])
         except discord.HTTPException as e:
             log.warning("Couldn't answer a reaction in %s: %s", channel, e)
             entry["done"] = False   # nothing was posted, so a later click can try again
@@ -1059,6 +1095,12 @@ class SpeakUp(commands.Cog):
 
     @tasks.loop(seconds=30)
     async def reminder_loop(self):
+        if time.monotonic() - self._last_sweep >= SWEEP_SECONDS:
+            self._last_sweep = time.monotonic()
+            try:
+                await self.sweep_offers()
+            except Exception:
+                log.exception("Couldn't clear away expired offers")
         now = time.time()
         due = [r for r in (await self.config.reminders()).values() if r["due"] <= now]
         for reminder in due:

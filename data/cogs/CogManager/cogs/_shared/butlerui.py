@@ -433,6 +433,33 @@ class Board(ExpiringCard):
         return message
 
 
+DM_FALLBACK = "I couldn't DM you, so here it is."
+
+
+async def send_private(ctx, build):
+    """
+    Personal output (your own numbers, trivia answers) goes to the asker's DMs, and the command gets a ✅ tick.
+    If their DMs are closed, it's posted in the channel after all: the caller adds DM_FALLBACK to that version's
+    footer. `build(in_dm)` returns a view, or (view, file) for an attachment; it may be async, and it's called again
+    for the channel version, so files are fresh.
+    """
+    async def deliver(target, in_dm: bool):
+        built = build(in_dm)
+        if hasattr(built, "__await__"):
+            built = await built
+        view, file = built if isinstance(built, tuple) else (built, None)
+        kwargs = {"file": file} if file is not None else {}
+        if isinstance(view, Board):
+            return await view.send(target, **kwargs)
+        return await send_card(target, view, **kwargs)
+
+    try:
+        await deliver(ctx.author, True)
+    except discord.HTTPException:   # DMs closed (Forbidden), or the DM failed
+        return await deliver(ctx, False)
+    await ctx.tick()
+
+
 def is_card(message: Optional[discord.Message]) -> bool:
     """True if a message was sent as a card (Components V2). Old embed messages must be edited the old way."""
     flags = getattr(message, "flags", None)

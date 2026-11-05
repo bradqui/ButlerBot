@@ -2219,10 +2219,10 @@ class ClaudeChat(commands.Cog):
     @claude.command(name="usage")
     async def claude_usage(self, ctx: commands.Context, member: discord.Member = None):
         """
-        Show Claude usage and estimated cost.
+        Show AI usage and estimated cost.
 
-        Admins see the server's totals and top users (or a specific member's).
-        Everyone else sees their own.
+        Your own usage is sent to you by DM, with a ✅ on your command. Admins see the server's totals and top users,
+        or name a member to see theirs, right where they ask.
         """
         is_admin = await self._is_exempt(ctx.author) or ctx.author.guild_permissions.manage_guild
         if member is not None and member != ctx.author and not is_admin:
@@ -2244,11 +2244,15 @@ class ClaudeChat(commands.Cog):
             usage = await self.config.member(target).usage()
             daily = await self.config.member(target).daily()
             today = daily["count"] if daily["date"] == utc_today() else 0
-            footer = prices + (" · Staff only" if target != ctx.author else "")
-            container = ui.card(ui.settings_text(describe(usage) + [("Messages today", humanize_number(today))]),
-                                ui.SEPARATOR, title=f"🤖 AI usage: {target.display_name}", color=ui.BRAND,
-                                footer=footer)
-            return await ui.send_card(ctx, ui.CardView(container))
+            rows = ui.settings_text(describe(usage) + [("Messages today", humanize_number(today))])
+            title = f"🤖 AI usage: {target.display_name}"
+            if target != ctx.author:
+                container = ui.card(rows, ui.SEPARATOR, title=title, color=ui.BRAND, footer=f"{prices} · Staff only")
+                return await ui.send_card(ctx, ui.CardView(container))
+            # Your own numbers go to your DMs. If those are closed, post them here after all, saying why.
+            return await ui.send_private(ctx, lambda in_dm: ui.CardView(ui.card(
+                rows, ui.SEPARATOR, title=title, color=ui.BRAND,
+                footer=f"In {ctx.guild.name} · {prices}" if in_dm else f"{prices}\n{ui.DM_FALLBACK}")))
 
         g = await self.config.guild(ctx.guild).all()
         members = await self.config.all_members(ctx.guild)

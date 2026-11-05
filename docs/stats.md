@@ -17,7 +17,7 @@ See how the server is doing: which channels are busy, when people are around, wh
 | `!stats heatmap [#channel] [period]` | A day-by-hour chart of when it's busiest, in your timezone. Handy for picking game night times. |
 | `!stats voice [period]` | Time in each voice channel, who's there most, and the most people at once. |
 | `!stats games [period]` | The most-played games, from Discord's "Playing" status. |
-| `!stats me [period]` | Your own numbers. It also suggests adding games you play often to your library. |
+| `!stats me [period]` | Your own numbers, sent to your DMs (a ✅ on your command means they're on the way). It also suggests adding games you play often to your library. If your DMs are closed, they're posted in the channel instead. |
 
 **Periods** look like `week`, `month`, `year`, `90d`, `2 weeks` or `all`. For example: `!stats top week`, `!stats heatmap #general month`.
 
@@ -29,6 +29,7 @@ Or ask in plain English: `!butler when is voice busiest?`
 
 - ButlerBot keeps **hourly counts** per person and channel: no message text, ever.
 - You only see stats for channels you can open, so private and staff channels stay private.
+- Your personal numbers (`!stats me`) come by DM, so nobody else sees them. Admins can look up a member's numbers with `!stats me @member`.
 - Bots aren't counted.
 - **Opting out:** `!stats ignoreme` stops tracking you everywhere and deletes what's been recorded. `!stats trackme` turns it back on.
 - **Games played** come from your Discord activity status. If you've hidden your activity, nothing is recorded.

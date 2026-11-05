@@ -45,7 +45,7 @@ Long lists show 15 games at a time. Anyone can page through them with ◀ ▶ fo
 
 ### Games the server doesn't have yet
 
-A button offers to **request** the game. Game admins approve requests with a button, and approving adds the game to your library automatically. Some servers let members add games directly.
+A button offers to **request** the game. The request is a card with **Approve** and **Deny** buttons for game admins, and approving adds the game to your library automatically. When it's decided, the card shows the answer and you get a one-line ping that links to it. Some servers let members add games directly.
 
 Before a new game is requested or added, ButlerBot looks up its proper title:
 - **Capitalization fixes** apply on their own: "helldivers 2" becomes **HELLDIVERS 2**.
@@ -75,7 +75,7 @@ Before a new game is requested or added, ButlerBot looks up its proper title:
 
 **Sale alerts:**
 - When sale alerts are on, ButlerBot checks Steam prices every few hours.
-- When a game on your wishlist goes on sale, or gets cheaper, you get one ping in the alerts channel.
+- When a game on your wishlist goes on sale, or gets cheaper, you get one ping in the alerts channel: a card listing the deals, with everyone who wants one of them named once at the bottom.
 - You won't be pinged if you've added the game to your library by then.
 
 {: .tip }

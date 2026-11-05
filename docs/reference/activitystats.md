@@ -266,7 +266,10 @@ Stop tracking your activity, everywhere, and delete what's been recorded about y
 
 **Who:** everyone
 
-Your own stats: messages, channels, usual hours, voice, games and game nights. Admins can name a member.
+Your own stats: messages, channels, usual hours, voice, games and game nights.
+
+Your numbers are sent to you by DM, with a ✅ on your command. Admins can name a member to see theirs right
+where they ask.
 
 <a id="stats-top"></a>
 ### !stats top

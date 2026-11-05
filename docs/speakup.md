@@ -40,7 +40,7 @@ ButlerBot sometimes offers help without being asked. Its replies never ping anyo
 | An article or video link | Adds a 📄 reaction. Click it for a three-line summary, posted in the channel. |
 | A command that doesn't exist | Suggests the one you probably meant, with a **Run it** button. **Run it** works for 5 minutes, for the person who typed the command. |
 
-**Reactions are offers:** nothing happens unless someone clicks.
+**Reactions are offers:** nothing happens unless someone clicks. Each offer is answered once, and then ButlerBot takes its own 🕘 or 📄 back, so a reaction from the bot always means the offer is still open. Offers nobody uses expire after a day, and the bot takes those reactions back too.
 
 **Want a summary just for you?** Right-click any message with a link (long-press on mobile) → **Apps** → **Summarize link**. Only you see the result, and nothing is posted in the channel.
 

@@ -159,8 +159,8 @@ name with spaces, or use its saved name (`our_games` or `bb_our_games`).
 
 Show a trivia list ButlerBot wrote, numbered, with the answers behind spoilers (mods).
 
-Leave out the name to see every list. Long lists page with ◀ ▶. Run it where players can't see it if you
-don't want to spoil the quiz.
+A list is sent to you by DM, so players don't see the answers, with a ✅ on your command. Leave out the name
+to see every list, right here. Long lists page with ◀ ▶.
 
 **Example:** `!maketrivia show our games`
 

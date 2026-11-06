@@ -64,6 +64,7 @@ TOPICS = [
     ("start/", "👋", "Getting started", "New here? Start with this.", "everyone"),
     ("butler/", "🤵", "Asking ButlerBot", "Ask in plain English, or have it run commands for you.", "everyone"),
     ("ai/", "🤖", "AI chat and images", "Chat with Claude, make images, start AI threads.", "everyone"),
+    ("ai-use/", "🔍", "What uses AI", "Which features use AI, what they send, and what doesn't.", "everyone"),
     ("games/library/", "🎮", "Your games", "Your library, profile setup, favorites and wishlist.", "everyone"),
     ("games/nights/", "🎲", "Game nights", "Sessions, weekly game nights, votes and finding players.", "everyone"),
     ("fun/", "🎉", "Fun and games", "Trivia, guess the game, adventures, catch-ups and more.", "everyone"),

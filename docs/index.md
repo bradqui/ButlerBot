@@ -23,6 +23,7 @@ ButlerBot is our server's resident robot butler: overqualified, mildly put-upon,
 | 👋 | [Getting started]({{ '/start/' | relative_url }}) | New here? Start with this. |
 | 🤵 | [Asking ButlerBot]({{ '/butler/' | relative_url }}) | Ask questions in plain English, or have it run commands for you. |
 | 🤖 | [AI chat and images]({{ '/ai/' | relative_url }}) | Chat with Claude, make images, start AI threads. |
+| 🔍 | [What uses AI]({{ '/ai-use/' | relative_url }}) | Which features use AI, what they send, and what doesn't. |
 | 🎮 | [Your games]({{ '/games/library/' | relative_url }}) | Your game library, profile setup, favorites and wishlist. |
 | 🎲 | [Game nights]({{ '/games/nights/' | relative_url }}) | Sessions, weekly game nights, votes and finding players. |
 | 🎉 | [Fun and games]({{ '/fun/' | relative_url }}) | Trivia, guess the game, text adventures, catch-ups and more. |

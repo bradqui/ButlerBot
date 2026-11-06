@@ -6,7 +6,7 @@ permalink: /ai/
 
 # AI chat and images
 
-ButlerBot chats using Anthropic's Claude and draws pictures with Google's Gemini.
+ButlerBot chats using Anthropic's Claude and draws pictures with Google's Gemini. To see which other features use AI, and which don't, see [What uses AI]({{ '/ai-use/' | relative_url }}).
 
 ## Two ways to chat
 

@@ -120,6 +120,18 @@ Also announce games that are free to keep on the Epic Games Store (in the sale a
 
 Let members add new games to the library themselves instead of requesting them.
 
+<a id="games-admin-reminders"></a>
+### !games admin reminders
+
+`!games admin reminders <times>`
+
+**Who:** game admins only
+
+Set the reminders new sessions get, before they start (each session can change its own with Edit).
+
+Up to 4 times from 5 minutes to 7 days, or `none` for just the ping at the start.
+**Examples:** `!games admin reminders 15m`, `!games admin reminders 1d, 1h`, `!games admin reminders none`
+
 <a id="games-admin-remove"></a>
 ### !games admin remove
 
@@ -347,26 +359,40 @@ Games the server doesn't have yet can be requested (or added) with one button.
 
 Repeating game sessions.
 
-Start one with `!games session every friday 9pm Raid night` (or `every other friday`). Each session is
-posted a day before it starts. This lists them; `skip` and `stop` manage them.
+Start one with `!games session every friday 9pm Raid night` (or `every other friday`, or monthly:
+`every first friday`). Each session's Discord event shows as soon as the last one ends, and its card is
+posted a day before it starts (or at its earliest reminder). This lists them; `skip`, `stop` and `plan`
+manage them.
+
+<a id="games-recurring-plan"></a>
+### !games recurring plan
+
+`!games recurring plan <schedule_and_date>`
+
+**Who:** everyone · **Also:** `!games recurring book`
+
+Add another night to a repeating session (host or game admin): the same as its card's Plan next button.
+
+Give the schedule's name or ID, then the date (its usual time is used, unless you give one).
+**Examples:** `!games recurring plan Star Citizen night 11/20`, `!games recurring plan k3x9 friday`
 
 <a id="games-recurring-skip"></a>
 ### !games recurring skip
 
-`!games recurring skip <schedule_id>`
+`!games recurring skip <schedule>`
 
 **Who:** everyone
 
-Skip the next occurrence of a repeating session (host or game admin).
+Skip the next night of a repeating session, by ID or name (host or game admin).
 
 <a id="games-recurring-stop"></a>
 ### !games recurring stop
 
-`!games recurring stop <schedule_id>`
+`!games recurring stop <schedule>`
 
 **Who:** everyone · **Also:** `!games recurring delete`, `!games recurring remove`
 
-Stop a repeating session (host or game admin). Sessions already posted stay up.
+Stop a repeating session, by ID or name (host or game admin). Sessions whose card is up stay.
 
 <a id="games-request"></a>
 ### !games request
@@ -421,10 +447,15 @@ a reminder 15 minutes before and a ping at the start. Times are read in your tim
 (set it with `!games timezone`).
 
 Scheduled sessions also show up in the server's Discord events. Start with `every` to repeat weekly
-(or `every other` for every two weeks); each one is posted a day ahead. For the event, attach an image
+(`every other` for every two weeks, `every first friday` for monthly). For the event, attach an image
 as its banner, mention a voice channel to hold it there, and put a description on the lines after the
-first (Shift+Enter). A line like `Length: 3h` sets how long the event runs. The host can change these
-later with the card's **Edit event** button.
+first (Shift+Enter). Other lines set more:
+- `Length: 3h`: how long the event runs
+- `Game: Star Citizen`: set the game ahead, so there's no vote
+- `Reminders: 36h, 15m` (or `none`): when players are reminded before it starts
+- `Reminder note: Update your drivers`: shown on the card with every reminder
+- `Replaces: Friday Night Games`: that repeating session's night is off (or `none`)
+The host can change all of it later with the card's **Edit** button.
 
 **Examples:**
 - `!games session` (starts now)
@@ -614,6 +645,7 @@ Game sessions. On its own, brings this channel's session card down to you.
 - `!session new friday 9pm Raid night` starts one (`!session new every friday 9pm` repeats weekly)
 - `!session join` and `!session leave` (add its name if there's more than one)
 - `!session vote` and `!session end` (host or game admin)
+- `!session plan Star Citizen night 11/20` adds a night to a repeating session
 - `!sessions` lists them all
 
 <a id="session-end"></a>
@@ -662,12 +694,24 @@ Leave a game session. Add its name if there's more than one.
 Start a game session people can join.
 
 Optionally start with a time (read in your timezone; everyone sees their own). Start with `every` to
-repeat weekly. For the Discord event: attach an image for its banner, mention a voice channel to hold it
-there, put a description on the lines after the first (Shift+Enter), and add a line like `Length: 3h`
-for how long it runs. The same as `!games session`.
+repeat weekly (`every first friday` for monthly). For the Discord event: attach an image for its banner,
+mention a voice channel to hold it there, and put a description on the lines after the first
+(Shift+Enter). Lines like `Length: 3h`, `Game: Star Citizen` (no vote), `Reminders: 36h, 15m`,
+`Reminder note: …` and `Replaces: Friday Night Games` set the rest. The same as `!games session`.
 
 **Examples:** `!session new`, `!session new friday 9pm Raid night`, `!session new in 2h Rocket League`,
 `!session new every friday 9pm`
+
+<a id="session-plan"></a>
+### !session plan
+
+`!session plan <schedule_and_date>`
+
+**Who:** everyone · **Also:** `!session book`
+
+Add another night to a repeating session, like its card's Plan next button (host or game admin).
+
+**Example:** `!session plan Star Citizen night 11/20` (its usual time, unless you give one)
 
 <a id="session-vote"></a>
 ### !session vote

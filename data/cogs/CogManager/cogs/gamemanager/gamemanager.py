@@ -57,7 +57,14 @@ DEFAULT_VOTE_SECONDS = 120
 MIN_VOTE_SECONDS = 15
 MAX_VOTE_SECONDS = 3600
 MAX_VOTE_OPTIONS = 20           # four rows of five buttons
-REMINDER_MINUTES = 15           # heads-up ping before a scheduled session
+REMINDER_MINUTES = 15           # the usual heads-up before a scheduled session (servers can change it)
+REMINDER_CHOICES = [(2880, "2 days"), (2160, "36 hours"), (1440, "1 day"), (60, "1 hour"), (15, "15 min")]
+MIN_REMINDER, MAX_REMINDER = 5, 7 * 24 * 60   # minutes before the start a reminder can be
+MAX_REMINDERS = 4
+MAX_NOTE = 300                  # a reminder note ("Update your drivers…") shown on the card
+REPLACE_WINDOW_HOURS = 12       # sessions starting this close together are "the same night"
+PLAN_CHOICES = 8                # dates offered by Plan next
+MAX_AHEAD_DAYS = 60             # how far ahead a session can be
 SESSION_EXPIRE_HOURS = 12       # sessions end on their own this long after starting (or being created)
 BURIED_AFTER = 10               # messages below a session card before it counts as scrolled away (and moves down)
 HERE_COOLDOWN = 60              # seconds between `games here` moves in one channel
@@ -103,7 +110,8 @@ MEDALS = ["🥇", "🥈", "🥉"]
 NOT_IN_LIBRARY = "❌ **Not in the server's library:** "
 NOTHING_TO_CHANGE = "⚠️ Nothing to change."
 
-RECURRING_POST_HOURS = 24       # a recurring session is posted this long before it starts
+RECURRING_POST_HOURS = 24       # an upcoming session's card is posted this long before it starts (earlier when
+                                # it has an earlier reminder: the card going up is that reminder)
 MAX_RECURRING = 10              # recurring schedules per server
 EVENT_LENGTH_HOURS = 3          # Discord events need an end time when they aren't in a voice channel
 SALE_CHECK_HOURS = 6            # how often wishlisted games' Steam prices are checked
@@ -413,6 +421,60 @@ def fmt_minutes(minutes: Optional[int]) -> str:
     return (f"{hours}h" if hours else "") + (f"{mins}m" if mins else "")
 
 
+# "Game: Star Citizen", "Reminders: 36h, 15m", "Reminder note: Update your drivers", "Replaces: Friday games"
+SETTING_LINE_RE = re.compile(r"\s*(game|reminder note|reminders?|replaces)\s*:\s*(.*?)\s*$", re.I)
+NO_WORDS = ("none", "no", "off", "nothing", "-")
+# A session's (and its schedule's) settings besides its time and event details
+SETTING_KEYS = ("game", "reminders", "reminder_note", "replaces", "replaces_titles")
+
+
+def parse_lead(text: str) -> Optional[int]:
+    """How long before the start, in minutes: '36h', '2 days', '1d 12h', '90m', '15 min'. None if unreadable."""
+    text = re.sub(r"\s*(before|ahead|early)$", "", text.strip().lower())
+    m = re.fullmatch(r"(?:(\d+(?:\.\d+)?)\s*d(?:ays?)?)?\s*(?:(\d+(?:\.\d+)?)\s*h(?:ours?|rs?)?)?\s*"
+                     r"(?:(\d+)\s*m(?:in(?:ute)?s?)?)?", text)
+    if not m or not any(m.groups()):
+        return None
+    return round(float(m.group(1) or 0) * 1440 + float(m.group(2) or 0) * 60) + int(m.group(3) or 0)
+
+
+def parse_reminders(text: str) -> Optional[List[int]]:
+    """'36h, 15m' -> [2160, 15] (latest first); 'none' -> [] (just the start ping). None if any part is unreadable."""
+    if text.strip().lower() in NO_WORDS:
+        return []
+    leads = []
+    for part in re.split(r"\s*(?:,|;|\band\b)\s*", text.strip()):
+        if not part:
+            continue
+        lead = parse_lead(part)
+        if lead is None or not MIN_REMINDER <= lead <= MAX_REMINDER:
+            return None
+        leads.append(lead)
+    leads = sorted(set(leads), reverse=True)
+    return leads[:MAX_REMINDERS] if leads else None
+
+
+def fmt_lead(minutes: int) -> str:
+    """2160 -> '36 hours', 2880 -> '2 days', 15 -> '15 min', 90 -> '1h30m'."""
+    if minutes % 1440 == 0:
+        return ui.plural(minutes // 1440, "day")
+    if minutes % 60 == 0:
+        return ui.plural(minutes // 60, "hour")
+    return f"{minutes} min" if minutes < 60 else fmt_minutes(minutes)
+
+
+def leads_text(leads: List[int]) -> str:
+    """'36 hours and 15 min before', or 'none: just the start ping'."""
+    if not leads:
+        return "None: players are pinged when it starts"
+    return name_list([fmt_lead(m) for m in sorted(leads, reverse=True)], limit=MAX_REMINDERS) + " before"
+
+
+def post_lead(leads: List[int]) -> timedelta:
+    """How long before the start an upcoming session's card goes up: a day, or its earliest reminder if sooner."""
+    return timedelta(minutes=max([RECURRING_POST_HOURS * 60, *leads]))
+
+
 def cover_url(event) -> Optional[str]:
     """The URL of a Discord event's cover image (Discord keeps it, so a card can show it), or None."""
     cover = getattr(event, "cover_image", None)
@@ -567,37 +629,149 @@ def next_weekly(weekday: int, clock: Tuple[int, int], tz: tzinfo, now: datetime)
     return when.astimezone(timezone.utc)
 
 
+NTH_WORDS = {"first": 1, "1st": 1, "second": 2, "2nd": 2, "third": 3, "3rd": 3, "fourth": 4, "4th": 4, "last": -1}
+NTH_NAMES = {1: "First", 2: "Second", 3: "Third", 4: "Fourth", -1: "Last"}
+
+
+def nth_weekday(year: int, month: int, weekday: int, nth: int) -> Optional[date]:
+    """The `nth` (1-4, or -1 for the last) `weekday` of a month."""
+    if nth == -1:
+        last = (date(year + month // 12, month % 12 + 1, 1) - timedelta(days=1))
+        return last - timedelta(days=(last.weekday() - weekday) % 7)
+    first = date(year, month, 1)
+    day = first + timedelta(days=(weekday - first.weekday()) % 7 + 7 * (nth - 1))
+    return day if day.month == month else None
+
+
+def next_monthly(nth: int, weekday: int, clock: Tuple[int, int], tz: tzinfo, after: datetime) -> datetime:
+    """The first `nth` `weekday` of a month at `clock` in `tz` that's later than `after` (UTC)."""
+    local = after.astimezone(tz)
+    year, month = local.year, local.month
+    for _ in range(14):
+        day = nth_weekday(year, month, weekday, nth)
+        if day is not None:
+            when = datetime(day.year, day.month, day.day, *clock, tzinfo=tz)
+            if when > local:
+                return when.astimezone(timezone.utc)
+        year, month = (year + 1, 1) if month == 12 else (year, month + 1)
+    raise ValueError("no such day")
+
+
 def parse_recurring(text: str, tz: tzinfo, now: datetime) -> Optional[dict]:
-    """'every friday 9pm Raid night', 'every other fri 21:00', 'weekly sat 8:30 pm' -> schedule fields, or None."""
+    """
+    'every friday 9pm Raid night', 'every other fri 21:00', 'weekly sat 8:30 pm', 'every first friday 8pm' (monthly:
+    first, second, third, fourth or last) -> schedule fields, or None.
+    """
     tokens = text.split()
-    if not tokens or tokens[0].lower() not in ("every", "weekly"):
+    if not tokens or tokens[0].lower() not in ("every", "weekly", "monthly"):
         return None
-    rest, interval = tokens[1:], 7
-    if rest and rest[0].lower() in ("other", "second"):
+    rest, interval, nth = tokens[1:], 7, None
+    if rest and rest[0].lower() in NTH_WORDS:
+        rest, nth, interval = rest[1:], NTH_WORDS[rest[0].lower()], None
+    elif rest and rest[0].lower() == "other":
         rest, interval = rest[1:], 14
+    elif tokens[0].lower() == "monthly":
+        return None   # which Friday of the month?
     day = rest[0].lower().rstrip(",") if rest else ""
     if day not in WEEKDAYS:
         return None
+    if [w.lower() for w in rest[1:4]] in (["of", "the", "month"], ["of", "every", "month"]):
+        rest = rest[:1] + rest[4:]
     for n in (2, 1):
         clock = _parse_clock("".join(rest[1:1 + n])) if len(rest) >= 1 + n else None
         if clock is not None:
-            return {"weekday": WEEKDAYS[day], "hour": clock[0], "minute": clock[1], "interval": interval,
-                    "title": " ".join(rest[1 + n:]), "first": next_weekly(WEEKDAYS[day], clock, tz, now)}
+            first = (next_monthly(nth, WEEKDAYS[day], clock, tz, now) if nth
+                     else next_weekly(WEEKDAYS[day], clock, tz, now))
+            return {"weekday": WEEKDAYS[day], "hour": clock[0], "minute": clock[1], "interval": interval, "nth": nth,
+                    "title": " ".join(rest[1 + n:]), "first": first}
     return None
 
 
 def advance_occurrence(start: datetime, schedule: dict) -> datetime:
     """The occurrence after `start`, keeping the local time across daylight saving changes."""
     tz = load_zone(schedule["tz"])
+    if schedule.get("nth"):
+        return next_monthly(schedule["nth"], schedule["weekday"], (schedule["hour"], schedule["minute"]), tz,
+                            start + timedelta(hours=1))
     day = start.astimezone(tz).date() + timedelta(days=schedule["interval"])
     return datetime(day.year, day.month, day.day, schedule["hour"], schedule["minute"],
                     tzinfo=tz).astimezone(timezone.utc)
 
 
+def first_occurrence(schedule: dict, after: datetime) -> datetime:
+    """A schedule's first time later than `after`, by its rule (weekly ones count from their next start)."""
+    clock = (schedule["hour"], schedule["minute"])
+    tz = load_zone(schedule["tz"])
+    if schedule.get("nth"):
+        return next_monthly(schedule["nth"], schedule["weekday"], clock, tz, after)
+    anchor = (parse_iso(schedule.get("next_start")) or after).astimezone(tz).date()
+    day = after.astimezone(tz).date()
+    day -= timedelta(days=(day - anchor).days % schedule["interval"])   # a day on the schedule, at or before `after`
+    for _ in range(3):
+        when = datetime(day.year, day.month, day.day, *clock, tzinfo=tz).astimezone(timezone.utc)
+        if when > after:
+            return when
+        day += timedelta(days=schedule["interval"])
+    return when
+
+
+def plan_date(text: str, schedule: dict, now: datetime) -> Optional[datetime]:
+    """A date for Plan next: '11/20', 'friday', 'tomorrow' (at the schedule's usual time), or '11/20 9pm'."""
+    tz = load_zone(schedule["tz"])
+    when = parse_when(text, tz, now)
+    if when is not None or len(text.split()) != 1:
+        return when
+    parsed = _parse_day(text.strip(), now.astimezone(tz).date())
+    if parsed is None:
+        return None
+    day, kind = parsed
+    when = datetime(day.year, day.month, day.day, schedule["hour"], schedule["minute"], tzinfo=tz)
+    if when <= now and kind == "weekday":
+        when += timedelta(days=7)
+    return when.astimezone(timezone.utc)
+
+
+def find_schedule(schedules: List[dict], name: str) -> Optional[dict]:
+    """A schedule by ID or title (exact, else the only one whose title contains it)."""
+    key = name.strip().lower()
+    exact = [s for s in schedules if s["id"] == key or s["title"].lower() == key]
+    partial = [s for s in schedules if key in s["title"].lower()]
+    found = exact or partial
+    return found[0] if len(found) == 1 else None
+
+
 def repeat_label(schedule: dict) -> str:
     clock = datetime(2000, 1, 1, schedule["hour"], schedule["minute"]).strftime("%I:%M %p").lstrip("0")
+    clock = f"{clock.replace(':00', '')} ({schedule['tz']})"
+    day = DAY_NAMES[schedule["weekday"]]
+    if schedule.get("nth"):
+        return f"{NTH_NAMES[schedule['nth']]} {day} of every month at {clock}"
     every = "Every other" if schedule["interval"] == 14 else "Every"
-    return f"{every} {DAY_NAMES[schedule['weekday']]} at {clock.replace(':00', '')} ({schedule['tz']})"
+    return f"{every} {day} at {clock}"
+
+
+def session_leads(session: dict) -> List[int]:
+    """A session's reminders, in minutes before the start (sessions from before they could be set have 15)."""
+    return list(session["reminders"]) if "reminders" in session else [REMINDER_MINUTES]
+
+
+def sent_leads(session: dict) -> Set[int]:
+    """The reminders already sent (or skipped because the session was set up too late for them)."""
+    if "reminders_sent" in session:
+        return set(session["reminders_sent"])
+    return set(session_leads(session)) if session.get("reminded") else set()
+
+
+def passed_leads(leads: List[int], starts: Optional[datetime], now: datetime) -> List[int]:
+    """The reminders whose time has come (a session set up or moved late skips them rather than sending them)."""
+    if starts is None:
+        return list(leads)
+    return [lead for lead in leads if starts - timedelta(minutes=lead) <= now]
+
+
+def is_pending(session: dict) -> bool:
+    """An upcoming session that exists (with its Discord event) but whose card isn't posted yet."""
+    return bool(session.get("pending")) and not session.get("message_id")
 
 
 def rank_score(users: dict, voter_ids: List[str], game_id: str) -> float:
@@ -722,12 +896,13 @@ def game_admin():
 # ==========================================
 
 class SessionButton(discord.ui.DynamicItem[discord.ui.Button],
-                    template=r"gm:s:(?P<action>join|leave|vote|event|end):(?P<sid>[a-z0-9]+)"):
+                    template=r"gm:s:(?P<action>join|leave|vote|event|plan|end):(?P<sid>[a-z0-9]+)"):
     LOOKS = {   # one main action (Join); everything else grey
         "join": ("Join", "➕", discord.ButtonStyle.primary),
         "leave": ("Leave", "➖", discord.ButtonStyle.secondary),
         "vote": ("Start vote", "🗳️", discord.ButtonStyle.secondary),
-        "event": ("Edit event", "✏️", discord.ButtonStyle.secondary),
+        "event": ("Edit", "✏️", discord.ButtonStyle.secondary),   # (the ID says "event": it began as Edit event)
+        "plan": ("Plan next", "📅", discord.ButtonStyle.secondary),
         "end": ("End session", "🏁", discord.ButtonStyle.secondary),
     }
 
@@ -801,10 +976,22 @@ class InstallButton(discord.ui.DynamicItem[discord.ui.Button], template=r"gm:i:(
             await cog.on_install_button(interaction, self.rid)
 
 
-def session_buttons(sid: str, scheduled: bool = False) -> List[discord.ui.Item]:
-    """Join, Leave, Start vote, End session; scheduled sessions (which can have a Discord event) also Edit event."""
-    actions = ("join", "leave", "vote", "event", "end") if scheduled else ("join", "leave", "vote", "end")
+def session_buttons(sid: str, scheduled: bool = False, *, vote: bool = True,
+                    plan: bool = False) -> List[discord.ui.Item]:
+    """
+    Join, Leave, Start vote (not when the game is set ahead), Edit (scheduled sessions: their settings and Discord
+    event), Plan next (special nights from a schedule), End session.
+    """
+    actions = ["join", "leave"] + (["vote"] if vote else []) + (["event"] if scheduled else [])
+    actions += (["plan"] if plan else []) + ["end"]
     return [SessionButton(action, sid) for action in actions]
+
+
+def plans_next(session: dict) -> bool:
+    """Whether a session's card offers Plan next: a special night from a schedule (monthly, or one that replaces
+    another night). Plain weekly nights already come every week."""
+    return bool(session.get("recurring_id")) and bool(
+        session.get("replaces") or "of every month" in (session.get("repeat") or ""))
 
 
 def vote_buttons(vote: dict) -> List[discord.ui.Item]:
@@ -1196,7 +1383,274 @@ class EventDetailsModal(discord.ui.Modal):
         await self.cog.apply_event_details(
             interaction, self.sid, description=self.description.value or "", length=self.length.value or "",
             voice_ids=[c.id for c in self.voice.values], banners=list(self.banner.values),
-            options=list(self.options.values) if self.options else [])
+            options=list(self.options.values) if self.options else [], menu=self.menu)
+
+    menu: Optional["SessionEditMenu"] = None
+
+
+def future_option(schedule: Optional[dict]) -> Optional[discord.ui.CheckboxGroup]:
+    """The "Also use for future sessions" tick box of a repeating session's forms (None for one-off sessions)."""
+    if schedule is None:
+        return None
+    return discord.ui.CheckboxGroup(required=False, min_values=0, max_values=1, options=[discord.CheckboxGroupOption(
+        label="Also use for future sessions", value="future", description=ui.truncate(repeat_label(schedule), 100))])
+
+
+class SettingsModal(discord.ui.Modal):
+    """One of the Edit menu's short forms. Subclasses add their fields and say how to save them (`save`)."""
+
+    def __init__(self, menu: "SessionEditMenu", title: str):
+        super().__init__(title=title)
+        self.menu = menu
+        self.future = future_option(menu.schedule)
+
+    def add_future(self):
+        if self.future is not None:
+            self.add_item(discord.ui.Label(text="Repeating session", component=self.future))
+
+    @property
+    def for_future(self) -> bool:
+        return self.future is not None and "future" in self.future.values
+
+    async def save(self, interaction: discord.Interaction) -> str:
+        raise NotImplementedError
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer()   # the menu's message is redrawn below
+        await self.menu.saved(interaction, await self.save(interaction))
+
+
+class TitleTimeModal(SettingsModal):
+    def __init__(self, menu: "SessionEditMenu"):
+        super().__init__(menu, "Title and time")
+        session = menu.session
+        self.name = discord.ui.TextInput(max_length=100, default=session["title"][:100])
+        self.add_item(discord.ui.Label(text="Title", component=self.name))
+        starts = parse_iso(session.get("starts_at"))
+        self.when = discord.ui.TextInput(required=False, max_length=40, placeholder="friday 9pm, 11/20 8pm",
+                                         default=clock_text(starts, menu.tz) if starts else None)
+        self.add_item(discord.ui.Label(text="Starts", component=self.when,
+                                       description=f"In your timezone ({menu.tz_name})"))
+        self.add_future()
+
+    async def save(self, interaction: discord.Interaction) -> str:
+        return await self.menu.cog.save_title_time(interaction.guild, interaction.user, self.menu.sid,
+                                                   self.name.value, self.when.value or "", self.for_future)
+
+
+class GameModal(SettingsModal):
+    def __init__(self, menu: "SessionEditMenu"):
+        super().__init__(menu, "Game")
+        game = menu.session.get("game")
+        self.game = discord.ui.TextInput(required=False, max_length=100, default=game["name"] if game else None,
+                                         placeholder="Empty: vote on it as usual")
+        self.add_item(discord.ui.Label(text="Game", component=self.game,
+                                       description="Set the game ahead (no vote), from the server library"))
+        self.add_future()
+
+    async def save(self, interaction: discord.Interaction) -> str:
+        return await self.menu.cog.save_game(interaction.guild, interaction.user, self.menu.sid,
+                                             self.game.value or "", self.for_future)
+
+
+class RemindersModal(SettingsModal):
+    def __init__(self, menu: "SessionEditMenu"):
+        super().__init__(menu, "Reminders")
+        leads = session_leads(menu.session)
+        presets = [minutes for minutes, _ in REMINDER_CHOICES]
+        self.choices = discord.ui.CheckboxGroup(required=False, min_values=0, max_values=len(REMINDER_CHOICES),
+                                                options=[discord.CheckboxGroupOption(label=f"{label} before",
+                                                                                     value=str(minutes),
+                                                                                     default=minutes in leads)
+                                                         for minutes, label in REMINDER_CHOICES])
+        self.add_item(discord.ui.Label(text="Remind players", component=self.choices,
+                                       description="None ticked: they're pinged when it starts"))
+        other = [lead for lead in leads if lead not in presets]
+        self.other = discord.ui.TextInput(required=False, max_length=40, placeholder="3h, 2 days",
+                                          default=", ".join(fmt_lead(m) for m in other) or None)
+        self.add_item(discord.ui.Label(text="Other times", component=self.other,
+                                       description="How long before the start, separated by commas"))
+        self.note = discord.ui.TextInput(style=discord.TextStyle.paragraph, required=False, max_length=MAX_NOTE,
+                                         default=menu.session.get("reminder_note") or None,
+                                         placeholder="Update your drivers, patch the game…")
+        self.add_item(discord.ui.Label(text="Reminder note", component=self.note,
+                                       description="Shown on the card, so every reminder carries it"))
+        self.add_future()
+
+    async def save(self, interaction: discord.Interaction) -> str:
+        leads = [int(value) for value in self.choices.values]
+        if (self.other.value or "").strip():
+            extra = parse_reminders(self.other.value)
+            if extra is None:
+                return ui.line(ui.ASK, f"I couldn't use **{ui.truncate(self.other.value, 30)}** as reminder times.",
+                               hint="Try 3h or 2 days, from 5 minutes to 7 days before.")
+            leads += extra
+        leads = sorted(set(leads), reverse=True)
+        if len(leads) > MAX_REMINDERS:
+            return ui.line(ui.ASK, f"That's {len(leads)} reminders.", hint=f"Pick up to {MAX_REMINDERS}.")
+        return await self.menu.cog.save_settings(interaction.guild, interaction.user, self.menu.sid,
+                                                 {"reminders": leads,
+                                                  "reminder_note": (self.note.value or "").strip() or None},
+                                                 self.for_future, "Reminders saved.")
+
+
+class ReplacesModal(SettingsModal):
+    def __init__(self, menu: "SessionEditMenu", schedules: List[dict]):
+        super().__init__(menu, "Replaces")
+        current = menu.session.get("replaces") or []
+        self.choices = discord.ui.CheckboxGroup(
+            required=False, min_values=0, max_values=len(schedules),
+            options=[discord.CheckboxGroupOption(label=ui.truncate(s["title"], 100), value=s["id"],
+                                                 description=ui.truncate(repeat_label(s), 100),
+                                                 default=s["id"] in current) for s in schedules])
+        self.add_item(discord.ui.Label(text="Replaces these on the same night", component=self.choices,
+                                       description="Their session that night is off (and comes back if this is "
+                                                   "cancelled)"))
+        self.add_future()
+
+    async def save(self, interaction: discord.Interaction) -> str:
+        return await self.menu.cog.save_replaces(interaction.guild, interaction.user, self.menu.sid,
+                                                 list(self.choices.values), self.for_future)
+
+
+def clock_text(when: datetime, tz: tzinfo) -> str:
+    """A time as the Edit menu's form shows it, and parse_when reads it back: `11/20 8:00pm`."""
+    local = when.astimezone(tz)
+    return f"{local.month}/{local.day} " + local.strftime("%I:%M%p").lstrip("0").lower()
+
+
+class SessionEditMenu(OwnerOnlyCard):
+    """
+    The card's Edit button: everything about a session in one private card (its settings and Discord event),
+    with a short form for each group. On a repeating session each form can also change future ones.
+    """
+
+    expired_note = "Expired. Press Edit on the card again."
+
+    def __init__(self, cog: "GameManager", user_id: int, session: dict, schedule: Optional[dict],
+                 tz: tzinfo, tz_name: str):
+        super().__init__(user_id, timeout=LIST_PRIVATE_TIMEOUT)
+        self.cog, self.sid, self.session, self.schedule = cog, session["id"], session, schedule
+        self.tz, self.tz_name = tz, tz_name
+        self.note: Optional[str] = None
+        self.redraw()
+
+    def build(self) -> discord.ui.Container:
+        s, event = self.session, self.session.get("event") or {}
+        starts = parse_iso(s.get("starts_at"))
+        rows = [
+            ("Title", s["title"]),
+            ("Starts", stamp(starts) if starts else "No set time"),
+            ("Repeats", s.get("repeat") or "No"),
+            ("Game", s["game"]["name"] if s.get("game") else "Picked by vote"),
+            ("Reminders", leads_text(session_leads(s))),
+            ("Reminder note", ui.truncate(s["reminder_note"], 80) if s.get("reminder_note") else "None"),
+            ("Replaces", name_list(s["replaces_titles"]) if s.get("replaces_titles") else "Nothing"),
+            ("Description", ui.truncate(event["description"], 80) if event.get("description") else "None"),
+            ("Length", fmt_minutes(event.get("minutes")) or "The usual"),
+            ("Voice channel", f"<#{event['voice_id']}>" if event.get("voice_id") else "The server's usual one"),
+            ("Banner", bool(event.get("banner"))),
+        ]
+        buttons = [make_button("Title & time", self._open(TitleTimeModal)),
+                   make_button("Event details", self._event), make_button("Game", self._open(GameModal)),
+                   make_button("Reminders", self._open(RemindersModal)), make_button("Replaces", self._replaces)]
+        more = [make_button("Plan next", self._plan)] if s.get("recurring_id") else None
+        footer = ("Each form can also change future sessions · " if self.schedule else "") + \
+            "Changes show on the card and the Discord event"
+        return ui.card(self.note, ui.settings_text(rows), ui.SEPARATOR, buttons, more,
+                       title=f"🎮 {ui.truncate(s['title'], 80)} settings", color=ui.BRAND, footer=footer)
+
+    async def saved(self, interaction: discord.Interaction, line: str):
+        """After a form: show what happened above the (re-read) settings."""
+        self.session = (await self.cog.config.guild(interaction.guild).play_sessions()).get(self.sid, self.session)
+        if self.session.get("recurring_id"):
+            self.schedule = (await self.cog.config.guild(interaction.guild).recurring()).get(
+                self.session["recurring_id"])
+        self.note = line
+        self.redraw()
+        try:
+            await interaction.edit_original_response(view=self, allowed_mentions=NO_PING)
+        except discord.HTTPException:
+            await interaction.followup.send(line, ephemeral=True)
+
+    def _open(self, modal_type):
+        async def callback(interaction: discord.Interaction):
+            await interaction.response.send_modal(modal_type(self))
+        return callback
+
+    async def _event(self, interaction: discord.Interaction):
+        modal = EventDetailsModal(self.cog, self.session, self.schedule)
+        modal.menu = self
+        await interaction.response.send_modal(modal)
+
+    async def _replaces(self, interaction: discord.Interaction):
+        schedules = [s for s in (await self.cog.config.guild(interaction.guild).recurring()).values()
+                     if s["id"] != self.session.get("recurring_id")]
+        if not schedules:
+            return await ui.respond(interaction, ui.line(ui.ASK, "There are no other repeating sessions to replace."))
+        await interaction.response.send_modal(ReplacesModal(self, schedules[:10]))
+
+    async def _plan(self, interaction: discord.Interaction):
+        await self.cog.open_plan_next(interaction, self.session)
+
+
+class ReplaceAskView(OwnerOnlyCard):
+    """A new session or schedule falls on another schedule's night: should it replace that night?"""
+
+    expired_note = "Expired. Both stay on; change it with the card's Edit button."
+
+    def __init__(self, cog: "GameManager", user_id: int, text: str, rids: List[str], *,
+                 sid: Optional[str] = None, rid: Optional[str] = None):
+        super().__init__(user_id, timeout=600)
+        self.cog, self.text, self.rids, self.sid, self.rid = cog, text, rids, sid, rid
+        self.add_item(ui.card(ui.line(ui.WARN, text),
+                              [make_button("Replace it", self._replace, style=discord.ButtonStyle.primary),
+                               make_button("Keep both", self._keep)],
+                              title="🎮 Same night", color=ui.ATTENTION))
+
+    async def _replace(self, interaction: discord.Interaction):
+        self.stop()
+        await interaction.response.defer()
+        titles = await self.cog.set_replaces(interaction.guild, self.rids, sid=self.sid, rid=self.rid)
+        await interaction.edit_original_response(view=final_card(
+            ui.line(ui.DONE, f"It replaces {name_list([f'**{t}**' for t in titles])} that night.",
+                    hint="If it's cancelled, the regular night comes back."), title="🎮 Same night"),
+            allowed_mentions=NO_PING)
+
+    async def _keep(self, interaction: discord.Interaction):
+        self.stop()
+        await interaction.response.edit_message(view=final_card(
+            ui.line(ui.DONE, "Both stay on.", hint="Change it any time with the card's Edit button."),
+            title="🎮 Same night"), allowed_mentions=NO_PING)
+
+
+class PlanNextView(OwnerOnlyCard):
+    """Plan next: pick a date for another of this schedule's nights (the card and event follow as usual)."""
+
+    expired_note = "Expired. Nothing was planned."
+
+    def __init__(self, cog: "GameManager", user_id: int, schedule: dict, dates: List[datetime]):
+        super().__init__(user_id, timeout=LIST_PRIVATE_TIMEOUT)
+        self.cog, self.schedule = cog, schedule
+        tz = load_zone(schedule["tz"])
+        select = discord.ui.Select(placeholder="Pick a date", options=[
+            discord.SelectOption(label=d.astimezone(tz).strftime("%A, %B ") + str(d.astimezone(tz).day),
+                                 value=d.isoformat(),
+                                 description=clock_text(d, tz).split(" ")[1] + f" ({schedule['tz']})")
+            for d in dates])
+        select.callback = self._picked
+        self.select = select
+        self.add_item(ui.card(f"Another **{schedule['title']}** night. Its Discord event shows right away, and the "
+                              "card is posted before it like the others.", [select],
+                              title="🎮 Plan next", color=ui.BRAND))
+
+    async def _picked(self, interaction: discord.Interaction):
+        self.stop()
+        await interaction.response.defer()
+        line = await self.cog.book_night(interaction.guild, interaction.user, self.schedule["id"],
+                                         parse_iso(self.select.values[0]))
+        await interaction.edit_original_response(view=final_card(line, title="🎮 Plan next"),
+                                                 allowed_mentions=NO_PING)
 
 
 PROFILE_STEPS = ("timezone", "owned", "installed", "favorites", "wishlist")
@@ -1458,7 +1912,8 @@ class GameManager(commands.Cog):
             admin_role=None,
             member_add=False,   # members may add new games to the library without a request
             timezone=None,      # default timezone for session times
-            recurring={},       # weekly schedules that post sessions ahead of time
+            reminders=[REMINDER_MINUTES],   # default reminders for new sessions (minutes before the start)
+            recurring={},       # weekly and monthly schedules that make sessions ahead of time
             events=True,        # also list scheduled sessions in the server's Discord events
             event_channel=None, # voice channel for those events (else they're "external" events)
             wishlist={},        # Steam app ID -> {appid, name, users, price, alerted}
@@ -2699,6 +3154,14 @@ class GameManager(commands.Cog):
         count = len(session["participants"])
         who_main = f"**{count} {'played' if ended else 'playing'}**" if count else "**Nobody yet**"
         blocks.append(ui.two_line(who_main, ", ".join(players) or None))
+        if session.get("game"):   # set ahead (a Star Citizen night): no vote
+            blocks.append(ui.two_line(f"**{'Played' if ended else 'Playing'} {session['game']['name']}**",
+                                      None if ended else "Set ahead, so there's no vote"))
+        if session.get("reminder_note") and not ended:
+            blocks.append(ui.two_line("**Before you play**", session["reminder_note"]))
+        if session.get("replaces_titles") and upcoming:
+            blocks.append(ui.two_line(f"**Replaces {name_list(session['replaces_titles'])}**",
+                                      "That night's regular session is off"))
         title = f"🎮 {session['title']}"
         banner = (session.get("event") or {}).get("cover_url")   # the Discord event's banner, full width on top
 
@@ -2728,8 +3191,9 @@ class GameManager(commands.Cog):
             blocks.append(ui.two_line(f"🏆 **{winners[-1]}** won the {'last ' if earlier else ''}vote.",
                                       f"Earlier: {played_text(earlier)}" if earlier else None))
         if ended:
-            return ui.CardView(ui.card(*blocks, title=title, color=ui.MUTED, footer="This session has ended.",
-                                       banner=banner))
+            footer = (f"Replaced by {session['replaced_by']} this time." if session.get("replaced_by")
+                      else "This session has ended.")
+            return ui.CardView(ui.card(*blocks, title=title, color=ui.MUTED, footer=footer, banner=banner))
         if session.get("vote_id"):   # a vote posted as its own card (sessions from before Phase 4 / old votes)
             blocks.append("🗳️ Voting now: pick a game on the vote below.")
         if tz_hint:   # the host's time may have been read in the wrong timezone: that's the one hint until it starts
@@ -2737,15 +3201,18 @@ class GameManager(commands.Cog):
         else:
             notes = []
             if upcoming:
-                notes.append(f"reminder {REMINDER_MINUTES} min before" if not session.get("reminded")
-                             else "starting soon")
+                left = [lead for lead in session_leads(session) if lead not in sent_leads(session)]
+                notes.append(f"{'reminder' if len(left) == 1 else 'reminders'} {leads_text(left)}" if left
+                             else "players are pinged when it starts")
             if session.get("event_id"):
                 notes.append("on the server's events")
-            if not (starts or session.get("vote_id") or session.get("winner") or session.get("vote_result")):
+            if not (starts or session.get("vote_id") or session.get("winner") or session.get("vote_result")
+                    or session.get("game")):
                 notes.append("when everyone's in, the host presses Start vote")
             footer = details(*notes) or None
+        buttons = session_buttons(session["id"], bool(starts), vote=not session.get("game"), plan=plans_next(session))
         return ui.CardView(ui.card(*blocks, ui.SEPARATOR if result_block else None, result_block,
-                                   ui.SEPARATOR, session_buttons(session["id"], bool(starts)),
+                                   ui.SEPARATOR, buttons,
                                    title=title, color=ui.SUCCESS, footer=footer, banner=banner))
 
     def session_embed(self, session: dict, ended: bool = False) -> discord.Embed:
@@ -2805,21 +3272,29 @@ class GameManager(commands.Cog):
             details, text = await self.details_from_message(target, text)
             if details is None:
                 return
+        details = dict(details)
+        settings = await self.resolve_settings(target, details.pop("settings", None))
+        if settings is None:
+            return
         tz, tz_name, personal = await self.timezone_for(member)
         now = utcnow()
-        if (text or "").strip().lower().split(" ")[0] in ("every", "weekly"):
-            return await self.create_recurring(target, text, details)
+        if (text or "").strip().lower().split(" ")[0] in ("every", "weekly", "monthly"):
+            return await self.create_recurring(target, text, details, settings)
         starts_at, title = split_when(text or "", tz, now)
         if starts_at is not None and starts_at < now - timedelta(minutes=1):
             return await self.reply(target, content="⚠️ That time has already passed. Try a later time.", ephemeral=True)
-        if starts_at is not None and starts_at > now + timedelta(days=60):
-            return await self.reply(target, content="⚠️ Sessions can be scheduled up to 60 days ahead.", ephemeral=True)
+        if starts_at is not None and starts_at > now + timedelta(days=MAX_AHEAD_DAYS):
+            return await self.reply(target, ephemeral=True,
+                                    content=f"⚠️ Sessions can be scheduled up to {MAX_AHEAD_DAYS} days ahead.")
         title = (title.strip() or f"{member.display_name}'s game session")[:200]
         note = None
         if starts_at and not personal:   # a hint in the card, instead of a message of its own
             note = (f"Time read as **{tz_name}**: the host hasn't set a timezone. If that's wrong, set one with "
                     f"{await self.cmd(guild, 'games timezone <zone>')} and start the session again.")
-        session = await self.post_session(guild, channel, member, title, starts_at, tz_note=note, details=details)
+        session = await self.post_session(guild, channel, member, title, starts_at, tz_note=note, details=details,
+                                          settings=settings)
+        if starts_at:
+            await self.settle_replacements(target, settings, session=session)
         missed = details and not starts_at
         if missed:
             await self.reply(target, ephemeral=True, content=ui.line(
@@ -2833,26 +3308,42 @@ class GameManager(commands.Cog):
 
     async def post_session(self, guild: discord.Guild, channel, host: discord.Member, title: str,
                            starts_at: Optional[datetime], schedule: Optional[dict] = None, *,
-                           tz_note: Optional[str] = None, details: Optional[dict] = None) -> dict:
+                           tz_note: Optional[str] = None, details: Optional[dict] = None,
+                           settings: Optional[dict] = None, pending: bool = False, booked: bool = False) -> dict:
         """
         Post a session card (and its Discord event when it has a start time). Returns the session. `tz_note` is a
         hint shown in the card until the session starts (the time was read in a timezone the host didn't choose).
         `details` are the event's (a repeating session's come from its schedule); new banner bytes in
-        "banner_data" are saved under the session's ID.
+        "banner_data" are saved under the session's ID. `settings` are its game, reminders, reminder note and
+        what it replaces (a repeating session's come from its schedule; reminders default to the server's).
+        `pending` makes the session and its event now and posts the card later (session_loop: a day ahead, or at
+        its earliest reminder). `booked` marks a date added with Plan next, on top of its schedule's own.
         """
         now = utcnow()
         sid = generate_id()
         event_details = self.store_details(sid, details if details is not None
                                            else (schedule or {}).get("event"))
+        settings = dict(settings or {})
+        if schedule is not None:
+            settings = {**{key: schedule[key] for key in SETTING_KEYS if key in schedule}, **settings}
+        if "reminders" not in settings:
+            settings["reminders"] = list(await self.config.guild(guild).reminders())
         session = {
             "id": sid, "title": title, "host_id": str(host.id), "participants": [str(host.id)],
             "channel_id": channel.id, "message_id": None, "created_at": now.isoformat(),
             "starts_at": starts_at.isoformat() if starts_at else None,
-            # Skip the 15-minute heads-up when the session starts sooner than that anyway.
-            "reminded": bool(starts_at and starts_at - now <= timedelta(minutes=REMINDER_MINUTES)),
+            "reminders": settings["reminders"],   # minutes before the start, latest first
+            # A reminder whose time has already come when the session is set up is skipped, not sent.
+            "reminders_sent": passed_leads(settings["reminders"], starts_at, now) if starts_at else [],
+            "reminder_note": settings.get("reminder_note"),
+            "game": settings.get("game"),               # {id, name} when it's set ahead: no vote
+            "replaces": list(settings.get("replaces") or []),     # schedule IDs whose session that night is off
+            "replaces_titles": list(settings.get("replaces_titles") or []),
             "started": False, "vote_id": None, "winner": None, "event_id": None,
             "recurring_id": schedule["id"] if schedule else None,
             "repeat": repeat_label(schedule) if schedule else None,
+            "booked": booked,
+            "pending": pending,   # its card isn't posted yet
             "card": True,   # posted as a card (older sessions are embeds and are still edited as embeds)
             "tz_note": tz_note,
             "pings": [],          # IDs of this session's ping lines (in its channel), deleted when it ends
@@ -2862,15 +3353,44 @@ class GameManager(commands.Cog):
         }
         async with self.config.guild(guild).play_sessions() as sessions:
             sessions[sid] = session
-        message = await self.send_card(channel, self.session_card(session, guild=guild))   # names the host, no ping
-        session["message_id"] = message.id
+        if not pending:
+            message = await self.send_card(channel, self.session_card(session, guild=guild))   # names the host, no ping
+            session["message_id"] = message.id
         session["event_id"] = await self.create_event(guild, session, host)
         async with self.config.guild(guild).play_sessions() as sessions:
             if sid in sessions:
-                sessions[sid].update(message_id=message.id, event_id=session["event_id"], event=session["event"])
-        if session["event_id"]:
+                sessions[sid].update(message_id=session["message_id"], event_id=session["event_id"],
+                                     event=session["event"])
+        if session["event_id"] and not pending:
             await self.refresh_session_message(guild, session)
         return session
+
+    async def post_pending(self, guild: discord.Guild, session: dict, ping: bool) -> Optional[dict]:
+        """
+        Post the card of a session made ahead of time. With `ping`, the card is a reminder: it pings everyone who
+        joined (by pressing Interested on the event, or `games join`). Its event then links to the card.
+        """
+        channel = guild.get_channel_or_thread(session["channel_id"])
+        if channel is None:
+            return None
+        current = dict(session, pending=False)
+        try:
+            message = await self.send_card(channel, await self.session_card_now(guild, current),
+                                           allowed_mentions=pings(current["participants"]) if ping else None)
+        except discord.HTTPException as e:
+            log.info("Couldn't post session %s: %s", session["id"], e)
+            return None
+        async with self.config.guild(guild).play_sessions() as sessions:
+            saved = sessions.get(session["id"])
+            if saved is not None:
+                saved.update(message_id=message.id, pending=False)
+                current = dict(saved)
+        if saved is None:   # it ended meanwhile
+            await self._delete_messages(guild, channel.id, [message.id])
+            return None
+        if current.get("event_id"):
+            await self.push_event(guild, current)   # the event's description now links to the card
+        return current
 
     # ---------- Discord events ----------
 
@@ -2976,17 +3496,36 @@ class GameManager(commands.Cog):
     async def details_from_message(self, target: Target, text: Optional[str]) -> Tuple[Optional[dict], Optional[str]]:
         """
         Event details from a text command: lines after the first are the description, except a "Length: 3h" line,
-        which is how long the event runs. An attached image is the banner, and a mentioned voice channel (taken out
-        of the text) is the place. Returns (details, the first line without the mention), or (None, None) after
-        explaining a bad banner or length.
+        which is how long the event runs, and the setting lines "Game:", "Reminders:", "Reminder note:" and
+        "Replaces:" (kept under "settings", unchecked: resolve_settings reads them). An attached image is the
+        banner, and a mentioned voice channel (taken out of the text) is the place. Returns (details, the first
+        line without the mention), or (None, None) after explaining a bad banner, length or reminder.
         """
         if isinstance(target, discord.Interaction):
             return {}, text
         guild = target.guild
         details: dict = {}
         first, _, rest = (text or "").strip().partition("\n")
-        description = []
+        description, settings = [], {}
         for line in rest.split("\n"):
+            setting = SETTING_LINE_RE.match(line)
+            if setting is not None:
+                name, value = setting.group(1).lower(), setting.group(2)
+                if name in ("reminder", "reminders"):
+                    leads = parse_reminders(value)
+                    if leads is None:
+                        await self.reply(target, content=ui.line(
+                            ui.ASK, f"I couldn't use **{ui.truncate(value, 30)}** as reminders.",
+                            hint="Try Reminders: 36h, 15m (up to 4, from 5 minutes to 7 days before), or none."))
+                        return None, None
+                    settings["reminders"] = leads
+                elif name == "reminder note":
+                    settings["reminder_note"] = value[:MAX_NOTE] or None
+                elif name == "game":
+                    settings["game_name"] = value
+                else:
+                    settings["replaces_names"] = value
+                continue
             match = LENGTH_LINE_RE.match(line)
             minutes = parse_length(match.group(2)) if match else None
             if match is None or (minutes is None and not match.group(1)):   # "Duration of the raid…" is description
@@ -3018,34 +3557,212 @@ class GameManager(commands.Cog):
                 await self.reply(target, content=problem)
                 return None, None
             details["banner_data"] = data
+        if settings:
+            details["settings"] = settings
         return details, text
 
-    async def open_event_form(self, interaction: discord.Interaction, session: dict):
-        """The Edit event button: the host (or a game admin) gets the event details form."""
+    async def resolve_settings(self, target: Target, raw: Optional[dict]) -> Optional[dict]:
+        """
+        Check typed settings: the game against the library, and what it replaces against the server's schedules
+        (by name or ID; "none" for nothing, which also skips the question). Returns the settings to save
+        ({game, reminders, reminder_note, replaces, replaces_titles}, only those given), or None after saying
+        what's wrong.
+        """
+        guild = who(target)[0]
+        raw = dict(raw or {})
+        settings = {key: raw[key] for key in ("reminders", "reminder_note") if key in raw}
+        if raw.get("game_name") is not None:
+            name = raw["game_name"].strip()
+            if name and name.lower() not in NO_WORDS:
+                game, candidates = resolve_game(await self.config.guild(guild).games(), name)
+                if game is None:
+                    await self.reply(target, ephemeral=True,
+                                     content=NOT_IN_LIBRARY + describe_unresolved(name, candidates))
+                    return None
+                settings["game"] = {"id": game["id"], "name": game["name"]}
+            else:
+                settings["game"] = None
+        if raw.get("replaces_names") is not None:
+            names = [n.strip() for n in re.split(r"\s*[,;]\s*", raw["replaces_names"]) if n.strip()]
+            schedules = list((await self.config.guild(guild).recurring()).values())
+            rids, titles = [], []
+            for name in names:
+                if name.lower() in NO_WORDS:
+                    continue
+                schedule = find_schedule(schedules, name)
+                if schedule is None:
+                    await self.reply(target, ephemeral=True, content=ui.line(
+                        ui.ASK, f"There's no repeating session called **{ui.truncate(name, 60)}**.",
+                        hint=f"See them with {await self.cmd(guild, 'games recurring')}."))
+                    return None
+                rids.append(schedule["id"])
+                titles.append(schedule["title"])
+            settings["replaces"], settings["replaces_titles"] = rids, titles
+        return settings
+
+    # ---------- the Edit menu ----------
+
+    async def open_edit_menu(self, interaction: discord.Interaction, session: dict):
+        """The card's Edit button: the host (or a game admin) gets every setting of the session, privately."""
         if not parse_iso(session.get("starts_at")):
-            return await ui.respond(interaction, ui.line(ui.WARN, "Only a session with a start time has an event."))
+            return await ui.respond(interaction, ui.line(ui.WARN, "Only a session with a start time can be edited.",
+                                                         hint="Start one with a time to set reminders and an event."))
         schedule = None
         if session.get("recurring_id"):
             schedule = (await self.config.guild(interaction.guild).recurring()).get(session["recurring_id"])
-        await interaction.response.send_modal(EventDetailsModal(self, session, schedule))
+        tz, tz_name, _ = await self.timezone_for(interaction.user)
+        menu = SessionEditMenu(self, interaction.user.id, session, schedule, tz, tz_name)
+        await self.send_card(interaction, menu, ephemeral=True)
+        menu.message = interaction
 
-    async def apply_event_details(self, interaction: discord.Interaction, sid: str, *, description: str, length: str,
-                                  voice_ids: List[int], banners: List[discord.Attachment], options: List[str]):
-        """Save the Edit event form, update the Discord event (or make it), and redraw the card."""
-        guild, member = interaction.guild, interaction.user
+    async def _editable(self, guild: discord.Guild, member: discord.Member, sid: str) -> Tuple[Optional[dict], str]:
+        """(the session, "") if `member` may change it, else (None, a line saying why not)."""
         session = (await self.config.guild(guild).play_sessions()).get(sid)
         if session is None:
-            return await ui.respond(interaction, "⚠️ This session has ended.")
+            return None, "⚠️ This session has ended."
         if not await self.can_manage(member, session["host_id"]):
-            return await ui.respond(interaction, "🔒 Only the host or a game admin can do that.")
+            return None, "🔒 Only the host or a game admin can do that."
+        return session, ""
+
+    async def save_settings(self, guild: discord.Guild, member: discord.Member, sid: str, changes: dict,
+                            future: bool, done: str) -> str:
+        """
+        Save a session's game, reminders, reminder note or what it replaces. With `future`, its schedule (so later
+        sessions) and its other sessions not started yet get them too. Returns a line for the person.
+        """
+        session, problem = await self._editable(guild, member, sid)
+        if session is None:
+            return problem
+        rid = session.get("recurring_id") if future else None
+        now = utcnow()
+        changed, dropped = [], {}
+        async with self.config.guild(guild).play_sessions() as sessions:
+            for s in sessions.values():
+                if s["id"] == sid or (rid and s.get("recurring_id") == rid and not s.get("started")):
+                    if "replaces" in changes:   # nights it no longer replaces come back
+                        dropped[s["id"]] = [r for r in s.get("replaces") or [] if r not in changes["replaces"]]
+                    s.update(changes)
+                    if "reminders" in changes:   # reminders already due aren't sent late
+                        s["reminders_sent"] = passed_leads(changes["reminders"], parse_iso(s.get("starts_at")), now)
+                        s.pop("reminded", None)
+                    changed.append(dict(s))
+        if rid:
+            async with self.config.guild(guild).recurring() as recurring:
+                if rid in recurring:
+                    recurring[rid].update(changes)
+        for s in changed:
+            if "replaces" in changes:
+                await self.apply_replacements(guild, s)
+                starts = parse_iso(s.get("starts_at"))
+                if dropped.get(s["id"]) and not s.get("started") and starts and starts > now:
+                    await self._restore_replaced(guild, {**s, "replaces": dropped[s["id"]]})
+            await self.refresh_session_message(guild, s)
+        return ui.line(ui.DONE, done + (" Future sessions use it too." if rid else ""))
+
+    async def save_game(self, guild: discord.Guild, member: discord.Member, sid: str, name: str,
+                        future: bool) -> str:
+        """The Game form: set the game ahead (no vote), or empty to vote as usual."""
+        game = None
+        if name.strip():
+            game, candidates = resolve_game(await self.config.guild(guild).games(), name)
+            if game is None:
+                return NOT_IN_LIBRARY + describe_unresolved(name, candidates)
+        session = (await self.config.guild(guild).play_sessions()).get(sid) or {}
+        if game is not None and session.get("vote_id"):
+            return ui.line(ui.WARN, "A vote is running.", hint="Set the game after it ends.")
+        return await self.save_settings(guild, member, sid, {"game": {"id": game["id"], "name": game["name"]}
+                                                             if game else None}, future,
+                                        f"Playing **{game['name']}**: no vote." if game else
+                                        "No set game: the host starts a vote as usual.")
+
+    async def save_replaces(self, guild: discord.Guild, member: discord.Member, sid: str, rids: List[str],
+                            future: bool) -> str:
+        """The Replaces form: which schedules' nights this one takes over."""
+        schedules = await self.config.guild(guild).recurring()
+        rids = [r for r in rids if r in schedules]
+        titles = [schedules[r]["title"] for r in rids]
+        line = await self.save_settings(guild, member, sid, {"replaces": rids, "replaces_titles": titles}, future,
+                                        f"Replaces {name_list([f'**{t}**' for t in titles])} on the same night."
+                                        if titles else "Replaces nothing.")
+        return line
+
+    async def save_title_time(self, guild: discord.Guild, member: discord.Member, sid: str, title: str,
+                              when: str, future: bool) -> str:
+        """The Title and time form. A new time moves the reminders and the Discord event; with `future`, the
+        schedule's title and its day and time of day change too."""
+        session, problem = await self._editable(guild, member, sid)
+        if session is None:
+            return problem
+        title = (title.strip() or session["title"])[:200]
+        starts = parse_iso(session.get("starts_at"))
+        new_start = starts
+        if when.strip():
+            tz, _, _ = await self.timezone_for(member)
+            new_start = parse_when(when, tz, utcnow())
+            if new_start is None:
+                return ui.line(ui.ASK, f"I couldn't read the time **{ui.truncate(when, 40)}**.",
+                               hint="Try friday 9pm, 11/20 8pm or tomorrow 8:30pm.")
+        moved = new_start is not None and starts is not None and abs((new_start - starts).total_seconds()) >= 60
+        if moved and session.get("started"):
+            return ui.line(ui.WARN, "This session has already started, so its time can't change.")
+        if moved and not utcnow() < new_start < utcnow() + timedelta(days=MAX_AHEAD_DAYS):
+            return ui.line(ui.ASK, "Pick a time in the next 60 days.")
+        rid = session.get("recurring_id") if future else None
+        async with self.config.guild(guild).play_sessions() as sessions:
+            saved = sessions.get(sid)
+            if saved is None:
+                return "⚠️ This session has ended."
+            saved["title"] = title
+            if moved:
+                saved["starts_at"] = new_start.isoformat()
+                saved["reminders_sent"] = passed_leads(session_leads(saved), new_start, utcnow())
+                saved.pop("reminded", None)
+            session = dict(saved)
+        if rid:
+            async with self.config.guild(guild).recurring() as recurring:
+                schedule = recurring.get(rid)
+                if schedule is not None:
+                    schedule["title"] = title
+                    if moved:
+                        local = new_start.astimezone(load_zone(schedule["tz"]))
+                        schedule.update(weekday=local.weekday(), hour=local.hour, minute=local.minute)
+                        schedule["next_start"] = first_occurrence(schedule, new_start + timedelta(hours=1)).isoformat()
+                        session["repeat"] = repeat_label(schedule)
+            async with self.config.guild(guild).play_sessions() as sessions:
+                if sid in sessions:
+                    sessions[sid]["repeat"] = session.get("repeat")
+        problem = await self.push_event(guild, session) if session.get("event_id") else None
+        await self.refresh_session_message(guild, session)
+        line = ui.line(ui.DONE, "Saved." + (" Future sessions use it too." if rid else ""))
+        return ui.line(ui.WARN, "Saved, but " + problem) if problem else line
+
+    async def apply_event_details(self, interaction: discord.Interaction, sid: str, *, description: str, length: str,
+                                  voice_ids: List[int], banners: List[discord.Attachment], options: List[str],
+                                  menu: Optional["SessionEditMenu"] = None):
+        """The Event details form: save it, then redraw the Edit menu (or answer privately)."""
+        if menu is not None:
+            await interaction.response.defer()
+        else:
+            await interaction.response.defer(ephemeral=True, thinking=True)   # banners take a moment to download
+        line = await self.save_event_details(interaction.guild, interaction.user, sid, description=description,
+                                             length=length, voice_ids=voice_ids, banners=banners, options=options)
+        if menu is not None:
+            return await menu.saved(interaction, line)
+        await interaction.followup.send(line, ephemeral=True)
+
+    async def save_event_details(self, guild: discord.Guild, member: discord.Member, sid: str, *, description: str,
+                                 length: str, voice_ids: List[int], banners: List[discord.Attachment],
+                                 options: List[str]) -> str:
+        """Save event details, update the Discord event (or make it), and redraw the card. Returns a line."""
+        session, problem = await self._editable(guild, member, sid)
+        if session is None:
+            return problem
         minutes = None
         if length.strip():
             minutes = parse_length(length)
             if minutes is None or not EVENT_MIN_MINUTES <= minutes <= EVENT_MAX_MINUTES:
-                return await ui.respond(interaction, ui.line(ui.ASK, f"I couldn't use **{ui.truncate(length, 20)}** "
-                                                                     "as a length.",
-                                                             hint="Try 2h, 90m or 1h30m, between 15 minutes and a day."))
-        await interaction.response.defer(ephemeral=True, thinking=True)   # banners take a moment to download
+                return ui.line(ui.ASK, f"I couldn't use **{ui.truncate(length, 20)}** as a length.",
+                               hint="Try 2h, 90m or 1h30m, between 15 minutes and a day.")
         future = "future" in options and session.get("recurring_id")
         owner = session["recurring_id"] if future else sid
         old = session.get("event") or {}
@@ -3055,7 +3772,7 @@ class GameManager(commands.Cog):
         if banners:
             data, problem = await self.read_banner(banners[0])
             if problem:
-                return await interaction.followup.send(problem, ephemeral=True)
+                return problem
             details["banner_data"] = data
             image_change = True
         elif "remove" in options:
@@ -3065,7 +3782,7 @@ class GameManager(commands.Cog):
         details = self.store_details(owner, details)
         async with self.config.guild(guild).play_sessions() as sessions:
             if sid not in sessions:
-                return await interaction.followup.send("⚠️ This session has ended.", ephemeral=True)
+                return "⚠️ This session has ended."
             # The banner's link stays until push_event hears from Discord what the event shows now.
             sessions[sid]["event"] = {**details, **({"cover_url": old["cover_url"]} if old.get("cover_url") else {})}
             session = dict(sessions[sid])
@@ -3075,10 +3792,67 @@ class GameManager(commands.Cog):
                     recurring[session["recurring_id"]]["event"] = dict(details)
         problem = await self.push_event(guild, session, image_change)
         await self.refresh_session_message(guild, (await self.config.guild(guild).play_sessions()).get(sid, session))
-        lines = [ui.line(ui.DONE, "Event details saved." + (" Future sessions use them too." if future else ""))]
         if problem:
-            lines = [ui.line(ui.WARN, "The details are saved, but " + problem)]
-        await interaction.followup.send("\n".join(lines), ephemeral=True)
+            return ui.line(ui.WARN, "The details are saved, but " + problem)
+        return ui.line(ui.DONE, "Event details saved." + (" Future sessions use them too." if future else ""))
+
+    # ---------- Plan next ----------
+
+    def plan_dates(self, schedule: dict, sessions: dict, now: datetime) -> List[datetime]:
+        """The next PLAN_CHOICES nights on the schedule's weekday and time, without ones it already has."""
+        tz = load_zone(schedule["tz"])
+        start = next_weekly(schedule["weekday"], (schedule["hour"], schedule["minute"]), tz, now)
+        window = timedelta(hours=REPLACE_WINDOW_HOURS)
+        taken = [parse_iso(s["starts_at"]) for s in sessions.values()
+                 if s.get("recurring_id") == schedule["id"] and s.get("starts_at")]
+        upcoming = parse_iso(schedule.get("next_start"))
+        dates = []
+        while len(dates) < PLAN_CHOICES and start - now < timedelta(days=MAX_AHEAD_DAYS):
+            if not any(t and abs(t - start) < window for t in taken) and not (
+                    upcoming and abs(upcoming - start) < window):
+                dates.append(start)
+            local = start.astimezone(tz).date() + timedelta(days=7)
+            start = datetime(local.year, local.month, local.day, schedule["hour"], schedule["minute"],
+                             tzinfo=tz).astimezone(timezone.utc)
+        return dates
+
+    async def open_plan_next(self, interaction: discord.Interaction, session: dict):
+        """Plan next (the card's button, or the Edit menu's): pick a date for another of this schedule's nights."""
+        schedule = (await self.config.guild(interaction.guild).recurring()).get(session.get("recurring_id") or "")
+        if schedule is None:
+            return await ui.respond(interaction, ui.line(ui.ASK, "This session doesn't repeat any more."))
+        if not await self.can_manage(interaction.user, schedule["host_id"]) and \
+                not await self.can_manage(interaction.user, session["host_id"]):
+            return await ui.respond(interaction, "🔒 Only the host or a game admin can do that.")
+        dates = self.plan_dates(schedule, await self.config.guild(interaction.guild).play_sessions(), utcnow())
+        if not dates:
+            return await ui.respond(interaction, ui.line(ui.ASK, "There's no free date in the next 60 days."))
+        view = PlanNextView(self, interaction.user.id, schedule, dates)
+        await self.send_card(interaction, view, ephemeral=True)
+        view.message = interaction
+
+    async def book_night(self, guild: discord.Guild, member: discord.Member, rid: str, start: datetime) -> str:
+        """Add a night to a schedule (Plan next): its session and event now, its card when it's near. A line."""
+        schedule = (await self.config.guild(guild).recurring()).get(rid)
+        if schedule is None:
+            return ui.line(ui.ASK, "That repeating session was stopped.")
+        if not await self.can_manage(member, schedule["host_id"]):
+            return "🔒 Only the host or a game admin can do that."
+        now = utcnow()
+        if not now < start < now + timedelta(days=MAX_AHEAD_DAYS):
+            return ui.line(ui.ASK, "Pick a date in the next 60 days.")
+        window = timedelta(hours=REPLACE_WINDOW_HOURS)
+        sessions = await self.config.guild(guild).play_sessions()
+        if any(s.get("recurring_id") == rid and parse_iso(s.get("starts_at"))
+               and abs(parse_iso(s["starts_at"]) - start) < window for s in sessions.values()):
+            return ui.line(ui.WARN, f"**{schedule['title']}** is already on that night.")
+        session = await self._create_occurrence(guild, schedule, start, booked=True)
+        if session is None:
+            return ui.line(ui.FAIL, "I couldn't set that up.",
+                           hint="Check the schedule's channel and host are still here.")
+        extra = " Its Discord event is up now." if session.get("event_id") else ""
+        return ui.line(ui.DONE, f"**{schedule['title']}** is on {stamp(start)}.{extra}",
+                       hint="The card is posted before it like the others.")
 
     async def push_event(self, guild: discord.Guild, session: dict, image_change: bool = False) -> Optional[str]:
         """
@@ -3099,6 +3873,10 @@ class GameManager(commands.Cog):
             event = guild.get_scheduled_event(session["event_id"]) or await guild.fetch_scheduled_event(
                 session["event_id"])
             kwargs = await self._event_fields(guild, session)
+            kwargs["name"] = session["title"][:100]
+            starts = parse_iso(session.get("starts_at"))
+            if starts and starts > utcnow() and not session.get("started"):
+                kwargs["start_time"] = starts
             if image_change:
                 kwargs["image"] = self.banner_bytes((session.get("event") or {}).get("banner"))
             edited = await event.edit(**kwargs)
@@ -3140,7 +3918,8 @@ class GameManager(commands.Cog):
                 if after.start_time and (starts is None or abs((after.start_time - starts).total_seconds()) >= 60):
                     saved["starts_at"] = after.start_time.isoformat()
                     now = utcnow()
-                    saved["reminded"] = after.start_time - now <= timedelta(minutes=REMINDER_MINUTES)
+                    saved["reminders_sent"] = passed_leads(session_leads(saved), after.start_time, now)
+                    saved.pop("reminded", None)
                     saved["started"] = saved.get("started") and after.start_time <= now
                     changed = True
                 if after.name and after.name != saved["title"][:100]:
@@ -3212,68 +3991,276 @@ class GameManager(commands.Cog):
 
     # ---------- recurring sessions ----------
 
-    async def create_recurring(self, target: Target, text: str, details: Optional[dict] = None):
+    async def create_recurring(self, target: Target, text: str, details: Optional[dict] = None,
+                               settings: Optional[dict] = None):
         guild, member, channel = who(target)
         tz, tz_name, personal = await self.timezone_for(member)
         parsed = parse_recurring(text, tz, utcnow())
         if parsed is None:
             return await self.reply(target, ephemeral=True, content=(
                 "❓ For a repeating session, give a day and a time: "
-                f"{await self.cmd(guild, 'games session every friday 9pm Raid night')} or "
-                f"{await self.cmd(guild, 'games session every other sunday 8:30pm')}."))
+                f"{await self.cmd(guild, 'games session every friday 9pm Raid night')}, "
+                f"{await self.cmd(guild, 'games session every other sunday 8:30pm')} or "
+                f"{await self.cmd(guild, 'games session every first friday 8pm')}."))
         schedules = await self.config.guild(guild).recurring()
         if len(schedules) >= MAX_RECURRING:
             return await self.reply(target, ephemeral=True, content=(
                 f"⏳ This server already has {MAX_RECURRING} repeating sessions. Stop one first with "
                 f"{await self.cmd(guild, 'games recurring stop <id>')}."))
         rid = generate_id()
+        settings = dict(settings or {})
         schedule = {"id": rid, "title": (parsed["title"].strip() or f"{member.display_name}'s game night")[:200],
                     "host_id": str(member.id), "channel_id": channel.id, "weekday": parsed["weekday"],
                     "hour": parsed["hour"], "minute": parsed["minute"], "interval": parsed["interval"],
+                    "nth": parsed["nth"],   # monthly: the 1st-4th (or -1, last) weekday of the month
                     "tz": tz_name, "next_start": parsed["first"].isoformat(), "created_at": utcnow().isoformat(),
-                    "event": self.store_details(rid, details)}   # every occurrence's event uses these
+                    "event": self.store_details(rid, details),   # every occurrence's event uses these
+                    **{key: settings[key] for key in SETTING_KEYS if key in settings}}
         async with self.config.guild(guild).recurring() as recurring:
             recurring[rid] = schedule
-        posted = await self._tick_recurring(guild, rid, schedule, utcnow())
+        session = await self._tick_recurring(guild, rid, schedule, utcnow())
+        leads = schedule["reminders"] if "reminders" in schedule else await self.config.guild(guild).reminders()
+        card_at = (f"{fmt_lead(max(leads))} before it starts, as its first reminder"
+                   if post_lead(leads) > timedelta(hours=RECURRING_POST_HOURS) else "a day before it starts")
+        if session is not None and not is_pending(session):
+            nxt = "The first one is posted above."
+        else:
+            first = parse_iso(session["starts_at"]) if session else parsed["first"]
+            nxt = (f"The first is {stamp(first)}"
+                   + (": its Discord event is up now." if session and session.get("event_id") else "."))
         lines = [f"✅ **{schedule['title']}** repeats: {repeat_label(schedule)}.",
-                 f"Each one is posted here {RECURRING_POST_HOURS} hours before it starts, with the usual reminders."
-                 + (" The first one is posted above." if posted else
-                    f" The first is {stamp(parsed['first'])}."),
+                 f"Each card is posted here {card_at}, and each Discord event as soon as the last session ends. "
+                 + nxt,
                  f"-# Skip one with {await self.cmd(guild, f'games recurring skip {rid}')} or stop them with "
                  f"{await self.cmd(guild, f'games recurring stop {rid}')}."]
         if not personal:
             lines.append(f"-# I used **{tz_name}**. If that's wrong, set yours with "
                          f"{await self.cmd(guild, 'games timezone <zone>')}, stop this and set it up again.")
         await self.reply(target, content="\n".join(lines), ephemeral=isinstance(target, discord.Interaction))
+        await self.settle_replacements(target, settings, schedule=schedule)
 
-    async def _tick_recurring(self, guild: discord.Guild, rid: str, schedule: dict, now: datetime) -> bool:
-        """Post the next occurrence once it's within RECURRING_POST_HOURS. Returns True if one was posted."""
+    async def settle_replacements(self, target: Target, settings: dict, *, session: Optional[dict] = None,
+                                  schedule: Optional[dict] = None):
+        """
+        After a new session or schedule: if it said what it replaces ("Replaces:", even "none"), that's done.
+        Otherwise, when it falls on the same night as another schedule's, ask the person once whether it
+        replaces that night, with buttons.
+        """
+        guild, member, _ = who(target)
+        if "replaces" in settings:
+            if session is not None and settings["replaces"]:
+                await self.apply_replacements(guild, session)
+            return
+        if schedule is not None:
+            starts, start = [], parse_iso(schedule["next_start"])   # (as set up: the first night)
+            for _ in range(3):   # the next few nights
+                starts.append(start)
+                start = advance_occurrence(start, schedule)
+            exclude = schedule["id"]
+        else:
+            starts, exclude = [parse_iso(session["starts_at"])], session.get("recurring_id")
+        clashes = await self.clashing_schedules(guild, starts, exclude=exclude)
+        if schedule is not None and not schedule.get("nth"):   # a regular weekly night doesn't take over special ones
+            clashes = [c for c in clashes if not (c.get("nth") or c.get("replaces"))]
+        if not clashes:
+            return
+        names = name_list([f"**{c['title']}**" for c in clashes])
+        own = (schedule or session)["title"]
+        text = (f"**{own}** is on the same night as {names}. Should it replace "
+                + ("those nights?" if schedule is not None else "that night?"))
+        view = ReplaceAskView(self, member.id, text, [c["id"] for c in clashes],
+                              sid=session["id"] if session else None, rid=schedule["id"] if schedule else None)
+        view.message = await self.send_card(target, view, ephemeral=isinstance(target, discord.Interaction))
+
+    async def set_replaces(self, guild: discord.Guild, rids: List[str], *, sid: Optional[str] = None,
+                           rid: Optional[str] = None) -> List[str]:
+        """
+        Say what a session (`sid`) or a schedule (`rid`: and its sessions not started yet) replaces, and end the
+        regular sessions that clash now. Returns the titles of the schedules it replaces.
+        """
+        schedules = await self.config.guild(guild).recurring()
+        rids = [r for r in dict.fromkeys(rids) if r in schedules and r != rid]
+        titles = [schedules[r]["title"] for r in rids]
+        if rid is not None:
+            async with self.config.guild(guild).recurring() as recurring:
+                if rid in recurring:
+                    recurring[rid].update(replaces=rids, replaces_titles=titles)
+        targets = []
+        async with self.config.guild(guild).play_sessions() as sessions:
+            for s in sessions.values():
+                if s["id"] == sid or (rid is not None and s.get("recurring_id") == rid and not s.get("started")):
+                    s.update(replaces=rids, replaces_titles=titles)
+                    targets.append(dict(s))
+        for session in targets:
+            await self.apply_replacements(guild, session)
+            await self.refresh_session_message(guild, session)
+        return titles
+
+    async def _tick_recurring(self, guild: discord.Guild, rid: str, schedule: dict, now: datetime) -> Optional[dict]:
+        """
+        Make a schedule's next session as soon as its last one is over, so its Discord event shows early and
+        Interested works from then on; the card follows a day ahead (or at the earliest reminder). Nights another
+        session or schedule replaces are skipped and remembered (to come back if that one is cancelled). Returns
+        the session made, if any.
+        """
+        sessions = await self.config.guild(guild).play_sessions()
+        if any(s.get("recurring_id") == rid and not s.get("booked") for s in sessions.values()):
+            return None   # one regular session at a time (Plan next dates come on top)
         start = parse_iso(schedule["next_start"])
-        if start is None or now < start - timedelta(hours=RECURRING_POST_HOURS):
-            return False
-        posted = False
-        channel = guild.get_channel_or_thread(schedule["channel_id"])
-        host = guild.get_member(int(schedule["host_id"]))
-        if start > now and channel is not None and host is not None:
-            try:
-                await self.post_session(guild, channel, host, schedule["title"], start, schedule)
-                posted = True
-            except discord.HTTPException as e:
-                log.info("Couldn't post recurring session %s: %s", rid, e)
-        while start <= now + timedelta(hours=RECURRING_POST_HOURS):  # also skips any missed during downtime
+        if start is None:
+            return None
+        schedules = await self.config.guild(guild).recurring()
+        replaced = []
+        for _ in range(60):   # past ones (downtime) and replaced nights are skipped
+            if start <= now:
+                start = advance_occurrence(start, schedule)
+                continue
+            if await self.replacer_for(guild, rid, start, sessions, schedules) is None:
+                break
+            replaced.append(start.isoformat())
             start = advance_occurrence(start, schedule)
+        if replaced:
+            await self._remember_replaced(guild, rid, replaced)
+        if start - now > timedelta(days=MAX_AHEAD_DAYS):
+            await self._set_next_start(guild, rid, start)
+            return None
+        session = await self._create_occurrence(guild, schedule, start)
+        await self._set_next_start(guild, rid, advance_occurrence(start, schedule))
+        return session
+
+    async def _set_next_start(self, guild: discord.Guild, rid: str, start: datetime):
         async with self.config.guild(guild).recurring() as recurring:
             if rid in recurring:
                 recurring[rid]["next_start"] = start.isoformat()
-        return posted
+
+    async def _create_occurrence(self, guild: discord.Guild, schedule: dict, start: datetime,
+                                 booked: bool = False) -> Optional[dict]:
+        """One of a schedule's sessions: its card now if it's that close, else just the session and event."""
+        channel = guild.get_channel_or_thread(schedule["channel_id"])
+        host = guild.get_member(int(schedule["host_id"]))
+        if channel is None or host is None:
+            log.info("Recurring session %s has no channel or host any more; skipping %s", schedule["id"], start)
+            return None
+        leads = schedule["reminders"] if "reminders" in schedule else await self.config.guild(guild).reminders()
+        pending = utcnow() < start - post_lead(leads)
+        try:
+            session = await self.post_session(guild, channel, host, schedule["title"], start, schedule,
+                                              pending=pending, booked=booked)
+        except discord.HTTPException as e:
+            log.info("Couldn't post recurring session %s: %s", schedule["id"], e)
+            return None
+        if session.get("replaces"):
+            await self.apply_replacements(guild, session)
+        return session
+
+    # ---------- special nights replacing regular ones ----------
+
+    async def replacer_for(self, guild: discord.Guild, rid: str, start: datetime, sessions: Optional[dict] = None,
+                           schedules: Optional[dict] = None) -> Optional[str]:
+        """
+        The title of whatever replaces schedule `rid`'s night at `start`: a session that says it does and starts
+        within REPLACE_WINDOW_HOURS, or a schedule that does and has a night (not yet made) that close. Else None.
+        """
+        window = timedelta(hours=REPLACE_WINDOW_HOURS)
+        sessions = await self.config.guild(guild).play_sessions() if sessions is None else sessions
+        schedules = await self.config.guild(guild).recurring() if schedules is None else schedules
+        for s in sessions.values():
+            starts = parse_iso(s.get("starts_at"))
+            if rid in (s.get("replaces") or []) and starts and abs(starts - start) < window:
+                return s["title"]
+        for other in schedules.values():
+            if other["id"] == rid or rid not in (other.get("replaces") or []):
+                continue
+            nxt = parse_iso(other.get("next_start"))
+            occurrence = first_occurrence(other, start - window)
+            if nxt and occurrence >= nxt - timedelta(minutes=1) and abs(occurrence - start) < window:
+                return other["title"]
+        return None
+
+    async def _remember_replaced(self, guild: discord.Guild, rid: str, starts: List[str]):
+        """Note nights of schedule `rid` that were replaced, so they can come back if the replacement is cancelled."""
+        cutoff = utcnow() - timedelta(days=1)
+        async with self.config.guild(guild).recurring() as recurring:
+            if rid in recurring:
+                kept = [d for d in recurring[rid].get("replaced_dates", []) if (parse_iso(d) or cutoff) > cutoff]
+                recurring[rid]["replaced_dates"] = sorted(set(kept + starts))
+
+    async def apply_replacements(self, guild: discord.Guild, special: dict) -> List[str]:
+        """
+        End the regular sessions a special one replaces that night (its card says what replaced it, and its event
+        is cancelled). Returns the titles of the sessions ended.
+        """
+        starts = parse_iso(special.get("starts_at"))
+        if not starts or not special.get("replaces"):
+            return []
+        window = timedelta(hours=REPLACE_WINDOW_HOURS)
+        sessions = await self.config.guild(guild).play_sessions()
+        ended = []
+        for s in list(sessions.values()):
+            other = parse_iso(s.get("starts_at"))
+            if (s["id"] != special["id"] and s.get("recurring_id") in special["replaces"] and other
+                    and not s.get("started") and abs(other - starts) < window):
+                await self.end_session(guild, s["id"], replaced_by=special["title"])
+                await self._remember_replaced(guild, s["recurring_id"], [s["starts_at"]])
+                ended.append(s["title"])
+        return ended
+
+    async def _restore_replaced(self, guild: discord.Guild, special: dict):
+        """A special night was cancelled before it started: bring back the regular nights it replaced."""
+        starts = parse_iso(special.get("starts_at"))
+        if not starts or not special.get("replaces"):
+            return
+        window, now = timedelta(hours=REPLACE_WINDOW_HOURS), utcnow()
+        schedules = await self.config.guild(guild).recurring()
+        sessions = await self.config.guild(guild).play_sessions()
+        for rid in special["replaces"]:
+            schedule = schedules.get(rid)
+            if schedule is None:
+                continue
+            back = [d for d in schedule.get("replaced_dates", [])
+                    if (parse_iso(d) or now) > now and abs(parse_iso(d) - starts) < window]
+            for day in back:
+                when = parse_iso(day)
+                async with self.config.guild(guild).recurring() as recurring:
+                    if rid in recurring:
+                        recurring[rid]["replaced_dates"] = [d for d in recurring[rid].get("replaced_dates", [])
+                                                            if d != day]
+                taken = any(s.get("recurring_id") == rid and parse_iso(s.get("starts_at"))
+                            and abs(parse_iso(s["starts_at"]) - when) < window for s in sessions.values())
+                if not taken and await self.replacer_for(guild, rid, when) is None:
+                    await self._create_occurrence(guild, schedule, when)
+
+    async def clashing_schedules(self, guild: discord.Guild, starts: List[datetime],
+                                 exclude: Optional[str] = None) -> List[dict]:
+        """Other schedules with a night (made or not) on the same evening as any of `starts`."""
+        window = timedelta(hours=REPLACE_WINDOW_HOURS)
+        sessions = await self.config.guild(guild).play_sessions()
+        found = []
+        for schedule in (await self.config.guild(guild).recurring()).values():
+            if schedule["id"] == exclude:
+                continue
+            nights = [parse_iso(s["starts_at"]) for s in sessions.values()
+                      if s.get("recurring_id") == schedule["id"] and s.get("starts_at")]
+            for start in starts:
+                occurrence = first_occurrence(schedule, start - window)
+                if abs(occurrence - start) < window or any(n and abs(n - start) < window for n in nights):
+                    found.append(schedule)
+                    break
+        return found
 
     async def latest_session(self, guild: discord.Guild, channel_id: int, host_id: Optional[str] = None) -> Optional[dict]:
+        """The newest session in a channel whose card is up (one made ahead isn't "the" session yet)."""
         sessions = await self.config.guild(guild).play_sessions()
-        candidates = [s for s in sessions.values()
-                      if s["channel_id"] == channel_id and (host_id is None or s["host_id"] == host_id)]
+        candidates = [s for s in sessions.values() if s["channel_id"] == channel_id and not is_pending(s)
+                      and (host_id is None or s["host_id"] == host_id)]
         return max(candidates, key=lambda s: s["created_at"]) if candidates else None
 
-    async def end_session(self, guild: discord.Guild, sid: str) -> Optional[dict]:
+    async def end_session(self, guild: discord.Guild, sid: str, replaced_by: Optional[str] = None) -> Optional[dict]:
+        """
+        End a session: its card turns grey (saying what replaced it, with `replaced_by`), its pings go, and its
+        Discord event ends (or is cancelled). A special night cancelled before it started brings back the regular
+        nights it replaced.
+        """
         async with self.config.guild(guild).play_sessions() as sessions:
             session = sessions.pop(sid, None)
         if session is None:
@@ -3281,12 +4268,16 @@ class GameManager(commands.Cog):
         if session.get("vote_id"):
             await self.cancel_vote(guild, session["vote_id"])   # also deletes the vote's ping line
         session["vote_id"] = None
+        session["replaced_by"] = replaced_by
         await self.refresh_session_message(guild, session, ended=True)
         await self._delete_messages(guild, session["channel_id"], session.get("pings"))   # reminders, start, winner
         session["pings"] = []
         await self.update_event(guild, session, "finish")
         self.drop_banner((session.get("event") or {}).get("banner"), sid)   # its own banner, not its schedule's
         self.bot.dispatch("gm_session_ended", guild, session)  # ActivityStats records attendance
+        starts = parse_iso(session.get("starts_at"))
+        if session.get("replaces") and not session.get("started") and starts and starts > utcnow():
+            await self._restore_replaced(guild, session)
         return session
 
     async def on_session_button(self, interaction: discord.Interaction, action: str, sid: str):
@@ -3313,7 +4304,9 @@ class GameManager(commands.Cog):
         if not await self.can_manage(member, session["host_id"]):
             return await ui.respond(interaction, "🔒 Only the host or a game admin can do that.")
         if action == "event":
-            return await self.open_event_form(interaction, session)
+            return await self.open_edit_menu(interaction, session)
+        if action == "plan":
+            return await self.open_plan_next(interaction, session)
         if action == "vote":
             await self.start_vote(interaction, session_id=sid)
         else:
@@ -3353,6 +4346,8 @@ class GameManager(commands.Cog):
         """
         guild, _, channel = who(target)
         sessions = sorted((await self.config.guild(guild).play_sessions()).values(), key=lambda s: s["created_at"])
+        if this_channel:   # a session made ahead has no card to bring down yet
+            sessions = [s for s in sessions if not is_pending(s)]
         here = [s for s in sessions if s["channel_id"] == channel.id]
         pool = here if this_channel else here + [s for s in sessions if s not in here]
         if name:
@@ -3363,8 +4358,9 @@ class GameManager(commands.Cog):
                 found = [s for s in found if s in here] or found   # the same name here and elsewhere: this channel's
         elif this_channel:
             found = here[-1:]
-        else:
+        else:   # tonight's (its card is up) before next week's, made ahead
             found = here or sessions
+            found = [s for s in found if not is_pending(s)] or found
         if not found:
             start = await self.cmd(guild, "games session")
             if name:
@@ -3492,18 +4488,31 @@ class GameManager(commands.Cog):
             return
         if starts is None:
             return
+        leads, sent = session_leads(session), sent_leads(session)
+        due = [lead for lead in leads if lead not in sent and starts - timedelta(minutes=lead) <= now]
+        if is_pending(session):
+            if now < starts - post_lead(leads):
+                return
+            # The card goes up: a day ahead, or at the earliest reminder, when it's that reminder (and pings).
+            if due:
+                session = await self._update_session(guild, session,
+                                                     {"reminders_sent": sorted(sent | set(due), reverse=True)}, [])
+                if session is None:
+                    return
+            await self.post_pending(guild, session, ping=bool(due) and now < starts)
+            return
         updates, new_pings = {}, []
-        if not session.get("reminded") and starts - timedelta(minutes=REMINDER_MINUTES) <= now < starts:
+        if due and now < starts:   # several due at once (after downtime) make one reminder
             new_pings.append(await self.announce(guild, session, f"**{session['title']}** starts {stamp(starts, 'R')}"))
-            updates["reminded"] = True
+            updates["reminders_sent"] = sorted(sent | set(due), reverse=True)
         elif not session.get("started") and now >= starts:
             if now - starts < timedelta(minutes=30):  # don't announce stale starts after downtime
                 new_pings.append(await self.announce(guild, session, f"**{session['title']}** is starting"))
             await self.update_event(guild, session, "start")
-            updates.update(reminded=True, started=True)
+            updates.update(reminders_sent=sorted(leads, reverse=True), started=True)
         if updates:
             current = await self._update_session(guild, session, updates, new_pings)
-            if current is not None and current.get("card"):   # the footer says "Reminder 15 min before" until then
+            if current is not None and current.get("card"):   # the footer names the reminders still to come
                 await self.refresh_session_message(guild, current)
 
     async def _update_session(self, guild: discord.Guild, session: dict, updates: dict,
@@ -3675,6 +4684,13 @@ class GameManager(commands.Cog):
         if not await self.can_manage(member, session["host_id"]):
             return await self.reply(target, content="🔒 Only the session host or a game admin can start the vote.",
                                     ephemeral=True)
+        if session.get("game"):
+            return await self.reply(target, ephemeral=True, content=ui.line(
+                ui.WARN, f"This session is set to **{session['game']['name']}**, so there's no vote.",
+                hint="The host can change that with the card's Edit button."))
+        if is_pending(session):
+            return await self.reply(target, ephemeral=True, content=ui.line(
+                ui.WARN, "That session's card isn't posted yet.", hint="Votes run in the card, on the day."))
         votes = await self.config.guild(guild).votes()
         if session.get("vote_id") in votes:
             return await self.reply(target, content="⚠️ A vote is already running for this session.", ephemeral=True)
@@ -4138,10 +5154,15 @@ class GameManager(commands.Cog):
         (set it with `[p]games timezone`).
 
         Scheduled sessions also show up in the server's Discord events. Start with `every` to repeat weekly
-        (or `every other` for every two weeks); each one is posted a day ahead. For the event, attach an image
+        (`every other` for every two weeks, `every first friday` for monthly). For the event, attach an image
         as its banner, mention a voice channel to hold it there, and put a description on the lines after the
-        first (Shift+Enter). A line like `Length: 3h` sets how long the event runs. The host can change these
-        later with the card's **Edit event** button.
+        first (Shift+Enter). Other lines set more:
+        - `Length: 3h`: how long the event runs
+        - `Game: Star Citizen`: set the game ahead, so there's no vote
+        - `Reminders: 36h, 15m` (or `none`): when players are reminded before it starts
+        - `Reminder note: Update your drivers`: shown on the card with every reminder
+        - `Replaces: Friday Night Games`: that repeating session's night is off (or `none`)
+        The host can change all of it later with the card's **Edit** button.
 
         **Examples:**
         - `[p]games session` (starts now)
@@ -4199,11 +5220,13 @@ class GameManager(commands.Cog):
             starts = parse_iso(s.get("starts_at"))
             link = self.session_link(ctx.guild, s)
             title = f"[{s['title']}]({link})" if link else s["title"]
+            card_at = starts - post_lead(session_leads(s)) if starts and is_pending(s) else None
+            game = s["game"]["name"] if s.get("game") else s.get("winner")
             items.append(ui.row(
                 f"**{title}**" + (" 🗳️" if s.get("vote_id") else ""),   # 🗳️ = voting right now
                 details(stamp(starts, "R") if starts else None, f"hosted by <@{s['host_id']}>",
-                        ui.plural(len(s["participants"]), "player"),
-                        f"playing {s['winner']}" if s.get("winner") else None, f"ID `{s['id']}`")))
+                        ui.plural(len(s["participants"]), "player"), f"playing {game}" if game else None,
+                        f"card posted {stamp(card_at, 'R')}" if card_at else None, f"ID `{s['id']}`")))
         voting = any(s.get("vote_id") for s in sessions.values())
         await self.send_list(ctx, items, "🎮 Active sessions",
                              ui.plural(len(items), "session") + (" · 🗳️ = voting now" if voting else ""))
@@ -4372,28 +5395,37 @@ class GameManager(commands.Cog):
         """
         Repeating game sessions.
 
-        Start one with `[p]games session every friday 9pm Raid night` (or `every other friday`). Each session is
-        posted a day before it starts. This lists them; `skip` and `stop` manage them.
+        Start one with `[p]games session every friday 9pm Raid night` (or `every other friday`, or monthly:
+        `every first friday`). Each session's Discord event shows as soon as the last one ends, and its card is
+        posted a day before it starts (or at its earliest reminder). This lists them; `skip`, `stop` and `plan`
+        manage them.
         """
         schedules = await self.config.guild(ctx.guild).recurring()
         if not schedules:
             return await ctx.send(f"❓ No repeating sessions. Start one with "
                                   f"{await self.cmd(ctx.guild, 'games session every friday 9pm Raid night')}.")
+        sessions = await self.config.guild(ctx.guild).play_sessions()
         items = []
         for s in sorted(schedules.values(), key=lambda s: s["next_start"]):
-            nxt = parse_iso(s["next_start"])
+            upcoming = sorted(parse_iso(x["starts_at"]) for x in sessions.values()
+                              if x.get("recurring_id") == s["id"] and x.get("starts_at") and not x.get("started"))
+            nxt = upcoming[0] if upcoming else parse_iso(s["next_start"])
             items.append(ui.row(f"**{s['title']}**",
-                                details(repeat_label(s), f"next {stamp(nxt, 'R')}", f"hosted by <@{s['host_id']}>",
-                                        f"in <#{s['channel_id']}>", f"ID `{s['id']}`")))
+                                details(repeat_label(s), f"next {stamp(nxt, 'R')}",
+                                        f"playing {s['game']['name']}" if s.get("game") else None,
+                                        f"replaces {name_list(s['replaces_titles'])}" if s.get("replaces_titles")
+                                        else None, f"in <#{s['channel_id']}>", f"ID `{s['id']}`")))
         await self.send_list(ctx, items, "🎮 Repeating sessions",
                              f"{ui.plural(len(items), 'schedule')} · Manage with "
-                             f"{await self.prefix(ctx.guild)}games recurring skip <id> or stop <id>")
+                             f"{await self.prefix(ctx.guild)}games recurring skip, stop or plan")
 
     async def _schedule_for(self, ctx: commands.Context, schedule_id: str) -> Optional[dict]:
-        schedule = (await self.config.guild(ctx.guild).recurring()).get(schedule_id)
+        """A schedule by ID or name that the author may change, or None after saying why not."""
+        schedules = await self.config.guild(ctx.guild).recurring()
+        schedule = schedules.get(schedule_id) or find_schedule(list(schedules.values()), schedule_id)
         if schedule is None:
-            await ctx.send(f"❓ No repeating session with ID `{schedule_id}`. See "
-                           f"{await self.cmd(ctx.guild, 'games recurring')}.")
+            await ctx.send(f"❓ No repeating session called `{ui.truncate(schedule_id, 60)}`. See "
+                           f"{await self.cmd(ctx.guild, 'games recurring')}.", allowed_mentions=NO_PING)
             return None
         if not await self.can_manage(ctx.author, schedule["host_id"]):
             await ctx.send("🔒 Only the host or a game admin can change that.")
@@ -4401,30 +5433,68 @@ class GameManager(commands.Cog):
         return schedule
 
     @games_recurring.command(name="stop", aliases=["delete", "remove"])
-    async def recurring_stop(self, ctx: commands.Context, schedule_id: str):
-        """Stop a repeating session (host or game admin). Sessions already posted stay up."""
-        schedule = await self._schedule_for(ctx, schedule_id)
-        if schedule is None:
+    async def recurring_stop(self, ctx: commands.Context, *, schedule: str):
+        """Stop a repeating session, by ID or name (host or game admin). Sessions whose card is up stay."""
+        found = await self._schedule_for(ctx, schedule)
+        if found is None:
             return
+        rid = found["id"]
         async with self.config.guild(ctx.guild).recurring() as recurring:
-            recurring.pop(schedule_id, None)
-        self.drop_banner((schedule.get("event") or {}).get("banner"), schedule_id)
-        await ctx.send(f"✅ **{schedule['title']}** won't repeat any more.", allowed_mentions=NO_PING)
+            recurring.pop(rid, None)
+        for s in list((await self.config.guild(ctx.guild).play_sessions()).values()):
+            if s.get("recurring_id") == rid and is_pending(s):   # made ahead: its event goes too
+                await self.end_session(ctx.guild, s["id"])
+        self.drop_banner((found.get("event") or {}).get("banner"), rid)
+        await ctx.send(f"✅ **{found['title']}** won't repeat any more.", allowed_mentions=NO_PING)
 
     @games_recurring.command(name="skip")
-    async def recurring_skip(self, ctx: commands.Context, schedule_id: str):
-        """Skip the next occurrence of a repeating session (host or game admin)."""
-        schedule = await self._schedule_for(ctx, schedule_id)
-        if schedule is None:
+    async def recurring_skip(self, ctx: commands.Context, *, schedule: str):
+        """Skip the next night of a repeating session, by ID or name (host or game admin)."""
+        found = await self._schedule_for(ctx, schedule)
+        if found is None:
             return
-        skipped = parse_iso(schedule["next_start"])
-        following = advance_occurrence(skipped, schedule)
-        async with self.config.guild(ctx.guild).recurring() as recurring:
-            if schedule_id in recurring:
-                recurring[schedule_id]["next_start"] = following.isoformat()
-        await ctx.send(f"✅ Skipping **{schedule['title']}** on {stamp(skipped, 'D')}. The next one is "
-                       f"{stamp(following, 'F')}.\n-# If that one was already posted, end it with "
-                       f"{await self.cmd(ctx.guild, 'games endsession <id>')}.", allowed_mentions=NO_PING)
+        rid = found["id"]
+        upcoming = sorted((s for s in (await self.config.guild(ctx.guild).play_sessions()).values()
+                           if s.get("recurring_id") == rid and not s.get("started") and s.get("starts_at")),
+                          key=lambda s: s["starts_at"])
+        if upcoming:   # already made: cancel it (its card says so, and its event goes)
+            skipped = parse_iso(upcoming[0]["starts_at"])
+            await self.end_session(ctx.guild, upcoming[0]["id"])
+            following = None
+        else:
+            skipped = parse_iso(found["next_start"])
+            following = advance_occurrence(skipped, found)
+            await self._set_next_start(ctx.guild, rid, following)
+        await ctx.send(f"✅ Skipping **{found['title']}** on {stamp(skipped, 'D')}."
+                       + (f" The next one is {stamp(following, 'F')}." if following else
+                          " The next one is set up shortly."), allowed_mentions=NO_PING)
+
+    @games_recurring.command(name="plan", aliases=["book"])
+    async def recurring_plan(self, ctx: commands.Context, *, schedule_and_date: str):
+        """
+        Add another night to a repeating session (host or game admin): the same as its card's Plan next button.
+
+        Give the schedule's name or ID, then the date (its usual time is used, unless you give one).
+        **Examples:** `[p]games recurring plan Star Citizen night 11/20`, `[p]games recurring plan k3x9 friday`
+        """
+        schedules = list((await self.config.guild(ctx.guild).recurring()).values())
+        tokens = schedule_and_date.split()
+        for cut in range(len(tokens) - 1, 0, -1):   # the longest name that's a schedule, then the date after it
+            found = find_schedule(schedules, " ".join(tokens[:cut]))
+            if found is not None:
+                when = plan_date(" ".join(tokens[cut:]), found, utcnow())
+                if when is None:
+                    typed = " ".join(tokens[cut:])[:40]
+                    return await ctx.send(ui.line(ui.ASK, f"I couldn't read the date **{typed}**.",
+                                                  hint="Try 11/20, friday or 11/20 9pm."), allowed_mentions=NO_PING)
+                if await self._schedule_for(ctx, found["id"]) is None:
+                    return
+                return await ctx.send(await self.book_night(ctx.guild, ctx.author, found["id"], when),
+                                      allowed_mentions=NO_PING)
+        example = await self.cmd(ctx.guild, "games recurring plan Star Citizen night 11/20")
+        await ctx.send(ui.line(ui.ASK, "Which repeating session, and which date?",
+                               hint=f"Like {example}. See them with {await self.cmd(ctx.guild, 'games recurring')}."),
+                       allowed_mentions=NO_PING)
 
     # ---------- admin ----------
 
@@ -4448,6 +5518,7 @@ class GameManager(commands.Cog):
             ]),
             "**Sessions**\n" + ui.settings_text([
                 ("Default timezone", conf["timezone"] or "UTC"),
+                ("Default reminders", leads_text(conf["reminders"])),
                 ("Discord events", "Off" if not conf["events"] else
                  f"On · {event_channel.mention if event_channel else 'no voice channel'}"),
                 ("Repeating sessions", str(len(conf["recurring"]))),
@@ -4465,8 +5536,7 @@ class GameManager(commands.Cog):
         ]
         if conf["events"] and not ctx.guild.me.guild_permissions.manage_events:
             parts.append(ui.line(ui.WARN, "I need the **Manage Events** permission to post sessions as Discord events."))
-        footer = (f"Change with {prefix}games admin setrole, memberadd, timezone, events, eventchannel, sales or "
-                  "freegames · Staff only")
+        footer = f"{prefix}help games admin shows how to change these · Staff only"
         await self.send_card(ctx, ui.CardView(ui.card(*parts, ui.SEPARATOR, title="🎮 Game night settings",
                                                       color=ui.BRAND, footer=footer)))
 
@@ -4528,6 +5598,22 @@ class GameManager(commands.Cog):
             return await ctx.send(f"❓ I don't know the timezone **{zone}**. Try `America/Chicago`, `Chicago`, or `CST`.")
         await self.config.guild(ctx.guild).timezone.set(found)
         await ctx.send(f"✅ Default timezone: **{found}**.")
+
+    @games_admin.command(name="reminders")
+    async def admin_reminders(self, ctx: commands.Context, *, times: str):
+        """
+        Set the reminders new sessions get, before they start (each session can change its own with Edit).
+
+        Up to 4 times from 5 minutes to 7 days, or `none` for just the ping at the start.
+        **Examples:** `[p]games admin reminders 15m`, `[p]games admin reminders 1d, 1h`, `[p]games admin reminders none`
+        """
+        leads = parse_reminders(times)
+        if leads is None:
+            return await ctx.send(ui.line(ui.ASK, f"I couldn't use **{ui.truncate(times, 30)}** as reminders.",
+                                          hint="Try 15m, or 1d, 1h (up to 4), or none."), allowed_mentions=NO_PING)
+        await self.config.guild(ctx.guild).reminders.set(leads)
+        await ctx.send(ui.line(ui.DONE, f"New sessions get reminders: {leads_text(leads).lower()}.",
+                               hint="Sessions already set up keep theirs."))
 
     @games_admin.command(name="add", aliases=["import"])
     async def admin_add(self, ctx: commands.Context, *, game_names: str):
@@ -4708,6 +5794,7 @@ class GameManager(commands.Cog):
         - `[p]session new friday 9pm Raid night` starts one (`[p]session new every friday 9pm` repeats weekly)
         - `[p]session join` and `[p]session leave` (add its name if there's more than one)
         - `[p]session vote` and `[p]session end` (host or game admin)
+        - `[p]session plan Star Citizen night 11/20` adds a night to a repeating session
         - `[p]sessions` lists them all
         """
         if words:   # an argument, so SpeakUp's "did you mean" stays out of it: this hint is more useful
@@ -4727,9 +5814,10 @@ class GameManager(commands.Cog):
         Start a game session people can join.
 
         Optionally start with a time (read in your timezone; everyone sees their own). Start with `every` to
-        repeat weekly. For the Discord event: attach an image for its banner, mention a voice channel to hold it
-        there, put a description on the lines after the first (Shift+Enter), and add a line like `Length: 3h`
-        for how long it runs. The same as `[p]games session`.
+        repeat weekly (`every first friday` for monthly). For the Discord event: attach an image for its banner,
+        mention a voice channel to hold it there, and put a description on the lines after the first
+        (Shift+Enter). Lines like `Length: 3h`, `Game: Star Citizen` (no vote), `Reminders: 36h, 15m`,
+        `Reminder note: …` and `Replaces: Friday Night Games` set the rest. The same as `[p]games session`.
 
         **Examples:** `[p]session new`, `[p]session new friday 9pm Raid night`, `[p]session new in 2h Rocket League`,
         `[p]session new every friday 9pm`
@@ -4760,6 +5848,15 @@ class GameManager(commands.Cog):
         **Examples:** `[p]session vote`, `[p]session vote 2 3m`
         """
         await ctx.invoke(self.games_sessionvote, *options)
+
+    @session_cmd.command(name="plan", aliases=["book"])
+    async def session_plan(self, ctx: commands.Context, *, schedule_and_date: str):
+        """
+        Add another night to a repeating session, like its card's Plan next button (host or game admin).
+
+        **Example:** `[p]session plan Star Citizen night 11/20` (its usual time, unless you give one)
+        """
+        await ctx.invoke(self.recurring_plan, schedule_and_date=schedule_and_date)
 
     @session_cmd.command(name="end")
     async def session_end(self, ctx: commands.Context, *, session: str = None):
@@ -4842,13 +5939,35 @@ class GameManager(commands.Cog):
                            description="For the Discord event: what's planned, what to bring",
                            banner="For the Discord event: a banner image (PNG, JPG, GIF or WebP)",
                            voice="For the Discord event: the voice channel it happens in",
-                           length="For the Discord event: how long it runs, e.g. 2h or 90m")
+                           length="For the Discord event: how long it runs, e.g. 2h or 90m",
+                           game="Set the game ahead, so there's no vote",
+                           reminders="When to remind players before it starts, e.g. 36h, 15m (or none)",
+                           reminder_note="Shown on the card with every reminder, e.g. update your drivers",
+                           replaces="A repeating session whose night this one takes over")
     async def slash_session(self, interaction: discord.Interaction, title: Optional[str] = None,
                             when: Optional[str] = None, weekly: bool = False, description: Optional[str] = None,
                             banner: Optional[discord.Attachment] = None,
                             voice: Optional[Union[discord.VoiceChannel, discord.StageChannel]] = None,
-                            length: Optional[str] = None):
+                            length: Optional[str] = None, game: Optional[str] = None,
+                            reminders: Optional[str] = None, reminder_note: Optional[str] = None,
+                            replaces: Optional[str] = None):
         details: dict = {}
+        settings: dict = {}
+        if reminders:
+            leads = parse_reminders(reminders)
+            if leads is None:
+                return await self.reply(interaction, ephemeral=True, content=ui.line(
+                    ui.ASK, f"I couldn't use **{ui.truncate(reminders, 30)}** as reminders.",
+                    hint="Try 36h, 15m (up to 4, from 5 minutes to 7 days before), or none."))
+            settings["reminders"] = leads
+        if reminder_note:
+            settings["reminder_note"] = reminder_note[:MAX_NOTE]
+        if game:
+            settings["game_name"] = game
+        if replaces:
+            settings["replaces_names"] = replaces
+        if settings:
+            details["settings"] = settings
         if description:
             details["description"] = description[:800]
         if voice is not None:
@@ -4866,8 +5985,8 @@ class GameManager(commands.Cog):
             if problem:
                 return await self.reply(interaction, content=problem, ephemeral=True)
             details["banner_data"] = data
-        if weekly:
-            return await self.create_recurring(interaction, f"every {when or ''} {title or ''}", details)
+        if weekly:   # (create_session hands "every …" to create_recurring, after checking the settings)
+            return await self.create_session(interaction, f"every {when or ''} {title or ''}", details)
         if when:
             guild, member, _ = who(interaction)
             tz, _, _ = await self.timezone_for(member)
@@ -4961,8 +6080,17 @@ class GameManager(commands.Cog):
     @slash_rank.autocomplete("game")
     @slash_whoowns.autocomplete("game")
     @slash_lfg.autocomplete("game")
+    @slash_session.autocomplete("game")
     async def _ac_all_games(self, interaction: discord.Interaction, current: str):
         return await self._game_choices(interaction, current, "all")
+
+    @slash_session.autocomplete("replaces")
+    async def _ac_schedules(self, interaction: discord.Interaction, current: str):
+        """The server's repeating sessions by title."""
+        key = current.strip().lower()
+        schedules = sorted((await self.config.guild(interaction.guild).recurring()).values(), key=lambda s: s["title"])
+        return [app_commands.Choice(name=ui.truncate(s["title"], 100), value=s["title"][:100])
+                for s in schedules if key in s["title"].lower()][:25]
 
     @slash_unown.autocomplete("game")
     async def _ac_owned_games(self, interaction: discord.Interaction, current: str):

@@ -7,7 +7,7 @@ Track the games your server owns, find something everyone can play, and vote on 
 - **Finding games:** list what a group owns or has installed in common, and rank favorites.
 - **Profile setup:** `!games newprofile` walks you through your timezone, library, installed games, favorites and wishlist.
 - **Looking for group:** `!games lfg <game>` pings everyone who has a game installed.
-- **Sessions:** start one now, schedule it ("friday 9pm"), or repeat it every week. People join with a button (or by pressing **Interested** on the session's Discord event), get a reminder 15 minutes before, and get a ping at the start.
+- **Sessions:** start one now, schedule it ("friday 9pm"), or repeat it every week. People join with a button (or by pressing **Interested** on the session's Discord event), get a reminder 15 minutes before (each session can set its own reminders), and get a ping at the start.
 - **Wishlists:** list games you want, and get a ping when one goes on sale on Steam.
 - **Votes:** the host presses **Start vote**. Everyone votes with buttons, ties are broken by people's rankings, and the winner is announced.
 - **Slash commands:** `/games …` with autocomplete for game names.
@@ -94,12 +94,29 @@ Buttons keep working after restarts and reloads, and running votes pick back up.
 !games session in 2h Rocket League
 !games session every friday 9pm Raid night        repeats weekly
 !games session every other sunday 8pm             every two weeks
+!games session every first friday 8pm             monthly (first … fourth, or last)
+```
+
+**Lines under the command** (Shift+Enter) set the rest:
+
+```
+!games session every first friday 8pm Star Citizen night
+Game: Star Citizen                      set ahead: no vote
+Reminders: 36h, 15m                     or none: just the ping at the start
+Reminder note: Update your drivers      shown on the card with every reminder
+Replaces: Friday Night Games            that schedule's night is off
+Length: 3h                              how long the Discord event runs
 ```
 
 **Repeating sessions:**
-- Each one is posted 24 hours before it starts, with the usual reminders. The host is whoever set it up.
-- `!games recurring` lists them. `!games recurring skip <id>` skips the next one, and `!games recurring stop <id>` stops them (host or game admin).
+- The next one is set up as soon as the last one ends: its Discord event shows right away, and its card is posted a day before it starts (or at its earliest reminder). The host is whoever set it up.
+- `!games recurring` lists them. `!games recurring skip <name or ID>` skips the next one, and `!games recurring stop <name or ID>` stops them (host or game admin).
+- `!games recurring plan <name> <date>` (or the card's **Plan next** button on special nights) books another night.
 - Times stay at the same local time across daylight saving changes.
+
+**Special nights:** a session or schedule with `Replaces:` takes that schedule's night. When one lands on another schedule's night without saying, the bot asks **Replace it** or **Keep both**. A cancelled special night brings the regular one back.
+
+**Editing:** the card's **Edit** button (host or game admin) opens a private menu with every setting: title and time, event details, game, reminders and what it replaces. On repeating sessions each form can also change future ones.
 
 **Discord events:**
 - Scheduled sessions also appear in the server's **Events** list.
@@ -145,6 +162,7 @@ Game admins are server administrators, Red admins, the bot owner, or anyone with
 | `!games admin requestinstall "<game>" [members…]` | Ask people to install a game; they confirm with a button |
 | `!games admin memberadd <true/false>` | Let members add games themselves instead of requesting |
 | `!games admin timezone <zone>` | The server's default timezone for session times |
+| `!games admin reminders <times>` | The reminders new sessions get (`15m`, `1d, 1h` or `none`) |
 | `!games admin setrole [role]` | Set the game admin role (server admins only) |
 | `!games admin sales [#channel]` | Turn on wishlist sale alerts in a channel (no channel turns them off) |
 | `!games admin freegames <true/false>` | Also announce games that are free to keep on the Epic Games Store, in the sale alerts channel |

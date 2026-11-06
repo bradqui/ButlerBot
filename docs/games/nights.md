@@ -40,6 +40,7 @@ A session is a post people join with a button. Start one now, or schedule it:
 | `!session join [name]` / `!session leave [name]` | Join or leave without finding the card. Add its name if there's more than one. |
 | `!session vote [picks] [time]` | Starts the vote (host or game admin). |
 | `!session end [name]` | Ends it (host or game admin). |
+| `!session plan <schedule> <date>` | Adds another night to a repeating session, like its card's **Plan next** button. |
 | `!sessions` | Lists the active sessions, with links to their cards. |
 
 These are short for the `!games …` versions (`!games session`, `!games join`, `!games here`, …), which work too.
@@ -51,12 +52,12 @@ These are short for the `!games …` versions (`!games session`, `!games join`, 
 **What happens next:**
 - The post is a card that shows the start time (in everyone's own timezone) and who's playing. Players press **Join** (or **Leave**).
 - The whole game night happens in that one card: the vote and its result show up in it too, so there's one place to look.
-- Everyone who joined gets a ping 15 minutes before and another at the start. If the card is still in view, the ping is one line with a link back to it.
+- Everyone who joined gets a reminder 15 minutes before and a ping at the start. If the card is still in view, the ping is one line with a link back to it. Each session can have its own reminders (see [Special nights](#special-nights)).
 - If you haven't set a timezone, the card says which one your time was read in, with how to fix it.
 - Sessions end on their own 12 hours after they start. An ended session's card turns grey and loses its buttons, and its pings are cleaned up.
 
 **When chatter buries the card:**
-- The card moves itself to the bottom of the channel for the 15-minute reminder, the start and a vote, and pings players there instead of in a separate line. It only moves once it has 10 or more messages below it.
+- The card moves itself to the bottom of the channel for each reminder, the start and a vote, and pings players there instead of in a separate line. It only moves once it has 10 or more messages below it.
 - `!session` (or `!games here`) brings it down any time, once a minute per channel. Add the session's name if the channel has more than one: `!session here Raid night`.
 - `!session join` and `!session leave` work without the card. With more than one session around, add its name: `!session join Raid night`.
 - The slash versions (`/games join`, `/games leave`, `/games here`) answer just to you and list the sessions as you type.
@@ -74,27 +75,63 @@ These are short for the `!games …` versions (`!games session`, `!games join`, 
     ```
   - Asking the AI works too: "`!ai` set up a weekly session on Fridays at 9pm in #Raid Voice, banner attached". Attach the image to that message and mention the channel with `#`.
 - **The banner shows on the session card too,** full width across the top, the same picture as the event.
-- **Change them later** with the session card's **✏️ Edit event** button (host or game admin): description, length, voice channel and banner, or remove the banner. You don't need Discord's Manage Events permission for this.
-- **Weekly sessions:** each week's session is its own event, posted a day ahead (not one repeating Discord event, so each week has its own Interested list, card and details). Details set when you create the weekly session are used every week. In **Edit event**, tick **Also use for future sessions** to change every week from then on; otherwise only that week changes.
+- **Change them later** with the session card's **✏️ Edit** button (host or game admin). It opens a private menu showing everything about the session, with a short form for each part: **Title & time**, **Event details** (description, length, voice channel, banner), **Game**, **Reminders** and **Replaces**. You don't need Discord's Manage Events permission for this.
+- **Repeating sessions:** each week's session is its own event (not one repeating Discord event, so each week has its own Interested list, card and details). Details set when you create it are used every time. In the **Edit** forms, tick **Also use for future sessions** to change every one from then on; otherwise only that one changes.
 - **Edited the event in Discord instead?** That works too: a new time, name or voice channel carries over to the session card and its reminders, and cancelling the event ends the session. It only changes that one week's session.
 
 {: .tip }
 > Someone wrote "let's play at 9" in chat? Click the 🕘 that ButlerBot adds to the message. It shows the time in your timezone, with a **Schedule a session** button.
 
-### Weekly game nights
+### Weekly and monthly game nights
 
 ```
 !session new every friday 9pm Raid night
 !session new every other sunday 8pm
+!session new every first friday 8pm Star Citizen night
 ```
 
+Monthly ones use `first`, `second`, `third`, `fourth` or `last` (`every last saturday 7pm`). For every two weeks, say `every other`.
+
 **How they work:**
-- Each one is posted a day before it starts.
+- The next one is set up as soon as the last one ends: its Discord event shows right away, so people can press **Interested** (which joins it) a week ahead.
+- Its card is posted in the channel a day before it starts, or at its earliest reminder if that's sooner (the card going up is that reminder).
 - It stays at the same local time across daylight saving changes.
 
 **Managing them:**
 - `!games recurring` lists them.
-- The host or a game admin can `!games recurring skip <id>` the next one, or `!games recurring stop <id>`.
+- The host or a game admin can `!games recurring skip <name or ID>` the next one, or `!games recurring stop <name or ID>`.
+
+### Special nights
+
+Some nights are different: on a Star Citizen night everyone plays Star Citizen, there's no vote, and people need time to update first. Set that up with extra lines under the command (Shift+Enter):
+
+```
+!session new every first friday 8pm Star Citizen night
+Game: Star Citizen
+Reminders: 36h, 15m
+Reminder note: Update your drivers, patch the game and build your shaders.
+Replaces: Friday Night Games
+```
+
+| Line | What it does |
+|---|---|
+| `Game: <game>` | Sets the game ahead, from the server library. The card shows it and has no **Start vote** button. |
+| `Reminders: 36h, 15m` | When players are reminded before it starts (up to 4, from 5 minutes to 7 days). `none` means just the ping at the start. |
+| `Reminder note: …` | Shown on the card under **Before you play**, so every reminder carries it. |
+| `Replaces: <repeating session>` | That session's night is off whenever this one is on (`none` for nothing). |
+| `Length: 3h` | How long the Discord event runs. |
+
+`/games session` has the same options, and the AI can use these lines too.
+
+**Replacing a regular night:**
+- When a new session or schedule lands on the same night as another schedule's session, the bot asks whoever made it: **Replace it** or **Keep both**. A `Replaces:` line answers that up front.
+- The replaced night isn't posted (or, if it was already set up, its card says what replaced it and its event is cancelled).
+- If the special night is cancelled before it starts, the regular night comes back.
+
+**Plan next:** special nights from a schedule have a **📅 Plan next** button on their card (also in the **Edit** menu). It lists the next Fridays (or whichever day it's on); pick one and that night is booked with the same game, reminders and details. Its event shows right away and its card is posted like the others. The command does the same: `!session plan Star Citizen night 11/20`.
+
+{: .staff }
+> Game admins set the reminders new sessions get with `!games admin reminders 15m` (or `1d, 1h`, or `none`). Each session can still change its own.
 
 ## Voting on what to play
 

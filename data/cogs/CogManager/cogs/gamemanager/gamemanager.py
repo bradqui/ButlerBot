@@ -133,8 +133,16 @@ STEAM_APP_URL = "https://store.steampowered.com/app/{}"
 EPIC_FREE_URL = ("https://store-site-backend-static-ipv4.ak.epicgames.com/freeGamesPromotions"
                  "?locale=en-US&country=US&allowCountries=US")
 EPIC_STORE_URL = "https://store.epicgames.com/en-US/"
-MAX_CHECKED_NAMES = 10          # bigger bulk adds skip the Steam and AI lookups
-MAX_AI_TITLE_LOOKUPS = 5        # AI web searches per command (about 1¢ each)
+MAX_CHECKED_NAMES = 25          # bigger bulk adds skip the Steam and AI lookups (and say so)
+MAX_AI_TITLE_LOOKUPS = 10       # AI web searches per command (about 1¢ each)
+LOOKUP_CONCURRENCY = 4          # Steam and AI title lookups run this many at a time
+BATCH_ROWS_SHOWN = 30           # games listed on a batch request card
+# Why a name couldn't be confirmed (suggest_titles' "where it came from" when there's no title).
+NOT_FOUND, NOT_SEARCHED, NOT_LOOKED_UP = "not found", "not searched", "not looked up"
+UNCONFIRMED_REASONS = {
+    NOT_FOUND: "Not found on Steam or by web search",
+    NOT_SEARCHED: "Not on Steam under that name, and not searched for on the web",
+}
 
 # Read-only lookups the Claude cog's bot guide can call (see GameManager.guide_call_tool).
 GUIDE_TOOLS = [
@@ -378,16 +386,23 @@ def describe_unresolved(name: str, candidates: List[dict]) -> str:
 
 # Quotes only count at word boundaries, so "Assassin's Creed, Baldur's Gate" stays two names.
 QUOTED = r'(?<!\w)"([^"]+)"(?!\w)|(?<!\w)\'([^\']+)\'(?!\w)'
+# A comma separates names unless it's a thousands comma: "Warhammer 40,000: Darktide" is one name.
+NAME_COMMA = r"(?<!\d),|,(?!\d{3}(?!\d))"
 
 
 def parse_game_names(text: str) -> List[str]:
-    """Split comma- or line-separated game names. Quotes keep a name with commas together."""
+    """
+    Split game names: one per line, or separated by commas on a single line. Names on separate lines keep their
+    commas ("Papers, Please"), and so do quoted names and thousands commas (40,000).
+    """
     names = []
     for match in re.findall(QUOTED, text):
         name = (match[0] or match[1]).strip()
         if name:
             names.append(name)
-    for part in re.split(r"[,\n]", re.sub(QUOTED, "", text)):
+    rest = re.sub(QUOTED, "", text)
+    lines = [line for line in rest.split("\n") if line.strip()]
+    for part in lines if len(lines) > 1 else re.split(NAME_COMMA, rest):
         if part.strip():
             names.append(part.strip())
     return names
@@ -960,6 +975,29 @@ class RequestButton(discord.ui.DynamicItem[discord.ui.Button],
             await cog.on_request_button(interaction, self.action, self.rid)
 
 
+class RequestBatchButton(discord.ui.DynamicItem[discord.ui.Button],
+                         template=r"gm:rb:(?P<action>approve|deny|review):(?P<bid>[a-z0-9]+)"):
+    """The buttons on a batch request card (several games requested at once): approve all, review, deny all."""
+
+    def __init__(self, action: str, bid: str, partly: bool = False):
+        label = {"approve": "Approve the rest" if partly else "Approve all", "review": "Review",
+                 "deny": "Deny the rest" if partly else "Deny all"}[action]
+        super().__init__(discord.ui.Button(
+            label=label, custom_id=f"gm:rb:{action}:{bid}",
+            style=discord.ButtonStyle.primary if action == "approve" else discord.ButtonStyle.secondary,
+        ))
+        self.action, self.bid = action, bid
+
+    @classmethod
+    async def from_custom_id(cls, interaction, item, match):
+        return cls(match["action"], match["bid"])
+
+    async def callback(self, interaction: discord.Interaction):
+        cog = interaction.client.get_cog("GameManager")
+        if cog is not None and interaction.guild is not None:
+            await cog.on_batch_button(interaction, self.action, self.bid)
+
+
 class InstallButton(discord.ui.DynamicItem[discord.ui.Button], template=r"gm:i:(?P<rid>[a-z0-9]+)"):
     def __init__(self, rid: str):
         super().__init__(discord.ui.Button(label="I've installed it", emoji="💾", style=discord.ButtonStyle.primary,
@@ -1085,28 +1123,39 @@ class ConfirmView(OwnerOnlyCard):
 
 
 class NameCheckView(OwnerOnlyCard):
-    """Accept the corrected game names, keep what was typed, or cancel."""
+    """
+    Accept the corrected game names, keep what was typed, or cancel. Without corrections (only names nobody could
+    confirm), the main button keeps them. `skippable` adds a button that drops the unconfirmed names.
+    """
 
     expired_note = "Expired. Nothing was added or requested."
 
-    def __init__(self, user_id: int, plural: bool, text: str = ""):
+    def __init__(self, user_id: int, plural: bool, text: str = "", *, corrections: bool = True,
+                 skippable: bool = False):
         super().__init__(user_id, timeout=180)
         self.choice: Optional[str] = None
-        self.text = text
+        self.text, self.plural, self.corrections = text, plural, corrections
         self.title = "🎮 Check the names" if plural else "🎮 Check the name"
-        buttons = [
-            make_button("Use suggestions" if plural else "Use suggestion", self._choose("suggested"),
-                        style=discord.ButtonStyle.primary),
-            make_button("Keep my spelling", self._choose("typed")),
-            make_button("Cancel", self._choose("cancel")),
-        ]
+        if corrections:
+            buttons = [make_button("Use suggestions" if plural else "Use suggestion", self._choose("suggested"),
+                                   style=discord.ButtonStyle.primary),
+                       make_button("Keep my spelling", self._choose("typed"))]
+        else:   # "suggested" still carries the silent capitalization fixes
+            buttons = [make_button("Keep them" if plural else "Keep it", self._choose("suggested"),
+                                   style=discord.ButtonStyle.primary)]
+        if skippable:
+            buttons.append(make_button("Skip unconfirmed" if corrections else "Skip them" if plural else "Skip it",
+                                       self._choose("skip")))
+        buttons.append(make_button("Cancel", self._choose("cancel")))
         self.add_item(ui.card(text, buttons, title=self.title))
 
     def _choose(self, value: str):
         async def callback(interaction: discord.Interaction):
             self.choice = value
             self.stop()
-            note = {"suggested": "Using the suggested name.", "typed": "Using the name as typed.",
+            names = "names" if self.plural else "name"
+            note = {"suggested": f"Using the suggested {names}." if self.corrections else f"Using the {names} as is.",
+                    "typed": f"Using the {names} as typed.", "skip": f"Skipping the {names} I couldn't confirm.",
                     "cancel": "Cancelled. Nothing was added or requested."}[value]
             await interaction.response.edit_message(
                 view=final_card(f"{self.text}\n{ui.hint(note)}", title=self.title,
@@ -1653,6 +1702,52 @@ class PlanNextView(OwnerOnlyCard):
                                                  allowed_mentions=NO_PING)
 
 
+class BatchReviewView(OwnerOnlyCard):
+    """Review on a batch request card: a game admin picks some of the games, then approves or denies them."""
+
+    expired_note = "Expired. The rest are still waiting on the request card."
+    TITLE = "🎮 Review the requests"
+
+    def __init__(self, cog: "GameManager", user_id: int, bid: str, pending: List[dict], note: Optional[str] = None):
+        super().__init__(user_id, timeout=LIST_PRIVATE_TIMEOUT)
+        self.cog, self.bid = cog, bid
+        shown = pending[:25]
+        self.select = discord.ui.Select(
+            placeholder="Pick games…", min_values=1, max_values=len(shown),
+            options=[discord.SelectOption(label=item["name"][:100], value=item["rid"],
+                                          description="Couldn't confirm this name" if item.get("unconfirmed") else None)
+                     for item in shown])
+        self.select.callback = self._picked
+        lines = [note, "Pick games, then approve or deny them. The rest stay waiting."]
+        if len(pending) > len(shown):
+            lines.append(ui.hint(f"Showing the first 25 of {len(pending)}. The rest come up next."))
+        self.add_item(ui.card("\n".join(l for l in lines if l), [self.select],
+                              [make_button("Approve picked", self._decide(True), style=discord.ButtonStyle.primary),
+                               make_button("Deny picked", self._decide(False))],
+                              title=self.TITLE))
+
+    async def _picked(self, interaction: discord.Interaction):
+        await interaction.response.defer()   # the choice is read when a button is pressed
+
+    def _decide(self, approve: bool):
+        async def callback(interaction: discord.Interaction):
+            if not self.select.values:
+                return await ui.respond(interaction, ui.line(ui.ASK, "Pick at least one game first."))
+            self.stop()
+            await interaction.response.defer()
+            guild = interaction.guild
+            line = await self.cog.resolve_batch(guild, self.bid, interaction.user,
+                                                {rid: approve for rid in self.select.values})
+            pending = await self.cog.batch_pending(guild, self.bid)
+            if pending:
+                view = BatchReviewView(self.cog, self.user_id, self.bid, pending, note=line)
+                view.message = interaction
+            else:
+                view = final_card(ui.line(ui.DONE, "All of them are decided.", hint=line), title=self.TITLE)
+            await interaction.edit_original_response(view=view, allowed_mentions=NO_PING)
+        return callback
+
+
 PROFILE_STEPS = ("timezone", "owned", "installed", "favorites", "wishlist")
 PROFILE_TITLES = {"timezone": "Your timezone", "owned": "Games you own", "installed": "Games you have installed",
                   "favorites": "Your favorites", "wishlist": "Games you want"}
@@ -1857,7 +1952,7 @@ class ProfileWizard(OwnerOnlyCard):
                                                   ephemeral=self.state["ephemeral"])
             await self.move(modal_interaction, self.state["step"], note)
 
-        await interaction.response.send_modal(TextModal("Games you own", "Game names (one per line or commas)",
+        await interaction.response.send_modal(TextModal("Games you own", "Game names, one per line",
                                                         "Deadlock\nHelldivers 2\nRocket League", submit))
 
     def _rank_callback(self, select: discord.ui.Select, rank: int):
@@ -1879,7 +1974,7 @@ class ProfileWizard(OwnerOnlyCard):
             note = await self.cog.want_typed_games(self.state["guild"], self.state["member"], text)
             await self.move(modal_interaction, self.state["step"], note)
 
-        await interaction.response.send_modal(TextModal("Games you want", "Game names (one per line or commas)",
+        await interaction.response.send_modal(TextModal("Games you want", "Game names, one per line",
                                                         "Elden Ring\nBaldur's Gate 3", submit))
 
 
@@ -1906,6 +2001,7 @@ class GameManager(commands.Cog):
             games={},
             users={},
             game_requests={},
+            request_batches={},   # one card for several games requested at once (see batch_card)
             play_sessions={},
             votes={},
             install_requests={},
@@ -1929,13 +2025,13 @@ class GameManager(commands.Cog):
         self._resume_task: Optional[asyncio.Task] = None
 
     async def cog_load(self):
-        self.bot.add_dynamic_items(SessionButton, VoteButton, RequestButton, InstallButton)
+        self.bot.add_dynamic_items(SessionButton, VoteButton, RequestButton, RequestBatchButton, InstallButton)
         self._resume_task = asyncio.create_task(self._resume_votes())
         self.session_loop.start()
         self.sale_loop.start()
 
     async def cog_unload(self):
-        self.bot.remove_dynamic_items(SessionButton, VoteButton, RequestButton, InstallButton)
+        self.bot.remove_dynamic_items(SessionButton, VoteButton, RequestButton, RequestBatchButton, InstallButton)
         self.session_loop.cancel()
         self.sale_loop.cancel()
         if self._resume_task is not None:
@@ -2412,9 +2508,10 @@ class GameManager(commands.Cog):
         checked = await self.checked_names(interaction, member, names, ephemeral=ephemeral)
         if checked is None:
             return None
-        names, appids = checked
+        names, appids, unconfirmed = checked
         if not add:
-            return await self.request_games_text(guild, channel, member, names, action, appids=appids)
+            return await self.request_games_text(guild, channel, member, names, action, appids=appids,
+                                                 unconfirmed=unconfirmed)
         added, _ = await self.add_games(guild, member, names, appids)
         text, _ = await self.change_library_text(guild, member, names, action)
         if added:
@@ -2428,15 +2525,17 @@ class GameManager(commands.Cog):
         """
         For each typed name: (cleaned name, suggested title or None, Steam app ID or None, where it came from).
         Checks, in order: a close match already in the library, an exact Steam store name, and (if the Claude
-        cog is loaded) an AI web search for the official title.
+        cog is loaded) an AI web search for the official title. Lookups run a few at a time. Without a title,
+        "where" says why: NOT_FOUND, NOT_SEARCHED (no AI search left, or no Claude cog) or NOT_LOOKED_UP (too
+        many names at once).
         """
         games = await self.config.guild(member.guild).games()
         by_key = {normalize(g["name"]): g for g in games.values()}
         finder = getattr(self.bot.get_cog("ClaudeChat"), "find_game_title", None)
         lookups_allowed = len(names) <= MAX_CHECKED_NAMES
-        ai_left = MAX_AI_TITLE_LOOKUPS
-        results = []
-        for typed in names:
+        results: List[Optional[Tuple[str, Optional[str], Optional[int], str]]] = [None] * len(names)
+        pending = []   # (index, name) still to look up
+        for i, typed in enumerate(names):
             name = clean_title(typed)
             key = normalize(name)
             match = by_key.get(key)
@@ -2444,38 +2543,54 @@ class GameManager(commands.Cog):
                 close = difflib.get_close_matches(key, list(by_key), n=1, cutoff=0.85)
                 match = by_key[close[0]] if close else None
             if match is not None:
-                results.append((name, match["name"], match.get("steam_appid"), "already in the library"))
-                continue
-            if not key or not lookups_allowed:
-                results.append((name, None, None, ""))
-                continue
-            steam = await steam_exact_title(name)
-            if steam is not None:
-                results.append((name, steam[0], steam[1], "Steam"))
-                continue
-            found = None
-            if finder is not None and ai_left > 0:
-                ai_left -= 1
+                results[i] = (name, match["name"], match.get("steam_appid"), "already in the library")
+            elif not key:
+                results[i] = (name, None, None, "")
+            elif not lookups_allowed:
+                results[i] = (name, None, None, NOT_LOOKED_UP)
+            else:
+                pending.append((i, name))
+
+        gate = asyncio.Semaphore(LOOKUP_CONCURRENCY)
+
+        async def on_steam(name):
+            async with gate:
+                return await steam_exact_title(name)
+
+        async def on_web(name):
+            async with gate:
                 try:
-                    found = await finder(name, member)
+                    return await finder(name, member)
                 except Exception:
                     log.exception("Game title lookup failed for %r", name)
-            if found:
-                results.append((name, clean_title(found["title"]), found.get("steam_appid"), "web search"))
+                    return None
+
+        not_on_steam = []
+        for (i, name), found in zip(pending, await asyncio.gather(*(on_steam(n) for _, n in pending))):
+            if found is not None:
+                results[i] = (name, found[0], found[1], "Steam")
             else:
-                results.append((name, None, None, ""))
+                not_on_steam.append((i, name))
+        searched = not_on_steam[:MAX_AI_TITLE_LOOKUPS] if finder is not None else []
+        for (i, name), found in zip(searched, await asyncio.gather(*(on_web(n) for _, n in searched))):
+            results[i] = ((name, clean_title(found["title"]), found.get("steam_appid"), "web search") if found
+                          else (name, None, None, NOT_FOUND))
+        for i, name in not_on_steam[len(searched):]:
+            results[i] = (name, None, None, NOT_SEARCHED)
         return results
 
     async def checked_names(self, target: Target, member: discord.Member, names: List[str],
-                            ephemeral: bool = False) -> Optional[Tuple[List[str], Dict[str, int]]]:
+                            ephemeral: bool = False) -> Optional[Tuple[List[str], Dict[str, int], Set[str]]]:
         """
-        Look up proper titles for new game names and let the person confirm any corrections.
-        Returns (final names, Steam app IDs by name), or None if they cancelled or didn't answer.
+        Look up proper titles for new game names, and let the person confirm any corrections and any name that
+        couldn't be confirmed. Returns (final names, Steam app IDs by name, the final names nobody confirmed), or
+        None if they cancelled or didn't answer.
         """
         channel = who(target)[2]
         async with channel.typing():
             found = await self.suggest_titles(member, names)
         suggested, typed, appids, lines = [], [], {}, []
+        corrected, unsure, unchecked = set(), [], []
         for name, title, appid, source in found:
             typed.append(name)
             suggested.append(title or name)
@@ -2483,19 +2598,39 @@ class GameManager(commands.Cog):
                 appids[title or name] = appid
             # Capitalization and symbol fixes are applied silently; only real spelling changes need a yes.
             if title and normalize(title) != normalize(name):
+                corrected.add(name)
                 where = {"Steam": "Steam's name for it", "web search": "found by web search"}.get(source, source)
                 lines.append(ui.two_line(f"**{title}**", f"You typed `{name}` · {where}"))
-        if not lines:
-            return suggested, appids
-        plural = len(lines) > 1
-        text = f"I checked {'those names' if plural else 'that name'}. Did you mean:\n" + "\n".join(lines)
-        view = NameCheckView(member.id, plural, ui.truncate(text, 3500))
+            elif title is None and source in UNCONFIRMED_REASONS:
+                unsure.append(ui.two_line(f"**{name}**", UNCONFIRMED_REASONS[source]))
+            elif title is None and source == NOT_LOOKED_UP:
+                unchecked.append(name)
+        unconfirmed = {n for n, t, _, s in found if t is None and s}
+        if not lines and not unconfirmed:
+            return suggested, appids, set()
+        parts = []
+        if lines:
+            parts += [f"I checked {'those names' if len(lines) > 1 else 'that name'}. Did you mean:", *lines]
+        if unsure:
+            parts += [f"I couldn't confirm {'these' if len(unsure) > 1 else 'this one'}. Check the spelling, or "
+                      "whether a comma split a name:", *unsure]
+        if unchecked:
+            parts.append(ui.two_line(f"**Not looked up: more than {MAX_CHECKED_NAMES} names at once**",
+                                     ", ".join(unchecked)))
+        plural = len(lines) + len(unsure) + len(unchecked) > 1
+        # Skipping only differs from cancelling when some names were fine.
+        skippable = bool(unconfirmed) and len(unconfirmed) < len([n for n in typed if n])
+        view = NameCheckView(member.id, plural, ui.truncate("\n".join(parts), 3500), corrections=bool(lines),
+                             skippable=skippable)
         view.message = await self.send_card(target, view, ephemeral=ephemeral)
         await view.wait()
         if view.choice == "suggested":
-            return suggested, appids
+            return suggested, appids, unconfirmed
         if view.choice == "typed":
-            return typed, {n: a for n, a in appids.items() if n in typed}
+            return typed, {n: a for n, a in appids.items() if n in typed}, unconfirmed | corrected
+        if view.choice == "skip":
+            kept = [s for s, (n, *_) in zip(suggested, found) if n not in unconfirmed]
+            return kept, {n: a for n, a in appids.items() if n in kept}, set()
         return None
 
     async def show_library(self, target: Target, member: discord.Member, ephemeral: bool = False):
@@ -2678,9 +2813,13 @@ class GameManager(commands.Cog):
     # ==========================================
 
     async def request_games_text(self, guild, channel, member, names: List[str], action: Optional[str] = None,
-                                 appids: Optional[Dict[str, int]] = None) -> str:
-        """File requests for new games (each gets an approval card with Approve/Deny). Returns status lines."""
-        text, _ = await self._request_games(guild, channel, member, names, action, appids)
+                                 appids: Optional[Dict[str, int]] = None,
+                                 unconfirmed: Optional[Set[str]] = None) -> str:
+        """
+        File requests for new games (each gets an approval card with Approve/Deny). Returns status lines.
+        Names in `unconfirmed` (that the name check couldn't confirm) get a warning on their card.
+        """
+        text, _ = await self._request_games(guild, channel, member, names, action, appids, unconfirmed)
         return text
 
     async def request_games(self, guild, channel, member, names: List[str], action: Optional[str] = None,
@@ -2702,8 +2841,11 @@ class GameManager(commands.Cog):
         if approved is None:
             then = {"own": "approving also adds it to their library",
                     "install": "approving also marks it installed for them"}.get(request.get("for_action"))
+            warning = (ui.line(ui.WARN, "I couldn't confirm this name on Steam or the web.",
+                               hint="Check the spelling before approving.") if request.get("unconfirmed") else None)
             return ui.CardView(ui.card(
                 ui.two_line(f"**{name}**", details(f"requested by <@{requester}> for the server library", then)),
+                warning,
                 [RequestButton("approve", request["id"]), RequestButton("deny", request["id"])] + link,
                 title=title, color=ui.ATTENTION, footer="Game admins can approve or deny"))
         verb = "approved" if approved else "denied"
@@ -2713,8 +2855,10 @@ class GameManager(commands.Cog):
             link or None, title=title, color=ui.SUCCESS if approved else ui.DANGER))
 
     async def _request_games(self, guild, channel, member, names: List[str], action: Optional[str],
-                             appids: Optional[Dict[str, int]]) -> Tuple[str, bool]:
+                             appids: Optional[Dict[str, int]],
+                             unconfirmed: Optional[Set[str]] = None) -> Tuple[str, bool]:
         appids = appids or {}
+        unconfirmed = {normalize(n) for n in unconfirmed or ()}
         games = await self.config.guild(guild).games()
         known = {normalize(g["name"]): g["name"] for g in games.values()}
         created, exists, pending = [], [], []
@@ -2734,11 +2878,13 @@ class GameManager(commands.Cog):
                     requests[rid] = {"id": rid, "name": name, "description": "", "requested_by": str(member.id),
                                      "requested_at": utcnow().isoformat(), "for_action": action,
                                      "channel_id": channel.id, "message_id": None, "steam_appid": appids.get(name),
-                                     "card": True}
+                                     "card": True, "unconfirmed": key in unconfirmed}
                     requested[key] = dict(requests[rid])
                     created.append((rid, name))
 
-        for rid, name in created:
+        if len(created) > 1:
+            await self._post_batch(guild, channel, member, created, action, unconfirmed)
+        for rid, name in created if len(created) == 1 else ():
             try:
                 message = await self.send_card(channel, self.request_card(requested[normalize(name)]))
             except discord.HTTPException:
@@ -2756,8 +2902,12 @@ class GameManager(commands.Cog):
             lines.append("⚠️ **Already in the library:** " + ", ".join(exists))
         return ui.truncate("\n".join(lines) or "⚠️ Nothing to request.", 1900), bool(created)
 
-    async def resolve_request(self, guild: discord.Guild, rid: str, approver: discord.Member, approve: bool) -> Optional[str]:
-        """Approve or deny a request. Returns the game name, or None if the request is gone."""
+    async def _decide_request(self, guild: discord.Guild, rid: str, approver: discord.Member,
+                              approve: bool) -> Optional[Tuple[dict, Optional[str]]]:
+        """
+        Close a request: on approval, add the game (and own or install it for the requester). Returns the request and
+        a note about the requester's library, or None if the request is gone. Cards and pings are up to the caller.
+        """
         async with self.config.guild(guild).game_requests() as requests:
             request = requests.pop(rid, None)
         if request is None:
@@ -2777,6 +2927,42 @@ class GameManager(commands.Cog):
                     f"{await self.cmd(guild, 'games install ' + name)}")
         elif approve and action == "install":
             note = "It's marked installed for them."
+        return request, note
+
+    async def _post_batch(self, guild, channel, member, created: List[Tuple[str, str]], action: Optional[str],
+                          unconfirmed: Set[str]):
+        """Several new requests at once: one batch card for all of them (each request points at it)."""
+        bid = generate_id()
+        batch = {"id": bid, "requested_by": str(member.id), "for_action": action, "channel_id": channel.id,
+                 "message_id": None, "card": True, "created_at": utcnow().isoformat(), "decided": {},
+                 "items": [{"rid": rid, "name": name, "unconfirmed": normalize(name) in unconfirmed}
+                           for rid, name in created]}
+        # Saved before the card goes up, so a quick click finds it.
+        async with self.config.guild(guild).request_batches() as batches:
+            batches[bid] = batch
+        async with self.config.guild(guild).game_requests() as requests:
+            for rid, _ in created:
+                if rid in requests:
+                    requests[rid]["batch"] = bid
+        try:
+            message = await self.send_card(channel, self.batch_card(batch))
+        except discord.HTTPException as e:
+            log.warning("Couldn't post a batch request card in %s: %s", channel.id, e)
+            return
+        async with self.config.guild(guild).request_batches() as batches:
+            if bid in batches:
+                batches[bid]["message_id"] = message.id
+
+    async def resolve_request(self, guild: discord.Guild, rid: str, approver: discord.Member, approve: bool) -> Optional[str]:
+        """Approve or deny a request. Returns the game name, or None if the request is gone."""
+        decided = await self._decide_request(guild, rid, approver, approve)
+        if decided is None:
+            return None
+        request, note = decided
+        name, requester = request["name"], request["requested_by"]
+        if request.get("batch"):   # its batch card redraws, and the requester hears once the batch is settled
+            await self._settle_batch(guild, request["batch"], approver, [(request, approve)])
+            return name
         verb = "approved" if approve else "denied"
         embed = discord.Embed(title=f"✅ Approved: {name}" if approve else f"❌ Denied: {name}",
                               color=ui.SUCCESS if approve else ui.DANGER,
@@ -2808,6 +2994,134 @@ class GameManager(commands.Cog):
         if name is None:
             await self._drop_buttons(interaction.message)
             await ui.respond(interaction, "⚠️ That request was already handled.")
+
+    # ---------- requests for several games at once ----------
+
+    def batch_card(self, batch: dict) -> ui.CardView:
+        """
+        One card for a batch of game requests: a row per game (✅ approved, "Denied", ⚠️ unconfirmed), with Approve
+        all / Review / Deny all while any are waiting. ATTENTION while waiting, then SUCCESS (or DANGER if none
+        were approved).
+        """
+        items, decided, requester = batch["items"], batch.get("decided", {}), batch["requested_by"]
+        pending = [i for i in items if i["rid"] not in decided]
+        approved = sum(1 for d in decided.values() if d["approved"])
+        rows = []
+        for item in items[:BATCH_ROWS_SHOWN]:
+            verdict = decided.get(item["rid"])
+            if verdict is None:
+                rows.append(ui.two_line(f"**{item['name']}**" + (" ⚠️" if item.get("unconfirmed") else ""),
+                                        "Couldn't confirm this name on Steam or the web"
+                                        if item.get("unconfirmed") else None))
+            else:
+                rows.append(ui.two_line(f"**{item['name']}**" + (" ✅" if verdict["approved"] else ""),
+                                        None if verdict["approved"] else "Denied"))
+        if len(items) > BATCH_ROWS_SHOWN:
+            rows.append(ui.hint(f"And {len(items) - BATCH_ROWS_SHOWN} more."))
+        then = {"own": "approving also adds them to their library",
+                "install": "approving also marks them installed for them"}.get(batch.get("for_action"))
+        title = f"🎮 Game requests: {ui.plural(len(items), 'game')}"
+        if pending:
+            head = ui.two_line(f"**{ui.plural(len(items), 'game')}** requested by <@{requester}>",
+                               details("for the server library", then))
+            partly = len(pending) < len(items)
+            buttons = [RequestBatchButton(action, batch["id"], partly) for action in ("approve", "review", "deny")]
+            return ui.CardView(ui.card(head, ui.SEPARATOR, "\n".join(rows), buttons, title=title,
+                                       color=ui.ATTENTION, footer="Game admins can approve or deny"))
+        head = ui.two_line(f"**{approved} approved, {len(items) - approved} denied**",
+                           f"requested by <@{requester}>")
+        note = {"own": "Approved games are in their library, not marked installed",
+                "install": "Approved games are marked installed for them"}.get(batch.get("for_action"))
+        return ui.CardView(ui.card(head, ui.SEPARATOR, "\n".join(rows), title=title,
+                                   color=ui.SUCCESS if approved else ui.DANGER, footer=note if approved else None))
+
+    async def batch_pending(self, guild: discord.Guild, bid: str) -> List[dict]:
+        """A batch's games still waiting for a decision (and still requested)."""
+        batch = (await self.config.guild(guild).request_batches()).get(bid)
+        if batch is None:
+            return []
+        requests = await self.config.guild(guild).game_requests()
+        return [i for i in batch["items"] if i["rid"] not in batch.get("decided", {}) and i["rid"] in requests]
+
+    async def resolve_batch(self, guild: discord.Guild, bid: str, approver: discord.Member,
+                            decisions: Dict[str, bool]) -> str:
+        """Approve or deny some of a batch's games (rid -> approve), then redraw its card once. Returns a line."""
+        results = []
+        for rid, approve in decisions.items():
+            decided = await self._decide_request(guild, rid, approver, approve)
+            if decided is not None:
+                results.append((decided[0], approve))
+        if results:
+            await self._settle_batch(guild, bid, approver, results)
+        approved = sum(1 for _, a in results if a)
+        parts = [f"approved {approved}" if approved else None,
+                 f"denied {len(results) - approved}" if len(results) > approved else None]
+        if not results:
+            return ui.line(ui.WARN, "Those were already handled.")
+        return ui.line(ui.DONE, details(*parts) + ".")
+
+    async def _settle_batch(self, guild: discord.Guild, bid: str, approver: discord.Member,
+                            results: List[Tuple[dict, bool]]):
+        """Record decisions on a batch, redraw its card, and once every game is decided ping the requester once."""
+        async with self.config.guild(guild).request_batches() as batches:
+            batch = batches.get(bid)
+            if batch is None:
+                return
+            decided = batch.setdefault("decided", {})
+            for request, approve in results:
+                decided[request["id"]] = {"approved": approve, "by": str(approver.id)}
+            done = all(i["rid"] in decided for i in batch["items"])
+            if done:
+                batches.pop(bid)
+            batch = dict(batch)
+        await self._edit_record(guild, batch, lambda: self.batch_card(batch))
+        if not done:
+            return
+        total = len(batch["items"])
+        approved = sum(1 for d in batch["decided"].values() if d["approved"])
+        if approved == total:
+            text = f"all {ui.plural(total, 'game')} you requested were added to the server library"
+        elif approved:
+            text = f"{approved} of the {total} games you requested were added to the server library"
+        else:
+            text = f"your requests for {ui.plural(total, 'game')} were denied"
+        link = message_link(guild.id, batch.get("channel_id"), batch.get("message_id"))
+        await self._ping(guild, batch.get("channel_id"), "✅" if approved else "❌", [batch["requested_by"]], text,
+                         link)
+
+    async def on_batch_button(self, interaction: discord.Interaction, action: str, bid: str):
+        if not await self.is_game_admin(interaction.user):
+            return await ui.respond(interaction, "🔒 Only game admins can approve or deny requests.")
+        guild = interaction.guild
+        pending = await self.batch_pending(guild, bid)
+        if not pending:
+            return await ui.respond(interaction, "⚠️ Those requests were already handled.")
+        if action == "review":
+            view = BatchReviewView(self, interaction.user.id, bid, pending)
+            await self.send_card(interaction, view, ephemeral=True)
+            view.message = interaction
+            return
+        if action == "approve":
+            await interaction.response.defer()
+            await self.resolve_batch(guild, bid, interaction.user, {i["rid"]: True for i in pending})
+            return
+        title = "🎮 Deny requests"
+        view = ConfirmView(interaction.user.id, ui.line(ui.WARN, f"Deny {ui.plural(len(pending), 'waiting request')}? "
+                                                                 "The games won't be added."),
+                           label="Deny all", title=title)
+        await self.send_card(interaction, view, ephemeral=True)
+        view.message = interaction
+        await view.wait()
+        if view.interaction is None:
+            return
+        if not view.value:
+            return await view.interaction.response.edit_message(
+                view=final_card("Cancelled. Nothing was denied.", title=title, color=ui.MUTED),
+                allowed_mentions=NO_PING)
+        await view.interaction.response.defer()
+        line = await self.resolve_batch(guild, bid, interaction.user,
+                                        {i["rid"]: False for i in await self.batch_pending(guild, bid)})
+        await view.interaction.edit_original_response(view=final_card(line, title=title), allowed_mentions=NO_PING)
 
     async def on_install_button(self, interaction: discord.Interaction, rid: str):
         guild = interaction.guild
@@ -2951,15 +3265,16 @@ class GameManager(commands.Cog):
             if checked is None:
                 lines.append("⚠️ Skipped: " + ", ".join(unknown))
             elif await self.can_add_games(member):
-                names, appids = checked
+                names, appids, _ = checked
                 added, _ = await self.add_games(guild, member, names, appids)
                 more, _ = await self.change_library_text(guild, member, names, "own")
                 if added:
                     lines.append(f"✅ **Added to the server library:** {', '.join(added)}")
                 lines.append(more)
             else:
-                names, appids = checked
-                lines.append(await self.request_games_text(guild, channel, member, names, "own", appids=appids))
+                names, appids, unconfirmed = checked
+                lines.append(await self.request_games_text(guild, channel, member, names, "own", appids=appids,
+                                                           unconfirmed=unconfirmed))
         return ui.truncate("\n".join(l for l in lines if l and l != NOTHING_TO_CHANGE), 1500)
 
     async def remove_want(self, target: Target, name: str, ephemeral: bool = False):
@@ -5089,9 +5404,9 @@ class GameManager(commands.Cog):
         """
         checked = await self.checked_names(ctx, ctx.author, parse_game_names(game_names))
         if checked is not None:
-            names, appids = checked
+            names, appids, unconfirmed = checked
             await self.reply(ctx, content=await self.request_games_text(ctx.guild, ctx.channel, ctx.author, names,
-                                                                        appids=appids))
+                                                                        appids=appids, unconfirmed=unconfirmed))
 
     @games.command(name="requests")
     async def games_requests(self, ctx: commands.Context):
@@ -5620,15 +5935,15 @@ class GameManager(commands.Cog):
         """
         Add games to the server library. Separate them with commas or put one per line.
 
-        Up to 10 names at a time are checked for their proper titles (typos and capitalization)
-        before adding; you confirm any corrections. Bigger lists are added as typed.
+        Up to 25 names at a time are checked for their proper titles (typos and capitalization)
+        before adding; you confirm any corrections, and any name that couldn't be confirmed.
 
         **Example:** `[p]games admin add Rocket League, Halo Infinite`
         """
         checked = await self.checked_names(ctx, ctx.author, parse_game_names(game_names))
         if checked is None:
             return
-        added, existing = await self.add_games(ctx.guild, ctx.author, *checked)
+        added, existing = await self.add_games(ctx.guild, ctx.author, *checked[:2])
         lines = []
         if added:
             lines.append(f"✅ **Added ({len(added)}):** " + ", ".join(added))
@@ -6034,9 +6349,9 @@ class GameManager(commands.Cog):
         await interaction.response.defer(ephemeral=True, thinking=True)  # the name lookup can take a few seconds
         checked = await self.checked_names(interaction, member, parse_game_names(game), ephemeral=True)
         if checked is not None:
-            names, appids = checked
-            await self.reply(interaction, content=await self.request_games_text(guild, channel, member, names,
-                                                                                appids=appids), ephemeral=True)
+            names, appids, unconfirmed = checked
+            await self.reply(interaction, content=await self.request_games_text(
+                guild, channel, member, names, appids=appids, unconfirmed=unconfirmed), ephemeral=True)
 
     @slash.command(name="newprofile", description="Set up your gaming profile step by step")
     async def slash_newprofile(self, interaction: discord.Interaction):

@@ -18,7 +18,7 @@ Your library is what makes everything else work: finding games everyone owns, pi
 You can also use `/games newprofile` (only you see it), or say "@ButlerBot set up my profile". A menu only you can use walks you through five steps. Every step is optional, and changes save as you go:
 
 1. **Timezone:** so session times show correctly for you.
-2. **Games you own:** tick them in a picker, or type names. Games the server doesn't have yet get added or requested for you.
+2. **Games you own:** tick them in a picker, or type names, one per line. Games the server doesn't have yet get added or requested for you.
 3. **Installed games:** which of your games are on your computer right now.
 4. **Favorites:** your #1, #2 and #3. These break ties in votes.
 5. **Wishlist:** games you want but don't own. You get a ping when one goes on sale.
@@ -47,9 +47,17 @@ Long lists show 8 games at a time, each with its numbers in small text underneat
 
 A button offers to **request** the game. The request is a card with **Approve** and **Deny** buttons for game admins, and approving adds the game to your library automatically. When it's decided, the card shows the answer and you get a one-line ping that links to it. Some servers let members add games directly.
 
+Requesting several games at once, for example while setting up your profile, makes **one card** for all of them instead of one each. You get a single ping once every game on it is decided.
+
+{: .staff }
+> On a card for several games, **Approve all** and **Deny all** decide them together, and Deny all asks first. **Review** opens a private list where you pick games and approve or deny just those. Rows marked ⚠️ are names ButlerBot couldn't confirm, so check their spelling. `!games admin approve <game>` and `deny <game>` work too, and update the card.
+
 Before a new game is requested or added, ButlerBot looks up its proper title:
 - **Capitalization fixes** apply on their own: "helldivers 2" becomes **HELLDIVERS 2**.
 - **Real spelling changes** ask you first: "an eggtremely hard game" becomes **An Eggstremely Hard Game**.
+- **Names it can't find** on Steam or the web ask you too: keep them, skip them, or cancel. Game admins see a warning on these requests, so they can check the spelling before approving.
+
+Commas separate names typed on one line, except in numbers like "40,000". To keep a name with a comma, like "Papers, Please", put one name per line or use quotes.
 
 ```
 !games request Deep Rock Galactic

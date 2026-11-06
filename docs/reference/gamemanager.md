@@ -43,8 +43,8 @@ Library management for game admins (server admins, or the role set with `!games 
 
 Add games to the server library. Separate them with commas or put one per line.
 
-Up to 10 names at a time are checked for their proper titles (typos and capitalization)
-before adding; you confirm any corrections. Bigger lists are added as typed.
+Up to 25 names at a time are checked for their proper titles (typos and capitalization)
+before adding; you confirm any corrections, and any name that couldn't be confirmed.
 
 **Example:** `!games admin add Rocket League, Halo Infinite`
 

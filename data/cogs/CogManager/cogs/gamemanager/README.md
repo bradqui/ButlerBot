@@ -60,17 +60,21 @@ Buttons keep working after restarts and reloads, and running votes pick back up.
 - A partial name is used only when exactly one game fits. For example, "Halo" asks which one you meant when there are two Halo games.
 - If a name isn't in the server library at all, a button offers to request it. Game admins, and members when `memberadd` is on, get a button to add it instead.
 - After an approval, the game is also owned or installed for the requester, matching what they were trying to do.
+- Several new games requested at once (a profile import, or `!games request A, B, C`) share **one card**, with **Approve all**, **Review** (a private pick-and-decide menu) and **Deny all** (asks first). Each game's row shows ✅, Denied or ⚠️ (name not confirmed). The requester gets one ping when the last game is decided.
 
 **Proper titles for new games:** before a game is requested or added, the bot looks up its official name.
 1. **A close match already in the library:** "rocket leage" suggests the existing **Rocket League**.
 2. **An exact name on Steam:** "helldivers 2" becomes **HELLDIVERS 2**.
-3. **An AI web search,** when the Claude cog is loaded: "an eggtremely hard game" finds **An Eggstremely Hard Game**. This costs about 1¢ and is limited to 5 lookups per command.
+3. **An AI web search,** when the Claude cog is loaded: "an eggtremely hard game" finds **An Eggstremely Hard Game**. This costs about 1¢ and is limited to 10 lookups per command. Lookups run four at a time.
 
 **What happens next:**
 - Fixes to capitalization or symbols are applied automatically.
-- Real spelling changes ask first: **Use the suggested name**, **Use what I typed**, or **Cancel**.
+- Real spelling changes ask first: **Use suggestion**, **Keep my spelling**, or **Cancel**.
+- Names nothing could confirm ask too: **Keep it**, **Skip it** (when other names in the batch were fine), or **Cancel**. Kept ones are requested with a ⚠️ "couldn't confirm" line on the request card.
 - Games found on Steam keep their Steam ID, and requests link to the store page.
-- Admin bulk adds of more than 10 names skip the lookups.
+- More than 25 names at once skip the lookups, and the check lists them as not looked up.
+
+**Splitting names:** names typed on separate lines are split by line only, so "Papers, Please" survives. On a single line, commas split names, except thousands commas ("Warhammer 40,000: Darktide"). Quotes keep a name together either way.
 
 ## Finding something to play
 

@@ -89,7 +89,7 @@ Quirks to know:
   - Without a rules role, the rules step is skipped and admins get a note.
   - Saying No keeps the rules prompt up so the member can change their mind.
 - **GameManager internals:**
-  - **Persistent buttons:** session, vote, request and install buttons are discord.py `DynamicItem`s (custom IDs `gm:s:<action>:<sid>`, `gm:v:<vid>:<gid>`, `gm:r:<action>:<rid>`, `gm:i:<rid>`), registered in `cog_load`. They keep working after restarts. Buttons posted by the pre-2026-11 version used static IDs and are dead.
+  - **Persistent buttons:** session, vote, request and install buttons are discord.py `DynamicItem`s (custom IDs `gm:s:<action>:<sid>`, `gm:v:<vid>:<gid>`, `gm:r:<action>:<rid>`, `gm:rb:<action>:<bid>`, `gm:i:<rid>`), registered in `cog_load`. They keep working after restarts. Buttons posted by the pre-2026-11 version used static IDs and are dead.
   - **Vote timers:** they live in `self.vote_tasks`. `_resume_votes` reschedules them from each vote's `ends_at` on load.
   - **Background loops:**
     - `session_loop` (every minute) sends reminders and start pings, posts the cards of sessions made ahead, ends sessions 12 h after start or creation, and makes each schedule's next session (`_tick_recurring`).
@@ -149,6 +149,10 @@ Quirks to know:
   - **New game names:** they pass through `checked_names` before a request or add (`!games request`, `/games request`, `!games admin add`, and the Request/Add buttons).
     - `suggest_titles` tries, in order: a library near-match (difflib), Steam's exact-name store search (`steam_exact_title`, no key), then the Claude cog's public `find_game_title(name, member)`.
     - Fixes that only change capitalization or symbols apply silently. Real spelling changes need the person to confirm (`NameCheckView`).
+    - Names nothing confirmed (`NOT_FOUND`, `NOT_SEARCHED`, `NOT_LOOKED_UP`) also need a yes: `NameCheckView(corrections=False)` offers Keep, Skip (`skippable`, when other names were fine) and Cancel. `checked_names` returns `(names, appids, unconfirmed)`, and requests for unconfirmed names store `unconfirmed: True`, which puts a ⚠️ line on the request card.
+    - Lookups run in parallel (`LOOKUP_CONCURRENCY` 4), up to `MAX_CHECKED_NAMES` (25) names and `MAX_AI_TITLE_LOOKUPS` (10) AI searches per command.
+    - **Batch requests:** when `_request_games` creates more than one request, `_post_batch` saves a guild `request_batches` record (`items` [{rid, name, unconfirmed}], `decided` {rid: {approved, by}}) and posts one `batch_card`; each request stores `batch`. `RequestBatchButton` (`approve|review|deny`) calls `on_batch_button`: Approve all, `BatchReviewView` (private multi-select, then Approve picked / Deny picked) or Deny all after a `ConfirmView`. `resolve_request` and `resolve_batch` share `_decide_request`; batched requests go through `_settle_batch`, which redraws the card and, once every game is decided, pops the batch and sends one ping.
+    - `parse_game_names`: several lines split by line only (commas stay, "Papers, Please"); a single line splits at commas except thousands commas (`NAME_COMMA`, "40,000"); quotes keep a name together.
     - Games and requests store `steam_appid` when one is known.
   - **`find_game_title`** (Claude cog) tries Haiku with `web_search_20260209`, then Haiku with `web_search_20250305`, then Sonnet (`TITLE_SEARCHERS`). It remembers the first option the API accepts, and it reports through a strict `report_title` client tool without sending a tool_result back.
 - **Other public Claude cog helpers:**

@@ -394,6 +394,9 @@ def parse_duration(text: str) -> Optional[int]:
     return int(m.group(1)) * {"s": 1, "m": 60, "h": 3600}[unit]
 
 
+LENGTH_LINE_RE = re.compile(r"\s*(?:length|duration)\b\s*(:?)\s*(.+?)\s*$", re.I)   # "Length: 3h" under a session
+
+
 def parse_length(text: str) -> Optional[int]:
     """An event's length in minutes: '2h', '90m', '1h30m', '1.5h'. None if it can't be read."""
     m = re.fullmatch(r"\s*(?:(\d+(?:\.\d+)?)\s*h(?:ours?|rs?)?)?\s*(?:(\d+)\s*m(?:in(?:ute)?s?)?)?\s*", text.lower())
@@ -1510,6 +1513,15 @@ class GameManager(commands.Cog):
     async def guide_member_roles(self, member: discord.Member) -> List[str]:
         """Extra roles the Claude cog's bot guide should know about (it can't see this cog's admin role)."""
         return ["game admin"] if await self.is_game_admin(member) else []
+
+    async def guide_member_notes(self, member: discord.Member) -> List[str]:
+        """Facts about the asker the bot guide needs to run commands for them (here: the timezone times are read in)."""
+        _, name, personal = await self.timezone_for(member)
+        if personal:
+            return [f"Their saved timezone is {name}; times they give for sessions and reminders are read in it, so "
+                    "don't run games timezone unless they ask to change it."]
+        return [f"They have no saved timezone, so their session times are read in the server's ({name}). If they "
+                "name a different zone, set it with games timezone first."]
 
     # ==========================================
     #        LOOKUPS FOR THE CLAUDE BOT GUIDE
@@ -2963,17 +2975,32 @@ class GameManager(commands.Cog):
 
     async def details_from_message(self, target: Target, text: Optional[str]) -> Tuple[Optional[dict], Optional[str]]:
         """
-        Event details from a text command: lines after the first are the description, an attached image is the
-        banner, and a mentioned voice channel (taken out of the text) is the place. Returns (details, the first
-        line without the mention), or (None, None) after explaining a bad banner.
+        Event details from a text command: lines after the first are the description, except a "Length: 3h" line,
+        which is how long the event runs. An attached image is the banner, and a mentioned voice channel (taken out
+        of the text) is the place. Returns (details, the first line without the mention), or (None, None) after
+        explaining a bad banner or length.
         """
         if isinstance(target, discord.Interaction):
             return {}, text
         guild = target.guild
         details: dict = {}
         first, _, rest = (text or "").strip().partition("\n")
+        description = []
+        for line in rest.split("\n"):
+            match = LENGTH_LINE_RE.match(line)
+            minutes = parse_length(match.group(2)) if match else None
+            if match is None or (minutes is None and not match.group(1)):   # "Duration of the raid…" is description
+                description.append(line)
+                continue
+            if minutes is None or not EVENT_MIN_MINUTES <= minutes <= EVENT_MAX_MINUTES:
+                await self.reply(target, content=ui.line(
+                    ui.ASK, f"I couldn't use **{ui.truncate(match.group(2), 20)}** as a length.",
+                    hint="Try Length: 2h, 90m or 1h30m, between 15 minutes and a day."))
+                return None, None
+            details["minutes"] = minutes
+        if "\n".join(description).strip():
+            details["description"] = "\n".join(description).strip()[:800]
         if rest.strip():
-            details["description"] = rest.strip()[:800]
             text = first
         for match in re.finditer(r"<#(\d+)>", text or ""):
             channel = guild.get_channel(int(match.group(1)))
@@ -4113,7 +4140,8 @@ class GameManager(commands.Cog):
         Scheduled sessions also show up in the server's Discord events. Start with `every` to repeat weekly
         (or `every other` for every two weeks); each one is posted a day ahead. For the event, attach an image
         as its banner, mention a voice channel to hold it there, and put a description on the lines after the
-        first (Shift+Enter); the host can change these later with the card's **Edit event** button.
+        first (Shift+Enter). A line like `Length: 3h` sets how long the event runs. The host can change these
+        later with the card's **Edit event** button.
 
         **Examples:**
         - `[p]games session` (starts now)
@@ -4700,7 +4728,8 @@ class GameManager(commands.Cog):
 
         Optionally start with a time (read in your timezone; everyone sees their own). Start with `every` to
         repeat weekly. For the Discord event: attach an image for its banner, mention a voice channel to hold it
-        there, and put a description on the lines after the first (Shift+Enter). The same as `[p]games session`.
+        there, put a description on the lines after the first (Shift+Enter), and add a line like `Length: 3h`
+        for how long it runs. The same as `[p]games session`.
 
         **Examples:** `[p]session new`, `[p]session new friday 9pm Raid night`, `[p]session new in 2h Rocket League`,
         `[p]session new every friday 9pm`

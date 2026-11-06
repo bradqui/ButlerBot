@@ -1225,6 +1225,18 @@ class ClaudeChat(commands.Cog):
                     log.debug("guide_member_roles failed in %s", cog.qualified_name, exc_info=True)
         return ", ".join([level, *extra])
 
+    async def _member_notes(self, member: discord.Member) -> List[str]:
+        """Facts other cogs report about the asker via guide_member_notes() (e.g. GameManager's saved timezone)."""
+        notes = []
+        for cog in self.bot.cogs.values():
+            hook = getattr(cog, "guide_member_notes", None)
+            if hook is not None:
+                try:
+                    notes.extend(await hook(member))
+                except Exception:
+                    log.debug("guide_member_notes failed in %s", cog.qualified_name, exc_info=True)
+        return notes
+
     def _requirement(self, command: commands.Command) -> Tuple[str, bool]:
         """
         (who can run it, whether it's bot-owner only), from the command's checks or the nearest parent's or cog's.
@@ -1359,7 +1371,8 @@ class ClaudeChat(commands.Cog):
         words = [w for w in re.findall(r"[a-z0-9]+", str(args.get("search") or "").lower())
                  if len(w) >= 3 and w not in SEARCH_STOP_WORDS]
 
-        parts = [f"Asker: {member.display_name} ({level}). Command prefix: `{prefix}`."]
+        parts = [" ".join([f"Asker: {member.display_name} ({level}). Command prefix: `{prefix}`.",
+                           *await self._member_notes(member)])]
         matches = []
         for name, about, found in sections:
             if name.lower() in wanted:

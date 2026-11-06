@@ -73,6 +73,7 @@ Quirks to know:
   - **Extension hooks for other cogs:**
     - A check predicate with a `requirement` attribute (e.g. GameManager's `game_admin()`, `"game admin"`) shows up as "(game admin only)" in the catalog and triggers confirmation.
     - A cog method `async guide_member_roles(member) -> List[str]` adds roles to the asker's permission label.
+    - A cog method `async guide_member_notes(member) -> List[str]` adds facts to the lookup's "Asker:" line (`_member_notes`). GameManager reports the asker's saved timezone (or that they have none), so the AI doesn't re-run `games timezone`.
     - **Read-only lookups:** a cog with `guide_tools() -> List[tool dict]` and `async guide_call_tool(name, args, asker) -> str` offers lookup tools.
       - `_call_claude` runs up to 3 lookup rounds per answer, `bot_commands` included: tool_use → tool_result → final answer. The tool blocks stay within that turn; history stores only the final text. Text written before a lookup is dropped, the same way as for web searches.
       - A `run_commands` or `generate_image` call ends the loop.
@@ -111,7 +112,7 @@ Quirks to know:
       - `create_event` and `push_event` (which edits the event, or creates it if missing) use it.
     - **Setting details at start:**
       - `/games session` has description, banner (attachment), voice and length options.
-      - Text commands use `details_from_message`: lines after the first are the description, an attached image is the banner, and a mentioned voice channel is taken out of the title. The AI chat's `run_commands` runs on a copy of the asker's message, so its attachments come along; the Claude cog's `one_line()` shows only a command's first line in its "Running:" note.
+      - Text commands use `details_from_message`: lines after the first are the description, except a `Length: 3h` line (`LENGTH_LINE_RE`; without a colon it only counts if the rest parses as a length), which sets `minutes`; an attached image is the banner, and a mentioned voice channel is taken out of the title. The AI chat's `run_commands` runs on a copy of the asker's message, so its attachments come along; the Claude cog's `one_line()` shows only a command's first line in its "Running:" note.
       - Bad banners are refused with `read_banner` (10 MB; PNG, JPG, GIF or WebP by magic bytes, `image_ext`).
     - **Edit event:** scheduled sessions' cards have it (`SessionButton` action `event`). It opens `EventDetailsModal` (discord.py 2.7 `Label`, `ChannelSelect`, `FileUpload` and `CheckboxGroup`), which has 5 fields: description, length, voice, banner, and options ("Remove the banner"; "Also use for future sessions" on repeating ones).
       - `apply_event_details` saves the form; "future" also writes the schedule's `event` and stores the banner under the schedule's ID.

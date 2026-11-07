@@ -31,7 +31,7 @@ Rules widen or narrow access to any command or whole cog, for users, roles or ch
 ```
 !permissions addserverrule allow cleanup @Helpers      Helpers can use !cleanup
 !permissions addserverrule deny Trivia #general        no trivia in #general
-!permissions setdefaultserverrule deny ButlerFun       off unless allowed
+!permissions setdefaultserverrule deny Parlor          off unless allowed
 !permissions canrun @someone guessgame                 check someone's access
 !permissions explain
 ```

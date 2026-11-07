@@ -28,11 +28,10 @@ Right-click a message (long-press on mobile) → **Apps**. Only you see the resu
 | [Admin]({{ '/reference/admin/' | relative_url }}) | A collection of server administration utilities. | 14 |
 | [Alias]({{ '/reference/alias/' | relative_url }}) | Create aliases for commands. | 9 |
 | [AutoRoom]({{ '/reference/autoroom/' | relative_url }}) | Automatic voice channel management. | 46 |
-| [ButlerFun]({{ '/reference/butlerfun/' | relative_url }}) | AI extras: catch-up summaries, ButlerBot's judgments, text adventures, trivia writing and guess the game. | 12 |
 | [ButtonGreeter]({{ '/reference/buttongreeter/' | relative_url }}) | Welcome buttons for new members: pick a group (role and nickname tag), then agree to the rules. | 13 |
 | [Censord]({{ '/reference/censord/' | relative_url }}) | Censor chat using CSV-based lists with specific levels and threshold punishments. | 12 |
 | [Chatchart]({{ '/reference/chatchart/' | relative_url }}) | Show activity. | 5 |
-| [ClaudeChat]({{ '/reference/claudechat/' | relative_url }}) | Chat with Anthropic's Claude, which also answers questions about the bot and runs commands for you. | 16 |
+| [ClaudeChat]({{ '/reference/claudechat/' | relative_url }}) | Chat with Anthropic's Claude, which also answers questions about the bot and runs commands for you. | 17 |
 | [Cleanup]({{ '/reference/cleanup/' | relative_url }}) | This cog contains commands used for "cleaning up" (deleting) messages. | 12 |
 | [ClearChannel]({{ '/reference/clearchannel/' | relative_url }}) | A cog to delete ALL messages of a channel! | 10 |
 | [Core]({{ '/reference/core/' | relative_url }}) | The Core cog has many commands related to core functions. | 80 |
@@ -47,7 +46,7 @@ Right-click a message (long-press on mobile) → **Apps**. Only you see the resu
 | [Mod]({{ '/reference/mod/' | relative_url }}) | Moderation tools. | 32 |
 | [ModLog]({{ '/reference/modlog/' | relative_url }}) | Browse and manage modlog cases. To manage modlog settings, use `!modlogset`. | 4 |
 | [Mutes]({{ '/reference/mutes/' | relative_url }}) | Mute users temporarily or indefinitely. | 16 |
-| [Parlor]({{ '/reference/parlor/' | relative_url }}) | Parlor games: critiques, roasts, the emoji game and twenty questions. | 10 |
+| [Parlor]({{ '/reference/parlor/' | relative_url }}) | Parlor games: guess the game, the emoji game, twenty questions, adventures, judge, critiques, roasts and trivia. | 21 |
 | [Permissions]({{ '/reference/permissions/' | relative_url }}) | Customise permissions for commands and cogs. | 12 |
 | [SpeakUp]({{ '/reference/speakup/' | relative_url }}) | The bot chiming in when it can help: times, Steam links, link summaries, command mistakes, and reminders. | 9 |
 | [Trivia]({{ '/reference/trivia/' | relative_url }}) | Play trivia with friends! | 17 |

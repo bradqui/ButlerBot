@@ -12,13 +12,12 @@ All of them live in [`data/cogs/CogManager/cogs/`](data/cogs/CogManager/cogs/).
 
 | Cog | What it does | Main commands |
 |---|---|---|
-| [`claude`](data/cogs/CogManager/cogs/claude/) | AI chat with Anthropic's Claude (Sonnet 5.5 by default). It has one shared conversation per channel, plus AI threads. Replying to an answer continues the conversation. It reads images, PDFs, and text files, can search the web and cite sources, and tracks usage and cost, with optional daily limits. Image requests are handed to Gemini. The same AI answers plain-English questions about the bot (`!butler` is the same as `!ai`), looking up the exact commands, or runs them for you. Commands run with your own permissions, and anything that needs elevated rights waits for you to press **Run**. | `!ai`, `!aithread`, `!butler` (alias `!guide`), `!claude …` |
+| [`claude`](data/cogs/CogManager/cogs/claude/) | AI chat with Anthropic's Claude (Sonnet 5.5 by default). It has one shared conversation per channel, plus AI threads. Replying to an answer continues the conversation. It reads images, PDFs, and text files, can search the web and cite sources, and tracks usage and cost, with optional daily limits. Image requests are handed to Gemini. The same AI answers plain-English questions about the bot (`!butler` is the same as `!ai`), looking up the exact commands, or runs them for you. Commands run with your own permissions, and anything that needs elevated rights waits for you to press **Run**. `/catchup` summarizes a channel since you last spoke, only for you. | `!ai`, `!aithread`, `!butler` (alias `!guide`), `/catchup`, `!catchup`, `!claude …` |
 | [`gemini`](data/cogs/CogManager/cogs/gemini/) | Image generation with Google Gemini. The Claude cog calls it for "draw…" requests. | `!draw`, `!draw edit`, `!gemini …` |
 | [`gamemanager`](data/cogs/CogManager/cogs/gamemanager/) | Per-server game library and game nights:<br>- tick-box pickers for the games people own and have installed, and a step-by-step profile setup<br>- rankings, a shared-game finder, and "looking for group" pings<br>- scheduled and weekly sessions with join buttons, reminders and Discord events<br>- votes on what to play<br>- wishlists with Steam sale alerts<br><br>See its [README](data/cogs/CogManager/cogs/gamemanager/README.md). | `!games …` (aliases `game`, `gm`), `/games …` |
 | [`activitystats`](data/cogs/CogManager/cogs/activitystats/) | Server activity stats. Everyone sees messages per channel, leaderboards, a heatmap of busy times, voice time, most-played games and their own stats. Admins get active-member trends, new-member retention, quiet members, joins and leaves, dead channels, game-night attendance, command usage, unanswered guide questions, library coverage and an optional weekly digest. Stores hourly counts, never message text; members can opt out. The butler and AI chat can answer stats questions. | `!stats …`, `!stats admin …` |
 | [`speakup`](data/cogs/CogManager/cogs/speakup/) | The bot chiming in when it can help:<br>- a clock reaction on times in chat (click it to see the time in everyone's timezone and schedule a session)<br>- cards for Steam store links (price, sale, who owns it, add and wishlist buttons)<br>- a summary offer on article links<br>- "did you mean…" for mistyped commands<br><br>Also reminders. Quiet it per channel, per person or per feature. | `!speakup …`, `!remindme`, `!reminders` |
-| [`butlerfun`](data/cogs/CogManager/cogs/butlerfun/) | AI extras on top of the Claude cog:<br>- `/catchup`: a summary of a channel since you last spoke, only for you<br>- `!judge`: ButlerBot settles an argument in character<br>- `!adventure`: a group text adventure in a thread<br>- `!maketrivia`: writes a list for Red's trivia game<br>- `!guessgame`: Gemini paints a game from the server's library and the first correct guess wins | `/catchup`, `!catchup`, `!judge`, `!adventure`, `!maketrivia`, `!guessgame` |
-| [`parlor`](data/cogs/CogManager/cogs/parlor/) | Parlor games on top of the Claude cog:<br>- `!emojigame`: guess the game from a row of emoji<br>- `!twentyq`: twenty questions about a game, in a thread<br>- `!critique`: a gallery critic's review of a screenshot<br>- `!roast`: a roast of a game library (others only if they opted in) | `!parlor`, `!emojigame`, `!twentyq`, `!critique`, `!roast` |
+| [`parlor`](data/cogs/CogManager/cogs/parlor/) | Games and fun on top of the Claude cog:<br>- `!guessgame`: Gemini paints a game from the server's library and the first correct guess wins<br>- `!emojigame`: guess the game from a row of emoji<br>- `!twentyq`: twenty questions about a game, in a thread<br>- `!adventure`: a group text adventure in a thread<br>- `!judge`: ButlerBot settles an argument in character<br>- `!critique`: a gallery critic's review of a screenshot<br>- `!roast`: a roast of a game library (others only if they opted in)<br>- `!maketrivia`: writes a list for Red's trivia game | `!parlor`, `!guessgame`, `!emojigame`, `!twentyq`, `!adventure`, `!judge`, `!critique`, `!roast`, `!maketrivia` |
 | [`handbook`](data/cogs/CogManager/cogs/handbook/) | Replaces `!help` with short cards that link to the [online handbook](https://bradqui.github.io/ButlerBot/), whose pages live in [`docs/`](docs/). `!handbook [topic]` posts links. The owner's `!handbook export` generates the command reference from the running bot. | `!help`, `!handbook` |
 | [`buttongreeter`](data/cogs/CogManager/cogs/buttongreeter/) | Welcome flow for new members: alliance and role buttons, a `[TAG] Name` nickname, then agreeing to the rules. | `!bg …`, `!changerole`, `!forceclass`, `!forcerulesremove` |
 | [`censord`](data/cogs/CogManager/cogs/censord/) | Word filter with `off`/`low`/`high` levels, CSV word lists, per-channel overrides, and threshold punishments (delete, kick or ban). | `!censor …` |
@@ -80,7 +79,6 @@ Then, in Discord, as the bot owner. Delete the messages containing keys afterwar
 !load gamemanager
 !load activitystats
 !load speakup
-!load butlerfun
 !load parlor
 !load handbook
 !load buttongreeter
@@ -123,7 +121,7 @@ They were written for this server, but they're ordinary Red 3.5 cogs, and you're
 3. `[p]load` it.
 
 Some cogs build on others:
-- `butlerfun`, `parlor` and parts of `speakup` need `claude`.
+- `parlor` and parts of `speakup` need `claude`.
 - Session scheduling, Steam cards and `guessgame` need `gamemanager`. The parlor games use its library when it has at least 3 games.
 - `guessgame` also needs `gemini`.
 - Everything degrades gracefully when a partner cog is missing.

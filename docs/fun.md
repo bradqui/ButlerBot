@@ -6,25 +6,22 @@ permalink: /fun/
 
 # Fun and games
 
-## Guess the game
+`!parlor` lists everything on this page in one card.
+
+## Guessing games
+
+`!parlor top` is the leaderboard for all three guessing games, with each person's wins at each one.
+
+### Guess the game
 
 ```
 !guessgame
 ```
 
 ButlerBot picks a game from the server's library and has Gemini paint it in an unusual style ("as a medieval tapestry", "as 8-bit pixel art").
-
-**How a round runs:**
-- The first person to type the game's name wins. Close misspellings count.
-- Hints appear after 1 and 2 minutes, and the answer is revealed at 3.
-
-**Commands:**
-- `!guessgame top` is the leaderboard.
-- Mods can end a round with `!guessgame stop`.
-
-## Parlor games
-
-`!parlor` lists them all, and `!parlor top` is the leaderboard for the guessing games.
+- **How a round runs:** the first person to type the game's name wins. Close misspellings count, and so does "is it Barony?".
+- **Hints:** they appear after 1 and 2 minutes, and the answer is revealed at 3.
+- **Stopping:** mods can end a round with `!guessgame stop`.
 
 ### Emoji game
 
@@ -51,6 +48,8 @@ ButlerBot thinks of a game and opens a thread. Everyone asks yes-or-no questions
 - **The limit:** after 20 questions you get 2 more minutes for last guesses, then the answer is revealed.
 - **Giving up:** `!twentyq stop` in the thread reveals the answer.
 - **Idle rounds:** a round with no questions for 15 minutes ends on its own.
+
+## Critiques and roasts
 
 ### Critique
 
@@ -146,14 +145,6 @@ ButlerBot opens a thread and narrates a story everyone can play.
 ```
 
 ButlerBot reads the recent messages (20 by default, up to 60) and delivers a ruling, in character: each side summed up, a verdict, and a penalty for the loser.
-
-## Catch up on a busy channel
-
-```
-/catchup
-```
-
-You get a short summary of everything since you last spoke in the channel, and only you see it. The text version `!catchup` sends it to your DMs instead.
 
 ## Summarize a link
 

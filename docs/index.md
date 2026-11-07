@@ -22,11 +22,11 @@ ButlerBot is our server's resident robot butler: overqualified, mildly put-upon,
 |---|---|---|
 | 👋 | [Getting started]({{ '/start/' | relative_url }}) | New here? Start with this. |
 | 🤵 | [Asking ButlerBot]({{ '/butler/' | relative_url }}) | Ask questions in plain English, or have it run commands for you. |
-| 🤖 | [AI chat and images]({{ '/ai/' | relative_url }}) | Chat with Claude, make images, start AI threads. |
+| 🤖 | [AI chat and images]({{ '/ai/' | relative_url }}) | Chat with Claude, catch up on a channel, make images. |
 | 🔍 | [What uses AI]({{ '/ai-use/' | relative_url }}) | Which features use AI, what they send, and what doesn't. |
 | 🎮 | [Your games]({{ '/games/library/' | relative_url }}) | Your game library, profile setup, favorites and wishlist. |
 | 🎲 | [Game nights]({{ '/games/nights/' | relative_url }}) | Sessions, weekly game nights, votes and finding players. |
-| 🎉 | [Fun and games]({{ '/fun/' | relative_url }}) | Trivia, guess the game, text adventures, catch-ups and more. |
+| 🎉 | [Fun and games]({{ '/fun/' | relative_url }}) | Parlor games, trivia, adventures, roasts and more. |
 | 📊 | [Server stats]({{ '/stats/' | relative_url }}) | Who's active, busy times, voice and your own numbers. |
 | 🗣️ | [Reminders and auto-replies]({{ '/speakup/' | relative_url }}) | Reminders, and what the bot does on its own. |
 | 🔊 | [Voice rooms]({{ '/voice/' | relative_url }}) | Make your own temporary voice channel. |

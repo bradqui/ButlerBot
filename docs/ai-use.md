@@ -56,4 +56,4 @@ These run only when someone uses them. The text goes to Anthropic's Claude, and 
 > - `!speakup feature mistakes off` stops the AI typo suggestions.
 > - `!speakup feature links off` stops the 📄 summary offers.
 > - `!claude guidementions off` stops @mentions, and replies to the bot's other messages, from reaching the AI chat. Replying to an AI answer, `!ai` and `!butler` still work.
-> - To switch AI off completely, the bot owner can run `!unload claude gemini butlerfun parlor`. Everything in the first two sections then stops, and the game name check skips its last step. `!load` brings them back.
+> - To switch AI off completely, the bot owner can run `!unload claude gemini parlor`. Everything in the first two sections then stops, and the game name check skips its last step. `!load` brings them back.

@@ -29,6 +29,14 @@ ButlerBot chats using Anthropic's Claude and draws pictures with Google's Gemini
 - **Idle reset:** conversations reset after a while without activity, and when the bot restarts.
 - `!ai reset` wipes the channel's (mods).
 
+## Catching up on a busy channel
+
+```
+/catchup
+```
+
+You get a short summary of everything since you last spoke in the channel, and only you see it. The text version `!catchup` sends it to your DMs instead.
+
 ## Summarizing links
 
 ButlerBot can read an article and sum it up in three lines (videos can't be summarized):

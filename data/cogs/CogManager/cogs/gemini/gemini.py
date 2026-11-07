@@ -141,7 +141,7 @@ class GeminiChat(commands.Cog):
         `session_key` is the caller's conversation key (CHANNEL_<id> or THREAD_<id>). With `quiet`, failures are
         only logged, not posted (for optional pictures, like an adventure's final scene).
         Returns the posted message, or None if nothing was generated.
-        Called by the Claude cog and ButlerFun; keep this signature stable.
+        Called by the Claude cog and Parlor; keep this signature stable.
         """
         prefix = await self._prefix(channel.guild)
         if not await self._init_genai():

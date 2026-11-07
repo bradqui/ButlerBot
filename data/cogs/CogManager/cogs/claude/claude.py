@@ -17,7 +17,7 @@ from typing import Dict, List, Optional, Tuple
 
 import anthropic
 import discord
-from redbot.core import Config, checks, commands
+from redbot.core import Config, app_commands, checks, commands
 from redbot.core.bot import Red
 from redbot.core.utils.chat_formatting import box, humanize_number, pagify
 
@@ -247,6 +247,38 @@ LINK_READERS = [
 ]
 LINK_UNAVAILABLE = "UNAVAILABLE"
 
+
+# ==========================================
+#                 CATCH-UP
+# ==========================================
+
+CATCHUP_SCAN = 400              # messages looked back through
+CATCHUP_MAX_CHARS = 24000       # transcript size sent to Claude (newest kept)
+CATCHUP_CAUGHT_UP = 8           # if you spoke within this many messages, there's nothing to catch up on
+
+
+def transcript(messages: List[discord.Message], bot_id: int, max_chars: int) -> str:
+    """Oldest-first 'Name: text' lines, dropping the oldest lines past max_chars."""
+    lines = []
+    for m in messages:
+        text = m.clean_content.strip()
+        if m.attachments:
+            text += " " + " ".join(f"[{a.content_type.split('/')[0] if a.content_type else 'file'}]"
+                                   for a in m.attachments)
+        if not text.strip():
+            continue
+        if m.author.bot:
+            text = text[:300]
+        name = "You (the bot)" if m.author.id == bot_id else m.author.display_name
+        lines.append(f"{name}: {text}")
+    out, total = [], 0
+    for line in reversed(lines):
+        total += len(line) + 1
+        if total > max_chars:
+            break
+        out.append(line)
+    return "\n".join(reversed(out))
+
 NO_MENTIONS = discord.AllowedMentions(everyone=False, users=False, roles=False, replied_user=False)
 MENTION_RULE = ("Discord mentions look like <@123> (a person), <@&123> (a role) or <#123> (a channel). Each message "
                 "has a \"Who's who\" note saying who the speaker and every mention in it are. When you talk about "
@@ -381,7 +413,7 @@ class ClaudeChat(commands.Cog):
     """
 
     # What complete() and the AI chat say when Claude refuses. Other cogs compare errors against this exact text
-    # (ButlerFun deflects a refused adventure move in character), so keep it a class attribute.
+    # (Parlor deflects a refused adventure move in character), so keep it a class attribute.
     REFUSAL = "❌ I can't help with that one."
     NO_REPLY = "❌ I didn't come up with a reply. Try rephrasing?"
 
@@ -1547,7 +1579,7 @@ class ClaudeChat(commands.Cog):
                 return {"title": title[:100], "steam_appid": appid if isinstance(appid, int) and appid > 0 else None}
         return None
 
-    # ---------- public API: one-off Claude calls for other cogs (ButlerFun) ----------
+    # ---------- public API: one-off Claude calls for other cogs (Parlor) ----------
 
     async def complete(self, member: discord.Member, channel, *, system: str, messages: List[dict],
                        fast: bool = False, max_tokens: int = 1500, persona: bool = True,
@@ -1884,6 +1916,64 @@ class ClaudeChat(commands.Cog):
 
         prompt = re.sub(mention, "", message.content).strip()
         await self._respond(message, prompt, key, owner_id=owner_id, may_stay_silent=reply_to_bot)
+
+    # ==========================================
+    #                 CATCH-UP
+    # ==========================================
+    # Moved here from the retired ButlerFun cog on 2026-11-07: it's an AI utility, not a game.
+
+    async def build_catchup(self, member: discord.Member, channel, before: Optional[discord.Message] = None
+                            ) -> Tuple[Optional[str], Optional[str]]:
+        """(summary, None), or (None, a message explaining why not). `before` skips the command message itself."""
+        history = []
+        async for message in channel.history(limit=CATCHUP_SCAN, before=before):
+            if message.author.id == member.id:
+                break
+            history.append(message)
+        if len(history) <= CATCHUP_CAUGHT_UP:
+            return None, "✅ You're caught up: you spoke here just a few messages ago."
+        history.reverse()
+        since = history[0].created_at
+        text = transcript(history, self.bot.user.id, CATCHUP_MAX_CHARS)
+        if not text:
+            return None, "✅ You're caught up: there's nothing here to summarize."
+        system = (f"Summarize a Discord conversation for {member.display_name}, who missed it. Use at most 8 short "
+                  "bullet points (\"- \"), most important first. Say who said what, and call out plans, times, "
+                  f"decisions, and anything asked of or about {member.display_name}. Plain and factual; no intro.")
+        summary, error = await self.complete(member, channel, system=system,
+                                             messages=[{"role": "user", "content": text}],
+                                             fast=True, max_tokens=700, persona=False)
+        if summary is None:
+            return None, error
+        header = ui.two_line(f"📰 **Catch-up for {channel.mention}**",
+                             f"{ui.plural(len(history), 'message')} since <t:{int(since.timestamp())}:R>")
+        return f"{header}\n{summary}", None
+
+    @commands.command(name="catchup")
+    @commands.guild_only()
+    @commands.cooldown(1, 30, commands.BucketType.user)
+    async def catchup(self, ctx: commands.Context):
+        """
+        Get a summary of this channel since you last spoke, sent to you privately.
+
+        The text command sends it by DM; the `/catchup` slash command shows it only to you, right here.
+        """
+        async with ctx.channel.typing():
+            text, error = await self.build_catchup(ctx.author, ctx.channel, ctx.message)
+        try:
+            for page in ui.split_text(text or error):
+                await ctx.author.send(page)
+            await ctx.tick()
+        except discord.HTTPException:
+            await ctx.send("❌ I couldn't DM you. Use `/catchup` instead, which only you can see.")
+
+    @app_commands.command(name="catchup", description="A summary of this channel since you last spoke (only you see it)")
+    @app_commands.guild_only()
+    async def slash_catchup(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        text, error = await self.build_catchup(interaction.user, interaction.channel)
+        for page in ui.split_text(text or error):
+            await interaction.followup.send(page, ephemeral=True)
 
     # ==========================================
     #              SETTINGS COMMANDS

@@ -63,11 +63,11 @@ PRIVILEGE_NAMES = {
 TOPICS = [
     ("start/", "👋", "Getting started", "New here? Start with this.", "everyone"),
     ("butler/", "🤵", "Asking ButlerBot", "Ask in plain English, or have it run commands for you.", "everyone"),
-    ("ai/", "🤖", "AI chat and images", "Chat with Claude, make images, start AI threads.", "everyone"),
+    ("ai/", "🤖", "AI chat and images", "Chat with Claude, catch up on a channel, make images.", "everyone"),
     ("ai-use/", "🔍", "What uses AI", "Which features use AI, what they send, and what doesn't.", "everyone"),
     ("games/library/", "🎮", "Your games", "Your library, profile setup, favorites and wishlist.", "everyone"),
     ("games/nights/", "🎲", "Game nights", "Sessions, weekly game nights, votes and finding players.", "everyone"),
-    ("fun/", "🎉", "Fun and games", "Trivia, parlor games, adventures, catch-ups and more.", "everyone"),
+    ("fun/", "🎉", "Fun and games", "Parlor games, trivia, adventures, roasts and more.", "everyone"),
     ("stats/", "📊", "Server stats", "Who's active, busy times, voice and your own numbers.", "everyone"),
     ("speakup/", "🗣️", "Reminders and auto-replies", "Reminders, and what the bot does on its own.", "everyone"),
     ("voice/", "🔊", "Voice rooms", "Make your own temporary voice channel.", "everyone"),
@@ -79,8 +79,7 @@ TOPICS = [
 ]
 # Which handbook page covers a cog (by qualified name, lowercased). GameManager is split by command below.
 COG_TOPICS = {
-    "claudechat": "ai/", "geminichat": "ai/", "gamemanager": "games/library/", "butlerfun": "fun/",
-    "parlor": "fun/",
+    "claudechat": "ai/", "geminichat": "ai/", "gamemanager": "games/library/", "parlor": "fun/",
     "trivia": "fun/", "general": "fun/", "chatchart": "stats/", "activitystats": "stats/", "speakup": "speakup/",
     "autoroom": "voice/", "easytranslate": "translate/", "mod": "moderation/", "mutes": "moderation/",
     "warnings": "moderation/", "modlog": "moderation/", "cleanup": "moderation/", "clearchannel": "moderation/",
@@ -90,8 +89,8 @@ COG_TOPICS = {
 # Names people know, for help cards (`[p]help <category>`). Cogs not listed here use their handbook topic's title
 # when they're the only cog on that page, else their class name.
 COG_NAMES = {
-    "claudechat": "AI chat", "geminichat": "Image generation", "gamemanager": "Games", "butlerfun": "Fun and games",
-    "activitystats": "Server stats", "parlor": "Parlor games", "chatchart": "Chat charts", "censord": "Word filter", "antispam": "Spam protection",
+    "claudechat": "AI chat", "geminichat": "Image generation", "gamemanager": "Games", "parlor": "Parlor games",
+    "activitystats": "Server stats", "chatchart": "Chat charts", "censord": "Word filter", "antispam": "Spam protection",
     "customcommands": "Custom commands", "buttongreeter": "Welcome flow", "modlog": "Mod log",
     "clearchannel": "Clear channel",
 }

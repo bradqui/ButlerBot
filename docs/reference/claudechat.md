@@ -83,6 +83,17 @@ Reply to its answers to follow up. You can also just @mention me.
 - `!butler add Rocket League to my games and mark it installed`
 - `!butler set up my gaming profile`
 
+<a id="catchup"></a>
+### !catchup
+
+`!catchup`
+
+**Who:** everyone
+
+Get a summary of this channel since you last spoke, sent to you privately.
+
+The text command sends it by DM; the `/catchup` slash command shows it only to you, right here.
+
 <a id="claude"></a>
 ### !claude
 

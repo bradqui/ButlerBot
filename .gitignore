@@ -16,7 +16,6 @@
 
 # Custom cogs (add a line here for each new one)
 !/data/cogs/CogManager/cogs/activitystats/
-!/data/cogs/CogManager/cogs/butlerfun/
 !/data/cogs/CogManager/cogs/buttongreeter/
 !/data/cogs/CogManager/cogs/censord/
 !/data/cogs/CogManager/cogs/claude/

@@ -1,7 +1,7 @@
 ---
 title: EasyTranslate
 parent: Command reference
-nav_order: 19
+nav_order: 15
 permalink: /reference/easytranslate/
 ---
 

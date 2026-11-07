@@ -22,6 +22,57 @@ ButlerBot picks a game from the server's library and has Gemini paint it in an u
 - `!guessgame top` is the leaderboard.
 - Mods can end a round with `!guessgame stop`.
 
+## Parlor games
+
+`!parlor` lists them all, and `!parlor top` is the leaderboard for the guessing games.
+
+### Emoji game
+
+```
+!emojigame
+!emojigame any
+```
+
+ButlerBot spells out a game in emoji (🧟🔫🚁🏝️), and the first person to type its name wins.
+- **Which games:** games from the server's library, or any well-known game with `any`.
+- **How a round runs:** close misspellings count, and "is it Barony?" works too. Hints appear as time runs down, and the answer is revealed after 2 minutes.
+- **Stopping:** mods can end a round with `!emojigame stop`.
+
+### Twenty questions
+
+```
+!twentyq
+!twentyq any
+```
+
+ButlerBot thinks of a game and opens a thread. Everyone asks yes-or-no questions there.
+- **Asking:** end a question with `?`. Messages without one are just chat.
+- **Guessing:** type the game's name at any time. The first right answer wins.
+- **The limit:** after 20 questions you get 2 more minutes for last guesses, then the answer is revealed.
+- **Giving up:** `!twentyq stop` in the thread reveals the answer.
+- **Idle rounds:** a round with no questions for 15 minutes ends on its own.
+
+### Critique
+
+```
+!critique
+!critique my new hangar
+```
+
+Attach a screenshot to the command, or reply to someone's screenshot with it. ButlerBot reviews it like a gallery critic and gives it a score out of 10. Add a few words to say what it is.
+
+### Roast
+
+```
+!roast me
+!roast @Mira
+```
+
+ButlerBot roasts a game library: what you own, never install, rank and wish for, compared with the rest of the server.
+- **Yourself:** you can always roast your own library.
+- **Others:** only people who've opted in with `!roast optin`. `!roast optout` turns it off again.
+- **What's off limits:** the roast sticks to games and habits, never looks or real life.
+
 ## Trivia
 
 ```

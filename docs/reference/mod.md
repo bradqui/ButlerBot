@@ -1,7 +1,7 @@
 ---
 title: Mod
 parent: Command reference
-nav_order: 25
+nav_order: 21
 permalink: /reference/mod/
 ---
 

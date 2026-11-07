@@ -1,7 +1,7 @@
 ---
 title: GameManager
 parent: Command reference
-nav_order: 21
+nav_order: 17
 permalink: /reference/gamemanager/
 ---
 

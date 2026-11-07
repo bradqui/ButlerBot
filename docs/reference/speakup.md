@@ -1,7 +1,7 @@
 ---
 title: SpeakUp
 parent: Command reference
-nav_order: 29
+nav_order: 26
 permalink: /reference/speakup/
 ---
 

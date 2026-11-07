@@ -1,7 +1,7 @@
 ---
 title: ActivityStats
 parent: Command reference
-nav_order: 2
+nav_order: 1
 permalink: /reference/activitystats/
 ---
 

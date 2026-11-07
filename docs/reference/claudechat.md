@@ -1,7 +1,7 @@
 ---
 title: ClaudeChat
 parent: Command reference
-nav_order: 11
+nav_order: 9
 permalink: /reference/claudechat/
 ---
 

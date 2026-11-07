@@ -1,7 +1,7 @@
 ---
 title: Censord
 parent: Command reference
-nav_order: 9
+nav_order: 7
 permalink: /reference/censord/
 ---
 

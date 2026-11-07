@@ -1,7 +1,7 @@
 ---
 title: Filter
 parent: Command reference
-nav_order: 20
+nav_order: 16
 permalink: /reference/filter/
 ---
 

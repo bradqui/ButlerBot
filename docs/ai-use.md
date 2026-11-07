@@ -24,6 +24,10 @@ These run only when someone uses them. The text goes to Anthropic's Claude, and 
 | `!adventure` | Narrates a text adventure in its own thread | The players' messages in that thread, and their character bios |
 | `!maketrivia` (mods) | Writes trivia questions | The topic. For "our games", the server's game list. |
 | `!guessgame` | Describes and draws a game for people to guess | The game's name |
+| `!emojigame` | Spells out a game in emoji (and, with `any`, picks the game) | The game's name |
+| `!twentyq` | Answers yes-or-no questions about a secret game (and, with `any`, picks the game) | The questions asked in the round's thread, and the game's name and Steam details |
+| `!critique` | Reviews a picture | The picture, and the words you add |
+| `!roast` | Roasts a game library | That member's library, favorites and wishlist, and the server's most-owned games |
 | Right-click → **Apps** → **Summarize link**, or clicking 📄 under a link | Sums up the article | The link. The 📄 is added without AI; AI runs only if someone clicks it. |
 
 ## Helpers that use AI as a last resort
@@ -52,4 +56,4 @@ These run only when someone uses them. The text goes to Anthropic's Claude, and 
 > - `!speakup feature mistakes off` stops the AI typo suggestions.
 > - `!speakup feature links off` stops the 📄 summary offers.
 > - `!claude guidementions off` stops @mentions, and replies to the bot's other messages, from reaching the AI chat. Replying to an AI answer, `!ai` and `!butler` still work.
-> - To switch AI off completely, the bot owner can run `!unload claude gemini butlerfun`. Everything in the first two sections then stops, and the game name check skips its last step. `!load` brings them back.
+> - To switch AI off completely, the bot owner can run `!unload claude gemini butlerfun parlor`. Everything in the first two sections then stops, and the game name check skips its last step. `!load` brings them back.

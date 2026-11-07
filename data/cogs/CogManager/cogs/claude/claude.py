@@ -1598,6 +1598,16 @@ class ClaudeChat(commands.Cog):
             return None, self.NO_REPLY
         return text, None
 
+    async def image_block(self, attachment: discord.Attachment) -> Tuple[Optional[dict], Optional[str]]:
+        """
+        For other cogs (Parlor's critique): an image attachment as an API image block for `complete()`'s messages,
+        checked by its real bytes and shrunk if it's too big. Returns (block, None), or (None, a short reason).
+        """
+        ctype = (attachment.content_type or "").split(";")[0].strip().lower()
+        if ctype not in IMAGE_TYPES and os.path.splitext(attachment.filename)[1].lower() not in IMAGE_EXTENSIONS:
+            return None, f"`{attachment.filename}` isn't an image I can read"
+        return await self._attachment_block(attachment)
+
     # ---------- public API: link summaries and command suggestions (SpeakUp) ----------
 
     async def summarize_link(self, url: str, member: discord.Member) -> Optional[str]:

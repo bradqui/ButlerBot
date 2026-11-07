@@ -1,7 +1,7 @@
 ---
 title: Admin
 parent: Command reference
-nav_order: 3
+nav_order: 2
 permalink: /reference/admin/
 ---
 

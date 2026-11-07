@@ -1,0 +1,15 @@
+{
+    "name": "Parlor",
+    "short": "Parlor games: screenshot critiques, library roasts, the emoji game and twenty questions.",
+    "description": "Built on the Claude cog: critique reviews a screenshot like a gallery critic, roast pokes fun at a game library (others only if they opted in), emojigame has players guess a game from emoji, and twentyq runs twenty questions about a game in a thread. Games come from GameManager's library, or any well-known game.",
+    "end_user_data_statement": "This cog stores each member's parlor game win counts and whether they've opted in to roasts. Screenshots sent for critiques, library details sent for roasts, and twenty questions are sent to Anthropic's API and not stored by this cog.",
+    "install_msg": "Thanks for installing Parlor! It needs the Claude cog; the games use GameManager's library when it has at least 3 games.",
+    "author": ["Quillshot"],
+    "required_cogs": {},
+    "requirements": [],
+    "tags": ["ai", "fun", "games"],
+    "min_bot_version": "3.5.0",
+    "hidden": false,
+    "disabled": false,
+    "type": "COG"
+}

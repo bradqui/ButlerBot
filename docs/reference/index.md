@@ -47,6 +47,7 @@ Right-click a message (long-press on mobile) → **Apps**. Only you see the resu
 | [Mod]({{ '/reference/mod/' | relative_url }}) | Moderation tools. | 32 |
 | [ModLog]({{ '/reference/modlog/' | relative_url }}) | Browse and manage modlog cases. To manage modlog settings, use `!modlogset`. | 4 |
 | [Mutes]({{ '/reference/mutes/' | relative_url }}) | Mute users temporarily or indefinitely. | 16 |
+| [Parlor]({{ '/reference/parlor/' | relative_url }}) | Parlor games: critiques, roasts, the emoji game and twenty questions. | 10 |
 | [Permissions]({{ '/reference/permissions/' | relative_url }}) | Customise permissions for commands and cogs. | 12 |
 | [SpeakUp]({{ '/reference/speakup/' | relative_url }}) | The bot chiming in when it can help: times, Steam links, link summaries, command mistakes, and reminders. | 9 |
 | [Trivia]({{ '/reference/trivia/' | relative_url }}) | Play trivia with friends! | 17 |

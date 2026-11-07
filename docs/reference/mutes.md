@@ -1,7 +1,7 @@
 ---
 title: Mutes
 parent: Command reference
-nav_order: 27
+nav_order: 23
 permalink: /reference/mutes/
 ---
 

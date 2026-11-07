@@ -1,7 +1,7 @@
 ---
 title: ButtonGreeter
 parent: Command reference
-nav_order: 8
+nav_order: 6
 permalink: /reference/buttongreeter/
 ---
 

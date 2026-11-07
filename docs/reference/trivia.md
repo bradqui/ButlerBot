@@ -1,7 +1,7 @@
 ---
 title: Trivia
 parent: Command reference
-nav_order: 31
+nav_order: 27
 permalink: /reference/trivia/
 ---
 

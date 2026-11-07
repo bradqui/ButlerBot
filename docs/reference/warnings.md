@@ -1,7 +1,7 @@
 ---
 title: Warnings
 parent: Command reference
-nav_order: 32
+nav_order: 28
 permalink: /reference/warnings/
 ---
 

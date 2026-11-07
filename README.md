@@ -18,6 +18,7 @@ All of them live in [`data/cogs/CogManager/cogs/`](data/cogs/CogManager/cogs/).
 | [`activitystats`](data/cogs/CogManager/cogs/activitystats/) | Server activity stats. Everyone sees messages per channel, leaderboards, a heatmap of busy times, voice time, most-played games and their own stats. Admins get active-member trends, new-member retention, quiet members, joins and leaves, dead channels, game-night attendance, command usage, unanswered guide questions, library coverage and an optional weekly digest. Stores hourly counts, never message text; members can opt out. The butler and AI chat can answer stats questions. | `!stats …`, `!stats admin …` |
 | [`speakup`](data/cogs/CogManager/cogs/speakup/) | The bot chiming in when it can help:<br>- a clock reaction on times in chat (click it to see the time in everyone's timezone and schedule a session)<br>- cards for Steam store links (price, sale, who owns it, add and wishlist buttons)<br>- a summary offer on article links<br>- "did you mean…" for mistyped commands<br><br>Also reminders. Quiet it per channel, per person or per feature. | `!speakup …`, `!remindme`, `!reminders` |
 | [`butlerfun`](data/cogs/CogManager/cogs/butlerfun/) | AI extras on top of the Claude cog:<br>- `/catchup`: a summary of a channel since you last spoke, only for you<br>- `!judge`: ButlerBot settles an argument in character<br>- `!adventure`: a group text adventure in a thread<br>- `!maketrivia`: writes a list for Red's trivia game<br>- `!guessgame`: Gemini paints a game from the server's library and the first correct guess wins | `/catchup`, `!catchup`, `!judge`, `!adventure`, `!maketrivia`, `!guessgame` |
+| [`parlor`](data/cogs/CogManager/cogs/parlor/) | Parlor games on top of the Claude cog:<br>- `!emojigame`: guess the game from a row of emoji<br>- `!twentyq`: twenty questions about a game, in a thread<br>- `!critique`: a gallery critic's review of a screenshot<br>- `!roast`: a roast of a game library (others only if they opted in) | `!parlor`, `!emojigame`, `!twentyq`, `!critique`, `!roast` |
 | [`handbook`](data/cogs/CogManager/cogs/handbook/) | Replaces `!help` with short cards that link to the [online handbook](https://bradqui.github.io/ButlerBot/), whose pages live in [`docs/`](docs/). `!handbook [topic]` posts links. The owner's `!handbook export` generates the command reference from the running bot. | `!help`, `!handbook` |
 | [`buttongreeter`](data/cogs/CogManager/cogs/buttongreeter/) | Welcome flow for new members: alliance and role buttons, a `[TAG] Name` nickname, then agreeing to the rules. | `!bg …`, `!changerole`, `!forceclass`, `!forcerulesremove` |
 | [`censord`](data/cogs/CogManager/cogs/censord/) | Word filter with `off`/`low`/`high` levels, CSV word lists, per-channel overrides, and threshold punishments (delete, kick or ban). | `!censor …` |
@@ -80,6 +81,7 @@ Then, in Discord, as the bot owner. Delete the messages containing keys afterwar
 !load activitystats
 !load speakup
 !load butlerfun
+!load parlor
 !load handbook
 !load buttongreeter
 !load censord
@@ -121,8 +123,8 @@ They were written for this server, but they're ordinary Red 3.5 cogs, and you're
 3. `[p]load` it.
 
 Some cogs build on others:
-- `butlerfun` and parts of `speakup` need `claude`.
-- Session scheduling, Steam cards and `guessgame` need `gamemanager`.
+- `butlerfun`, `parlor` and parts of `speakup` need `claude`.
+- Session scheduling, Steam cards and `guessgame` need `gamemanager`. The parlor games use its library when it has at least 3 games.
 - `guessgame` also needs `gemini`.
 - Everything degrades gracefully when a partner cog is missing.
 

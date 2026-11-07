@@ -1,7 +1,7 @@
 ---
 title: Chatchart
 parent: Command reference
-nav_order: 10
+nav_order: 8
 permalink: /reference/chatchart/
 ---
 

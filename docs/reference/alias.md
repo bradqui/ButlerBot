@@ -1,7 +1,7 @@
 ---
 title: Alias
 parent: Command reference
-nav_order: 4
+nav_order: 3
 permalink: /reference/alias/
 ---
 

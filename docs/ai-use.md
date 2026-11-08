@@ -21,12 +21,13 @@ These run only when someone uses them. The text goes to Anthropic's Claude, and 
 | `!draw`, `!draw edit` | Makes a picture | Your description |
 | `!catchup`, `/catchup` | Sums up what you missed | The channel's messages since you last spoke (up to 400) |
 | `!judge` (also `!verdict`) | Rules on an argument | The channel's last 20–60 messages |
-| `!adventure` | Narrates a text adventure in its own thread | The players' messages in that thread, and their character bios |
+| `!adventure` | Narrates a text adventure in its own thread, keeps story notes, and writes **Catch me up** summaries | The players' messages in that thread, and their character bios |
 | `!maketrivia` (mods) | Writes trivia questions | The topic. For "our games", the server's game list. |
 | `!guessgame` | Describes and draws a game for people to guess | The game's name |
 | `!emojigame` | Spells out a game in emoji (and, with `any`, picks the game) | The game's name |
 | `!twentyq` | Answers yes-or-no questions about a secret game (and, with `any`, picks the game) | The questions asked in the round's thread, and the game's name and Steam details |
 | `!critique` | Reviews a picture | The picture, and the words you add |
+| `!caption` | Draws the picture when there's no screenshot, and picks the Butler's Award | Your idea, if any (to Gemini). For the award, the picture and the captions (to Claude). With `people`, the votes alone decide and no AI judges. |
 | `!roast` | Roasts a game library | That member's library, favorites and wishlist, and the server's most-owned games |
 | Right-click → **Apps** → **Summarize link**, or clicking 📄 under a link | Sums up the article | The link. The 📄 is added without AI; AI runs only if someone clicks it. |
 

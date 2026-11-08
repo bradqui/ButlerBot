@@ -1630,11 +1630,19 @@ class ClaudeChat(commands.Cog):
             return None, self.NO_REPLY
         return text, None
 
-    async def image_block(self, attachment: discord.Attachment) -> Tuple[Optional[dict], Optional[str]]:
+    async def image_block(self, attachment) -> Tuple[Optional[dict], Optional[str]]:
         """
-        For other cogs (Parlor's critique): an image attachment as an API image block for `complete()`'s messages,
-        checked by its real bytes and shrunk if it's too big. Returns (block, None), or (None, a short reason).
+        For other cogs (Parlor's critique and caption contest): an image attachment, or raw image bytes, as an API
+        image block for `complete()`'s messages, checked by its real bytes and shrunk if it's too big.
+        Returns (block, None), or (None, a short reason).
         """
+        if isinstance(attachment, (bytes, bytearray)):
+            prepared = await asyncio.to_thread(prepare_image, bytes(attachment))
+            if prepared is None:
+                return None, "that picture isn't one I can read"
+            raw, media_type = prepared
+            data = base64.standard_b64encode(raw).decode("utf-8")
+            return {"type": "image", "source": {"type": "base64", "media_type": media_type, "data": data}}, None
         ctype = (attachment.content_type or "").split(";")[0].strip().lower()
         if ctype not in IMAGE_TYPES and os.path.splitext(attachment.filename)[1].lower() not in IMAGE_EXTENSIONS:
             return None, f"`{attachment.filename}` isn't an image I can read"

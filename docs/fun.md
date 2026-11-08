@@ -12,6 +12,11 @@ permalink: /fun/
 
 `!parlor top` is the leaderboard for all three guessing games, with each person's wins at each one.
 
+The puzzle is posted in the channel and the guessing happens in a thread under it, so the channel stays readable. When the round ends, the puzzle shows who won.
+
+{: .staff }
+> **Game threads** (admins): `!parlor threads off` in a channel meant for games runs guess the game, the emoji game and caption contests right in the channel; `!parlor threads on` brings threads back. Threads also need the bot to have **Create Public Threads** and **Send Messages in Threads**; without them, games run in the channel. Twenty questions and adventures always get their own thread.
+
 ### Guess the game
 
 ```
@@ -48,6 +53,28 @@ ButlerBot thinks of a game and opens a thread. Everyone asks yes-or-no questions
 - **The limit:** after 20 questions you get 2 more minutes for last guesses, then the answer is revealed.
 - **Giving up:** `!twentyq stop` in the thread reveals the answer.
 - **Idle rounds:** a round with no questions for 15 minutes ends on its own.
+
+## Caption contests
+
+```
+!caption                         with a screenshot attached (or as a reply to one)
+!caption a cat piloting a spaceship
+!caption quick thread
+```
+
+Everyone writes a caption for a picture, then votes for the best one.
+- **The picture:** attach a screenshot or reply to one. Otherwise Gemini draws one, from your idea or as a surprise.
+- **Writing:** press **Submit caption** on the card. Only you see your caption until voting starts, and you can change it until then. One caption each, up to 150 characters.
+- **Voting:** captions appear numbered, without names. Pick your favorite from the menu; you can change your vote, but you can't vote for your own.
+- **Winners:** the **People's Choice** gets the most votes (a tie goes to whoever submitted first), and ButlerBot picks a **Butler's Award** with a short ruling. Both count on `!parlor top`.
+- **Timing:** 24 hours for captions and 24 for voting. `quick` makes it 10 and 5 minutes, for game nights.
+- **Options:** start with `people` or `butler` for only one kind of judging. In a channel where game threads are off, `thread` adds a chat thread anyway.
+- **Chat and finding the card:** the card starts a thread for chat about the contest, and it stays at the top of that thread. When voting opens, and when the winners are in, a line in the channel links back to the card.
+- **Too few captions:** with fewer than 3 when time's up, it gets one extension, then it's called off.
+- **Stopping:** whoever started it, or a mod, can run `!caption stop`.
+
+{: .staff }
+> **Weekly contests** (admins): `!caption weekly #channel` runs one every week there, with a surprise picture and a chat thread. The first starts right away. `!caption weekly` shows when the next one is, and `!caption weekly off` stops them.
 
 ## Critiques and roasts
 
@@ -118,7 +145,8 @@ To answer, just type in the channel; capitalization doesn't matter.
 
 ButlerBot opens a thread and narrates a story everyone can play.
 - **Playing:** just type what you do.
-- **Turns:** ButlerBot waits a few seconds to gather everyone's moves, then tells you what happens. It remembers about the last 100 turns.
+- **Turns:** ButlerBot waits a few seconds to gather everyone's moves, then tells you what happens. It remembers about the last 100 turns, and keeps its own notes behind the scenes so long stories stay consistent.
+- **Joining late:** press **Catch me up** at the top of the thread for a short summary of the story so far that only you see. `!adventure recap` sends it to your DMs.
 - **Ending:** `!adventure stop` in the thread writes a final scene, and Gemini paints a picture of it. Whoever started it, or a mod, can end it.
 - **Keep it PG-13:** fights happen, but without gore, and nothing sexual. If a move goes too far, the narrator tones it down or ignores it and carries on.
 

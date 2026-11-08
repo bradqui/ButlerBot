@@ -3,7 +3,7 @@ import io
 import logging
 import sys
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 import discord
 from google import genai
@@ -193,6 +193,27 @@ class GeminiChat(commands.Cog):
 
         # Just the image: echoing the prompt back is noise, and it would give away guess-the-game answers.
         return await self._send(reply_target, channel, None, files=files)
+
+    async def render_image(self, prompt: str, *, channel) -> Tuple[Optional[bytes], Optional[str]]:
+        """
+        For other cogs (Parlor's caption contest): generate one new image and return it instead of posting it.
+        Returns (image bytes, None), or (None, a short user-facing reason). Uses the channel's image model.
+        """
+        if not await self._init_genai():
+            return None, await self._not_set_up(None)
+        conf_channel = channel.parent if isinstance(channel, discord.Thread) and channel.parent else channel
+        model_name = await self.config.channel(conf_channel).image_model()
+        try:
+            response = await self.client.aio.models.generate_content(model=model_name, contents=prompt)
+        except Exception as e:
+            log.warning("Gemini image generation failed: %s", e)
+            return None, self._error_text(e, model_name, await self._prefix(channel.guild))
+        for candidate in (response.candidates or [])[:1]:
+            for part in (candidate.content.parts if candidate.content else None) or []:
+                if part.inline_data and part.inline_data.data:
+                    return part.inline_data.data, None
+        log.info("Gemini returned no image for a render_image request")
+        return None, ui.line(ui.FAIL, "Gemini didn't return an image. Try a different idea.")
 
     # ==========================================
     #                 COMMANDS

@@ -67,7 +67,7 @@ TOPICS = [
     ("ai-use/", "🔍", "What uses AI", "Which features use AI, what they send, and what doesn't.", "everyone"),
     ("games/library/", "🎮", "Your games", "Your library, profile setup, favorites and wishlist.", "everyone"),
     ("games/nights/", "🎲", "Game nights", "Sessions, weekly game nights, votes and finding players.", "everyone"),
-    ("fun/", "🎉", "Fun and games", "Parlor games, trivia, adventures, roasts and more.", "everyone"),
+    ("fun/", "🎉", "Fun and games", "Parlor games, caption contests, trivia, adventures and more.", "everyone"),
     ("stats/", "📊", "Server stats", "Who's active, busy times, voice and your own numbers.", "everyone"),
     ("speakup/", "🗣️", "Reminders and auto-replies", "Reminders, and what the bot does on its own.", "everyone"),
     ("voice/", "🔊", "Voice rooms", "Make your own temporary voice channel.", "everyone"),

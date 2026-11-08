@@ -44,6 +44,17 @@ dyed her hair green") wins for that adventure only; your bio stays as it is.
 - `!adventure bio a red-haired dwarf engineer with a bad knee and a fear of birds`
 - `!adventure bio clear` removes yours (mods: `!adventure bio clear @member`)
 
+<a id="adventure-recap"></a>
+### !adventure recap
+
+`!adventure recap`
+
+**Who:** everyone · **Also:** `!adventure catchup`, `!adventure story`
+
+Catch up on the adventure in this thread: a short summary of the story so far, sent to you by DM.
+
+The **Catch me up** button at the top of the thread does the same, privately, right there.
+
 <a id="adventure-stop"></a>
 ### !adventure stop
 
@@ -52,6 +63,56 @@ dyed her hair green") wins for that adventure only; your bio stays as it is.
 **Who:** everyone · **Also:** `!adventure end`
 
 End the adventure in this thread with a final scene and a picture of it (whoever started it, or a mod).
+
+<a id="caption"></a>
+### !caption
+
+`!caption [options]`
+
+**Who:** everyone
+
+Start a caption contest: everyone writes a caption for a picture, then votes for the best one.
+
+Attach a screenshot, or reply to a message that has one, to use it. Otherwise Gemini draws the picture: say
+what to draw, or leave it out for a surprise. Captions stay hidden until voting, and nobody can vote for
+their own. Judging is by everyone's votes and the Butler; start with `people` or `butler` for just one.
+Captions and voting take 24 hours each, or 10 and 5 minutes with `quick`. Add `thread` for a chat thread.
+
+**Examples:**
+- `!caption` with a screenshot attached
+- `!caption a cat piloting a spaceship`
+- `!caption quick thread`
+
+<a id="caption-stop"></a>
+### !caption stop
+
+`!caption stop`
+
+**Who:** everyone · **Also:** `!caption cancel`
+
+Call off the caption contest running in this channel or its thread (whoever started it, or a mod).
+
+<a id="caption-top"></a>
+### !caption top
+
+`!caption top`
+
+**Who:** everyone · **Also:** `!caption leaderboard`
+
+The parlor leaderboard, with People's Choice wins and Butler's Awards (the same as `!parlor top`).
+
+<a id="caption-weekly"></a>
+### !caption weekly
+
+`!caption weekly [where]`
+
+**Who:** admins, or anyone with the manage guild permission
+
+Run a caption contest every week in one channel, with a surprise picture and a chat thread (admins).
+
+The first one starts right away, then one a week from then.
+
+**Examples:** `!caption weekly #fun`, `!caption weekly` (show it), `!caption weekly off`
 
 <a id="critique"></a>
 ### !critique
@@ -89,7 +150,7 @@ and `!parlor top` shows the leaderboard.
 
 **Who:** mods, or anyone with the manage messages permission
 
-End the emoji round running here and reveal the answer (mods).
+End the emoji round running here, or in this thread, and reveal the answer (mods).
 
 <a id="guessgame"></a>
 ### !guessgame
@@ -109,7 +170,7 @@ Hints appear after a minute. `!parlor top` shows the leaderboard.
 
 **Who:** mods, or anyone with the manage messages permission
 
-End the running round here and reveal the answer (mods).
+End the round running here, or in this thread, and reveal the answer (mods).
 
 <a id="guessgame-top"></a>
 ### !guessgame top
@@ -118,7 +179,7 @@ End the running round here and reveal the answer (mods).
 
 **Who:** everyone · **Also:** `!guessgame leaderboard`
 
-The leaderboard for the parlor's guessing games (the same as `!parlor top`).
+The parlor leaderboard (the same as `!parlor top`).
 
 <a id="judge"></a>
 ### !judge
@@ -200,6 +261,21 @@ to see every list, right here. Long lists page with ◀ ▶.
 
 What's in ButlerBot's parlor: the games and toys, and how to start each one.
 
+<a id="parlor-threads"></a>
+### !parlor threads
+
+`!parlor threads [setting]`
+
+**Who:** admins, or anyone with the manage channels permission
+
+Turn game threads on or off in this channel (admins).
+
+With threads on (the default), guess the game and the emoji game post the puzzle here and take guesses in a
+thread under it, and a caption contest's card starts a chat thread. Turn them off in a channel meant for
+games, where the chatter is welcome. Twenty questions and adventures always get their own thread.
+
+**Examples:** `!parlor threads` (show it), `!parlor threads off`, `!parlor threads on`
+
 <a id="parlor-top"></a>
 ### !parlor top
 
@@ -207,7 +283,7 @@ What's in ButlerBot's parlor: the games and toys, and how to start each one.
 
 **Who:** everyone · **Also:** `!parlor leaderboard`
 
-The leaderboard for the parlor's guessing games (guess the game, the emoji game and twenty questions).
+The parlor leaderboard: wins at the guessing games and caption contests.
 
 <a id="roast"></a>
 ### !roast

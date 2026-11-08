@@ -206,6 +206,25 @@ Show the game manager's settings for this server.
 
 Set the server's default timezone for session times (members can set their own).
 
+<a id="games-deals"></a>
+### !games deals
+
+`!games deals [who_for...]`
+
+**Who:** everyone · **Also:** `!games deal`
+
+Games on sale that suit a group: the whole server, a session's players, or people you name.
+
+Shows games some of you have that are on sale for the rest, wishlisted games on sale, and a few picks
+that an AI chooses from Steam's multiplayer sales to fit what you play. Start with `new` for new releases
+instead. The card's menus add games to your wishlist or library.
+
+**Examples:**
+`!games deals` (everyone with a library)
+`!games deals session` (this channel's session)
+`!games deals Alex Sam` (you and them)
+`!games deals new me` (new releases, just for you)
+
 <a id="games-endsession"></a>
 ### !games endsession
 

@@ -30,6 +30,7 @@ These run only when someone uses them. The text goes to Anthropic's Claude, and 
 | `!mystery` | Writes the case, then answers `!interrogate` questions in character | The questions asked with `!interrogate`. Other messages in the mystery's thread aren't sent. |
 | `!critique` | Reviews a picture | The picture, and the words you add |
 | `!caption` | Draws the picture when there's no screenshot, and picks the Butler's Award | Your idea, if any (to Gemini). For the award, the picture and the captions (to Claude). With `people`, the votes alone decide and no AI judges. |
+| `!games deals` | Picks a few games from Steam's current multiplayer sales (or, with `new`, new releases) that suit the group, and says why. The other sections of the card don't use AI. | The group's games, favorites and wishlists, the number of players, and Steam's list of games |
 | `!roast` | Roasts a game library | That member's library, favorites and wishlist, and the server's most-owned games |
 | Right-click → **Apps** → **Summarize link**, or clicking 📄 under a link | Sums up the article | The link. The 📄 is added without AI; AI runs only if someone clicks it. |
 
@@ -40,7 +41,7 @@ These run only when someone uses them. The text goes to Anthropic's Claude, and 
 
 ## Everything else is AI-free
 
-- **Games:** the game library, game nights, votes, reminders and Discord events.
+- **Games:** the game library, game nights, votes, reminders, Discord events and sale alerts.
 - **Server stats** and their charts.
 - **Help:** `!help` and this handbook.
 - **Automatic replies:** the 🕘 time conversion follows fixed rules, and Steam cards use Steam's own data.

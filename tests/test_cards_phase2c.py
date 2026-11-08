@@ -249,8 +249,12 @@ async def main():
           and text.endswith("\n-# Staff only"), text)
 
     # persona display stays plain text in code blocks
-    out = await run(brad, "!claude persona")
-    check(out.content.startswith("**Current persona:**```") and not out.flags.components_v2, "persona stays plain")
+    before = len(channel.sent)
+    await run(brad, "!claude persona")
+    pages = channel.sent[before:]   # ButlerBot's own persona (persona.md) takes a few messages
+    check(pages and pages[0].content.startswith("**Current persona:**```")
+          and all(p.content.startswith(("**Current persona:**```", "```")) and not p.flags.components_v2
+                  for p in pages), "persona stays plain")
     await bot.remove_cog("ClaudeChat")
 
     # ================= Gemini =================

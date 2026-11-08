@@ -86,6 +86,27 @@ Commas separate names typed on one line, except in numbers like "40,000". To kee
 - When a game on your wishlist goes on sale, or gets cheaper, you get one ping in the alerts channel: a card listing the deals, with everyone who wants one of them named once at the bottom.
 - You won't be pinged if you've added the game to your library by then.
 
+## Finding deals
+
+When you're shopping for something to play together, ask for deals:
+
+```
+!games deals                 (everyone with a library)
+!games deals session         (the players in this channel's session)
+!games deals Alex Sam        (you and the people you name)
+!games deals me              (just you)
+!games deals new Alex Sam    (new releases instead of sales)
+```
+
+The card has up to three parts:
+- **Some of you have these:** games in the server library that some of the group own and that are on sale, so the rest can catch up. Just for you, it's games other members have.
+- **On your wishlists:** wishlisted games that are on sale right now.
+- **You might like:** a few games picked by AI from Steam's current multiplayer sales, chosen to fit what the group owns, ranks and wants, each with a short reason. With `new`, it's picked from popular multiplayer games released in the last 90 days, and this is the only part.
+
+Two menus under the card add any of its games to **your wishlist**, or mark them as **owned**; a game that isn't in the server library yet is added or requested first. Anyone can use them, and the reply is just for you.
+
+Prices are US Steam prices. Nothing is posted on its own: the AI runs only when someone asks. If AI is unavailable, the last part shows Steam's most popular games instead.
+
 {: .tip }
 > Post a Steam store link in chat and ButlerBot replies with a card: the price, any sale, and who here owns it. It has **I own this** and **I want this** buttons.
 

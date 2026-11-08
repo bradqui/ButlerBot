@@ -9,8 +9,10 @@ running votes resume after a reload.
 
 import asyncio
 import difflib
+import html
 import importlib.util
 import io
+import json
 import logging
 import random
 import re
@@ -134,6 +136,31 @@ STEAM_APP_URL = "https://store.steampowered.com/app/{}"
 EPIC_FREE_URL = ("https://store-site-backend-static-ipv4.ak.epicgames.com/freeGamesPromotions"
                  "?locale=en-US&country=US&allowCountries=US")
 EPIC_STORE_URL = "https://store.epicgames.com/en-US/"
+# Deals (`games deals`): Steam's store search, multiplayer games only (category3=1), games only (category1=998),
+# most popular first. It has no official API; this reads the JSON the store page itself uses.
+STEAM_STORE_SEARCH_URL = "https://store.steampowered.com/search/results/"
+STEAM_TAGS_URL = "https://store.steampowered.com/tagdata/populartags/english"
+DEAL_MODES = {   # the store search's extra filters for each kind of list
+    "sale": {"specials": "1"},
+    "new": {"filter": "popularnew", "sort_by": "Released_DESC"},
+}
+DEAL_PAGES = 2                  # pages of 100 store results read for a list
+DEAL_CACHE_SECONDS = 3 * 3600   # each store list is fetched at most this often
+PRICE_CACHE_SECONDS = 3600      # library and wishlist prices for deals are reused this long
+DEAL_ROWS = 4                   # games shown in each of the "you have it" and "wishlist" sections
+DEAL_PICKS = 5                  # games the AI picks
+DEAL_CANDIDATES = 120           # store games the AI chooses from (about 4K tokens, roughly 2¢ a request)
+DEAL_TASTE_GAMES = 40           # the group's games the AI is told about
+DEAL_WHY_CHARS = 130
+NEW_RELEASE_DAYS = 90           # "new" means released this recently (Steam's popular-new list goes back over a year)
+DEALS_SYSTEM = (
+    "You help a group of friends on a Discord server find games to buy and play together. You get the games the "
+    "group already owns and likes, then a numbered list of multiplayer Steam games {what}. Choose up to {picks} games "
+    "from the list that this group would most likely enjoy: close to what they own, rank highly or want, suited to "
+    "{size}, and well reviewed. Leave out anything they'd plainly dislike. Choose only from the list.\n"
+    "Reply with JSON only, best first: [{{\"n\": <list number>, \"why\": \"<one plain sentence under 120 characters "
+    "saying why it suits them, without repeating its name, naming a game they play when that helps>\"}}]. Reply [] if nothing fits."
+)
 MAX_CHECKED_NAMES = 25          # bigger bulk adds skip the Steam and AI lookups (and say so)
 MAX_AI_TITLE_LOOKUPS = 10       # AI web searches per command (about 1¢ each)
 LOOKUP_CONCURRENCY = 4          # Steam and AI title lookups run this many at a time
@@ -369,6 +396,127 @@ async def epic_free_games() -> List[dict]:
         except Exception:
             log.debug("Skipped an Epic store entry", exc_info=True)
     return free
+
+
+_TAG_NAMES: Dict[int, str] = {}
+_STORE_LISTS: Dict[str, Tuple[float, List[dict]]] = {}   # mode -> (when fetched, games)
+
+
+def _found(pattern: str, text: str) -> Optional[str]:
+    match = re.search(pattern, text, re.S)
+    return html.unescape(match.group(1)).strip() if match else None
+
+
+def parse_store_results(page: str, tag_names: Dict[int, str]) -> List[dict]:
+    """
+    Games from one page of Steam's store search (its HTML rows): {"appid", "name", "price", "reviews",
+    "review_count", "tags", "released"}. `price` has steam_prices' shape (None when free). Bundles are skipped.
+    """
+    items = []
+    for appid, body in re.findall(r'data-ds-appid="(\d+)"(.*?)</a>', page, re.S):
+        name = _found(r'<span class="title">(.*?)</span>', body)
+        if not name:
+            continue
+        final = int(_found(r'data-price-final="(\d+)"', body) or 0)
+        discount = int(_found(r'data-discount="(\d+)"', body) or 0)
+        final_text = _found(r'class="discount_final_price[^"]*">(.*?)</div>', body) or ""
+        price = None
+        if final:
+            initial = round(final * 100 / (100 - discount)) if 0 < discount < 100 else final
+            price = {"final": final, "initial": initial, "discount": discount, "final_text": final_text,
+                     "initial_text": _found(r'class="discount_original_price">(.*?)</div>', body) or final_text}
+        tooltip = _found(r'search_review_summary[^"]*"\s+data-tooltip-html="([^"]*)"', body) or ""
+        count = re.search(r"of the ([\d,]+) user reviews", tooltip)
+        tag_ids = (_found(r'data-ds-tagids="\[([\d,]*)\]"', body) or "").split(",")
+        items.append({
+            "appid": int(appid), "name": clean_title(name), "price": price,
+            "reviews": tooltip.split("<br>")[0].strip(), "review_count": int(count.group(1).replace(",", "")) if count else 0,
+            "tags": [tag_names[int(t)] for t in tag_ids if t.isdigit() and int(t) in tag_names][:6],
+            "released": _found(r'class="search_released[^"]*">(.*?)</div>', body) or "",
+        })
+    return items
+
+
+async def steam_tag_names() -> Dict[int, str]:
+    """Steam's tag IDs -> names ("Co-op", "Roguelike"), fetched once."""
+    if not _TAG_NAMES:
+        try:
+            data = await _get_json(STEAM_TAGS_URL, timeout=10)
+            _TAG_NAMES.update({int(t["tagid"]): str(t["name"]) for t in data or [] if "tagid" in t and "name" in t})
+        except Exception as e:
+            log.debug("Steam tag names failed: %s", e)
+    return _TAG_NAMES
+
+
+async def steam_store_list(mode: str) -> List[dict]:
+    """
+    Multiplayer games from Steam's store, most popular first: on sale now ("sale") or popular new releases ("new").
+    Cached for DEAL_CACHE_SECONDS. An empty list means Steam didn't answer.
+    """
+    cached = _STORE_LISTS.get(mode)
+    if cached and time.monotonic() - cached[0] < DEAL_CACHE_SECONDS:
+        return cached[1]
+    tag_names = await steam_tag_names()
+    items, seen = [], set()
+    for page in range(DEAL_PAGES):
+        params = {"query": "", "start": str(page * 100), "count": "100", "infinite": "1", "cc": "us",
+                  "l": "english", "category1": "998", "category3": "1", "json": "1", **DEAL_MODES[mode]}
+        try:
+            data = await _get_json(STEAM_STORE_SEARCH_URL, params, timeout=15)
+        except Exception as e:
+            log.info("Steam store search failed: %s", e)
+            break
+        found = parse_store_results((data or {}).get("results_html") or "", tag_names)
+        for item in found:
+            if item["appid"] not in seen:
+                seen.add(item["appid"])
+                items.append(item)
+        if not found:
+            break
+    if items:
+        _STORE_LISTS[mode] = (time.monotonic(), items)
+    return items
+
+
+def parse_picks(text: Optional[str], count: int) -> List[Tuple[int, str]]:
+    """[(list number, why)] from the AI's JSON reply. Numbers outside 1..count and repeats are dropped."""
+    if not text:
+        return []
+    text = re.sub(r"^```(?:json)?|```$", "", text.strip(), flags=re.M).strip()
+    start, end = text.find("["), text.rfind("]")
+    try:
+        data = json.loads(text[start:end + 1]) if start != -1 and end > start else []
+    except ValueError:
+        return []
+    picks, seen = [], set()
+    for item in data if isinstance(data, list) else []:
+        if not isinstance(item, dict):
+            continue
+        try:
+            n = int(item.get("n"))
+        except (TypeError, ValueError):
+            continue
+        if 1 <= n <= count and n not in seen:
+            seen.add(n)
+            why = re.sub(r"\s+", " ", str(item.get("why") or "")).strip()
+            picks.append((n, ui.truncate(why, DEAL_WHY_CHARS)))
+    return picks[:DEAL_PICKS]
+
+
+def release_age(text: str, now: Optional[datetime] = None) -> Optional[int]:
+    """Days since a Steam release date like "Nov 6, 2026" (None if it isn't a plain date, like "Coming soon")."""
+    for fmt in ("%b %d, %Y", "%d %b, %Y", "%B %d, %Y"):
+        try:
+            return ((now or utcnow()).date() - datetime.strptime(text.strip(), fmt).date()).days
+        except ValueError:
+            continue
+    return None
+
+
+def link_name(name: str, appid: int) -> str:
+    """**[Name](store page)**, with brackets in the name escaped so the link holds."""
+    escaped = name.replace("[", "\\[").replace("]", "\\]")
+    return f"**[{escaped}]({STEAM_APP_URL.format(appid)})**"
 
 
 def price_text(price: Optional[dict]) -> str:
@@ -1014,6 +1162,32 @@ class InstallButton(discord.ui.DynamicItem[discord.ui.Button], template=r"gm:i:(
         cog = interaction.client.get_cog("GameManager")
         if cog is not None and interaction.guild is not None:
             await cog.on_install_button(interaction, self.rid)
+
+
+class DealSelect(discord.ui.DynamicItem[discord.ui.Select], template=r"gm:deal:(?P<action>want|own)"):
+    """
+    The deals card's menus: add the games you pick to your wishlist, or mark them owned. Each option's value is the
+    game's Steam app ID and its label the name, both read back from the message, so the menus work after restarts.
+    """
+    LOOKS = {"want": "Add to my wishlist…", "own": "I own these…"}
+
+    def __init__(self, action: str, options: Optional[List[discord.SelectOption]] = None):
+        options = list(options or [])[:25] or [discord.SelectOption(label="Nothing", value="0")]
+        super().__init__(discord.ui.Select(custom_id=f"gm:deal:{action}", placeholder=self.LOOKS[action],
+                                           min_values=1, max_values=len(options), options=options))
+        self.action = action
+        self.names = {o.value: o.label for o in options}
+
+    @classmethod
+    async def from_custom_id(cls, interaction, item, match):
+        return cls(match["action"], getattr(item, "options", None))
+
+    async def callback(self, interaction: discord.Interaction):
+        cog = interaction.client.get_cog("GameManager")
+        if cog is not None and interaction.guild is not None:
+            values = (getattr(interaction, "data", None) or {}).get("values") or []
+            picks = [(self.names[v], int(v)) for v in values if v in self.names and v.isdigit() and v != "0"]
+            await cog.on_deal_select(interaction, self.action, picks)
 
 
 def session_buttons(sid: str, scheduled: bool = False, *, vote: bool = True,
@@ -2103,15 +2277,18 @@ class GameManager(commands.Cog):
         self._move_locks: Dict[str, asyncio.Lock] = {}   # session ID -> lock, so a card never moves twice at once
         self._here_last: Dict[int, float] = {}            # channel ID -> when `games here` last moved a card
         self._resume_task: Optional[asyncio.Task] = None
+        self._deal_prices: Dict[int, Tuple[float, Optional[dict]]] = {}   # app ID -> (when checked, price)
 
     async def cog_load(self):
-        self.bot.add_dynamic_items(SessionButton, VoteButton, RequestButton, RequestBatchButton, InstallButton)
+        self.bot.add_dynamic_items(SessionButton, VoteButton, RequestButton, RequestBatchButton, InstallButton,
+                                   DealSelect)
         self._resume_task = asyncio.create_task(self._resume_votes())
         self.session_loop.start()
         self.sale_loop.start()
 
     async def cog_unload(self):
-        self.bot.remove_dynamic_items(SessionButton, VoteButton, RequestButton, RequestBatchButton, InstallButton)
+        self.bot.remove_dynamic_items(SessionButton, VoteButton, RequestButton, RequestBatchButton, InstallButton,
+                                      DealSelect)
         self.session_loop.cancel()
         self.sale_loop.cancel()
         if self._resume_task is not None:
@@ -3490,6 +3667,311 @@ class GameManager(commands.Cog):
             return 0
         await conf.free_games_posted.set((posted + [g["id"] for g in new])[-FREE_GAMES_KEEP:])
         return len(new)
+
+    # ---------- deals ----------
+
+    async def deal_prices(self, appids: List[int]) -> Dict[int, Optional[dict]]:
+        """Current Steam prices for library and wishlist games, reused for PRICE_CACHE_SECONDS."""
+        now = time.monotonic()
+        fresh = {a: p for a, (t, p) in self._deal_prices.items() if now - t < PRICE_CACHE_SECONDS}
+        missing = [a for a in dict.fromkeys(appids) if a not in fresh]
+        if missing:
+            for appid, price in (await steam_prices(missing)).items():
+                self._deal_prices[appid] = (now, price)
+                fresh[appid] = price
+        return {a: fresh[a] for a in appids if a in fresh}
+
+    async def deal_group(self, ctx: commands.Context, words: List[str]
+                         ) -> Optional[Tuple[str, List[discord.Member]]]:
+        """
+        Who `games deals` is for, as (how the card names them, members): everyone with a library or wishlist,
+        a session's players (`session [name]`), just the asker (`me`), or the asker plus the people named.
+        Returns None after explaining what's wrong.
+        """
+        guild, author = ctx.guild, ctx.author
+        if not words:
+            users = await self.config.guild(guild).users()
+            ids = {u for u, d in users.items() if d.get("owned") or d.get("installed")}
+            ids |= {u for e in (await self.config.guild(guild).wishlist()).values() for u in e["users"]}
+            members = [m for m in (guild.get_member(int(u)) for u in ids) if m is not None and not m.bot]
+            if not members:
+                await self.reply(ctx, content=ui.line(ui.ASK, "Nobody here has a library or wishlist yet.",
+                                                      hint=f"Start yours with {await self.cmd(guild, 'games newprofile')}."))
+                return None
+            return "the server", sorted(members, key=lambda m: m.display_name.lower())
+        if words[0].lower() == "session":
+            session = await self.pick_session(ctx, " ".join(words[1:]) or None, "deals session")
+            if session is None:
+                return None
+            members = [m for m in (guild.get_member(int(u)) for u in session["participants"]) if m is not None]
+            return session["title"], members
+        names = [w for w in words if w.lower() not in ("me", "i", "myself")]
+        found = await self.members_from_names(ctx, names) if names else []
+        if found is None:
+            return None
+        members = [author] + [m for m in found if m != author]
+        return ("you" if len(members) == 1 else name_list([m.display_name for m in members], 4)), members
+
+    async def _deals_owned(self, guild: discord.Guild, games: dict, users: dict, group: Set[str]) -> List[tuple]:
+        """
+        Library games some of the group have that are on sale for the rest: (name, app ID, detail), best first.
+        For one person, games other members have that they don't.
+        """
+        current = [u for u in users if guild.get_member(int(u)) is not None]
+        found = []
+        for game in games.values():
+            if not game.get("steam_appid"):
+                continue
+            owners = [u for u in current
+                      if game["id"] in set(users[u].get("owned", [])) | set(users[u].get("installed", []))]
+            if len(group) == 1:
+                have, missing = [u for u in owners if u not in group], list(group)
+                if not have or len(have) < len(owners):
+                    continue
+            else:
+                have, missing = [u for u in owners if u in group], [u for u in group if u not in owners]
+                if not have or not missing:
+                    continue
+            found.append((game, int(game["steam_appid"]), have, missing))
+        prices = await self.deal_prices([f[1] for f in found])
+        rows = []
+        for game, appid, have, missing in found:
+            price = prices.get(appid)
+            if not price or not price["discount"]:
+                continue
+            if len(group) == 1:
+                who_has = f"{ui.plural(len(have), 'person', 'people')} here {'has' if len(have) == 1 else 'have'} it"
+                detail = details(price_text(price), who_has)
+            else:
+                have_names = name_list(sorted((self._display(guild, u) for u in have), key=str.lower), 3)
+                lack_names = name_list(sorted((self._display(guild, u) for u in missing), key=str.lower), 3)
+                detail = details(price_text(price), f"{have_names} {'has' if len(have) == 1 else 'have'} it",
+                                 f"{lack_names} {'doesn’t' if len(missing) == 1 else 'don’t'}")
+            rows.append((-len(have), -price["discount"], game["name"].lower(), game["name"], appid, detail))
+        return [r[3:] for r in sorted(rows)]
+
+    async def _deals_wanted(self, guild: discord.Guild, games: dict, users: dict, wishlist: dict,
+                            group: Set[str], skip: Set[int]) -> List[tuple]:
+        """Wishlisted games (by the group, who don't own them) on sale now: (name, app ID, detail), best first."""
+        found = []
+        for entry in wishlist.values():
+            appid = int(entry["appid"])
+            fans = [u for u in entry["users"] if u in group and guild.get_member(int(u)) is not None
+                    and appid not in self._owned_appids(games, users.get(u, {}))]
+            if fans and appid not in skip:
+                found.append((entry["name"], appid, fans))
+        prices = await self.deal_prices([f[1] for f in found])
+        rows = []
+        for name, appid, fans in found:
+            price = prices.get(appid)
+            if not price or not price["discount"]:
+                continue
+            fan_names = name_list(sorted((self._display(guild, u) for u in fans), key=str.lower), 3)
+            detail = details(price_text(price), None if len(group) == 1 else f"wanted by {fan_names}")
+            rows.append((-len(fans), -price["discount"], name.lower(), name, appid, detail))
+        return [r[3:] for r in sorted(rows)]
+
+    def _deal_taste(self, guild: discord.Guild, label: str, games: dict, users: dict, wishlist: dict,
+                    members: List[discord.Member]) -> str:
+        """What the group plays and wants, for the AI: the games most of them own and their favorites first."""
+        group = [str(m.id) for m in members]
+        owners, installs, favorites = Counter(), Counter(), {}
+        for uid in group:
+            data = users.get(uid, {})
+            owned = (set(data.get("owned", [])) | set(data.get("installed", []))) & set(games)
+            owners.update(owned)
+            installs.update(g for g in data.get("installed", []) if g in games)
+            for gid, rank in (data.get("ranks") or {}).items():
+                if gid in games and isinstance(rank, int):
+                    favorites.setdefault(gid, []).append((rank, self._display(guild, uid)))
+        size = len(group)
+        if label == "the server":
+            lines = [f"The group: this server's {ui.plural(size, 'member')} with game libraries."]
+        else:
+            lines = [f"The group: {ui.plural(size, 'player')} ({name_list([m.display_name for m in members], 8)})."]
+        ranked = sorted(owners, key=lambda g: (-sum(4 - r for r, _ in favorites.get(g, [])), -owners[g],
+                                               games[g]["name"].lower()))
+        if ranked:
+            lines.append("Games they own (how many of them own it; whose favorite it is, 1 = top):")
+            for gid in ranked[:DEAL_TASTE_GAMES]:
+                favs = ", ".join(f"{n} #{r}" for r, n in sorted(favorites.get(gid, [])))
+                lines.append(f"- {games[gid]['name']}: {owners[gid]} of {size} own it"
+                             + (f", {installs[gid]} installed" if installs[gid] else "")
+                             + (f"; favorite of {favs}" if favs else ""))
+        wants = Counter()
+        for entry in wishlist.values():
+            fans = [u for u in entry["users"] if u in group]
+            if fans:
+                wants[entry["name"]] = len(fans)
+        if wants:
+            lines.append("Games they want: " + ", ".join(f"{n} ({c})" for n, c in wants.most_common(20)))
+        if not ranked and not wants:
+            lines.append("They haven't listed any games yet, so go by what's popular and well reviewed.")
+        return "\n".join(lines)
+
+    async def _deal_picks(self, asker: discord.Member, channel, label: str, mode: str, members: List[discord.Member],
+                          games: dict, users: dict, wishlist: dict, skip: Set[int]
+                          ) -> Tuple[List[tuple], bool, Optional[str]]:
+        """
+        Store games for the group: (rows of (name, app ID, detail), whether the AI chose them, a note).
+        Without the AI (not loaded, over a limit, an error) it's Steam's most popular, with a note saying why.
+        """
+        store = await steam_store_list(mode)
+        if not store:
+            return [], False, "Steam's store didn't answer, so there are no other picks this time."
+        owned = set()
+        for m in members:
+            owned |= self._owned_appids(games, users.get(str(m.id), {}))
+        def fits(game: dict) -> bool:
+            if game["appid"] in owned or game["appid"] in skip or "negative" in game["reviews"].lower():
+                return False
+            if mode == "sale":
+                return bool(game["price"] and game["price"]["discount"])
+            age = release_age(game["released"])
+            return age is not None and 0 <= age <= NEW_RELEASE_DAYS
+
+        pool = [g for g in store if fits(g)][:DEAL_CANDIDATES]
+        if not pool:
+            return [], False, None
+
+        def detail(game: dict, why: str = "") -> str:
+            price = price_text(game["price"]) if game["price"] else "Free to play"
+            first = details(price, f"released {game['released']}" if mode == "new" and game["released"] else None)
+            return first + (f"\n{why}" if why else "")
+
+        popular = [(g["name"], g["appid"], detail(g)) for g in pool[:DEAL_PICKS]]
+        claude = self.bot.get_cog("ClaudeChat")
+        if claude is None or not hasattr(claude, "complete"):
+            return popular, False, "AI picks need the AI chat cog, so these are just the most popular."
+        if len(members) == 1:
+            size = "someone who plays with friends"
+        elif label == "the server":
+            size = "a group of friends from this server"
+        else:
+            size = f"a group of {len(members)}"
+        listing = []
+        for i, g in enumerate(pool, 1):
+            parts = [g["name"], price_text(g["price"]).replace("**", "") if g["price"] else "free to play",
+                     g["reviews"] + (f" ({g['review_count']:,} reviews)" if g["review_count"] else ""),
+                     ", ".join(g["tags"]), f"released {g['released']}" if mode == "new" else ""]
+            listing.append(f"{i}. " + " | ".join(p for p in parts if p))
+        system = DEALS_SYSTEM.format(what="on sale right now" if mode == "sale" else "released recently",
+                                     picks=DEAL_PICKS, size=size)
+        prompt = (self._deal_taste(asker.guild, label, games, users, wishlist, members)
+                  + "\n\nThe list:\n" + "\n".join(listing))
+        text, error = await claude.complete(asker, channel, system=system, max_tokens=800, persona=False,
+                                            messages=[{"role": "user", "content": prompt}])
+        if error:
+            return popular, False, re.sub(r"^\W+", "", ui.plain(error.split("\n")[0]))[:150]   # no ⏳/❌
+        picks = parse_picks(text, len(pool))
+        if not picks:
+            return [], True, "The AI didn't find anything on Steam's list that fits."
+        return [(pool[n - 1]["name"], pool[n - 1]["appid"], detail(pool[n - 1], why)) for n, why in picks], True, None
+
+    async def show_deals(self, target: Target, label: str, members: List[discord.Member], mode: str = "sale"):
+        """
+        The deals card: games some of the group have that are on sale for the rest, wishlisted games on sale, and
+        a few AI picks from Steam's store (`mode` "sale", or "new" for new releases, which shows only the picks).
+        Two menus let anyone add the games to their wishlist or library.
+        """
+        guild, asker, channel = who(target)
+        conf = self.config.guild(guild)
+        games, users, wishlist = await conf.games(), await conf.users(), await conf.wishlist()
+        group = {str(m.id) for m in members}
+        solo = len(members) == 1
+        sections = []
+        if mode == "sale":
+            owned = await self._deals_owned(guild, games, users, group)
+            if owned:
+                sections.append(("Your friends have these" if solo else "Some of you have these",
+                                 "On sale, so you can join them." if solo else "On sale, so the rest can catch up.",
+                                 owned[:DEAL_ROWS]))
+            shown = {r[1] for r in owned[:DEAL_ROWS]}
+            wanted = await self._deals_wanted(guild, games, users, wishlist, group, shown)
+            if wanted:
+                sections.append(("On your wishlist" if solo else "On your wishlists", "On sale now.",
+                                 wanted[:DEAL_ROWS]))
+        shown = {row[1] for s in sections for row in s[2]}
+        picks, by_ai, note = await self._deal_picks(asker, channel, label, mode, members, games, users, wishlist,
+                                                    shown)
+        if picks:
+            where = "Steam's multiplayer sales" if mode == "sale" else "Steam's popular new multiplayer games"
+            if by_ai:
+                sections.append(("You might like" if mode == "sale" else "New and worth a look",
+                                 f"Picked by AI from {where}.", picks))
+            else:
+                sections.append(("Popular on sale" if mode == "sale" else "Popular new games",
+                                 note or f"The most popular of {where}.", picks))
+                note = None
+        if not sections:
+            text = ("Nothing you play or want is on sale right now." if mode == "sale"
+                    else "I couldn't find new games to suggest right now.")
+            return await self.reply(target, content=ui.line(ui.ASK, text, hint=note))
+        parts, options = [], []
+        for heading, explain, rows in sections:
+            if parts:
+                parts.append(ui.SEPARATOR)
+            parts.append(ui.two_line(f"**{heading}**", explain))
+            for name, appid, detail in rows:
+                parts.append(ui.two_line(link_name(name, appid), detail))
+                if str(appid) not in {o.value for o in options}:
+                    options.append(discord.SelectOption(label=ui.truncate(name, 100), value=str(appid)))
+        if note:
+            parts.append(ui.hint(note))
+        parts.append([DealSelect("want", options), DealSelect("own", options)])
+        prefix = await self.prefix(guild)
+        other = f"{prefix}games deals new for new releases" if mode == "sale" else f"{prefix}games deals for sales"
+        title = f"🎮 {'Deals' if mode == 'sale' else 'New games'} for {label}"
+        view = ui.CardView(ui.card(*parts, title=ui.truncate(title, 100), footer=f"US Steam prices · {other}",
+                                   color=ui.HIGHLIGHT if mode == "sale" else ui.BRAND))
+        await self.send_card(target, view)
+
+    async def own_steam_games(self, guild: discord.Guild, channel, member: discord.Member,
+                              picks: List[Tuple[str, int]]) -> str:
+        """Mark Steam games owned: library games at once; others are added first if allowed, else requested."""
+        games = await self.config.guild(guild).games()
+        known, new, appids = [], [], {}
+        for name, appid in picks:
+            game = (next((g for g in games.values() if int(g.get("steam_appid") or 0) == appid), None)
+                    or next((g for g in games.values() if normalize(g["name"]) == normalize(name)), None))
+            if game is not None:
+                known.append(game["name"])
+            else:
+                new.append(name)
+                appids[name] = appid
+        lines = []
+        if new and await self.can_add_games(member):
+            added, _ = await self.add_games(guild, member, new, appids)
+            if added:
+                lines.append(ui.line(ui.DONE, f"Added {name_list([f'**{n}**' for n in added])} to the server library."))
+            known += new
+        elif new:
+            lines.append(await self.request_games_text(guild, channel, member, new, "own", appids=appids))
+        if known:
+            text, _ = await self.change_library_text(guild, member, known, "own")
+            lines.insert(0, text)
+        return "\n".join(l for l in lines if l).strip()
+
+    async def on_deal_select(self, interaction: discord.Interaction, action: str, picks: List[Tuple[str, int]]):
+        """A choice in the deals card's menus: wishlist the games, or mark them owned. The reply is private."""
+        if not picks:
+            return await ui.respond(interaction, ui.line(ui.ASK, "Pick a game first."))
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        guild, member = interaction.guild, interaction.user
+        if action == "want":
+            added, already, have = await self.add_wants(guild, member, picks)
+            lines = [ui.line(ui.DONE, f"Added {name_list([f'**{n}**' for n in added])} to your wishlist.")
+                     if added else None,
+                     ui.line(ui.WARN, "Already on your wishlist: " + ", ".join(already)) if already else None,
+                     ui.line(ui.WARN, "You already own " + name_list(have) + ".") if have else None]
+            if added:
+                alerts = await self.config.guild(guild).sale_channel()
+                lines.append(ui.hint(f"You'll be pinged in <#{alerts}> when it's on sale again." if alerts
+                                     else "Sale alerts aren't turned on in this server, but your wishlist is saved."))
+            text = "\n".join(l for l in lines if l)
+        else:
+            text = await self.own_steam_games(guild, interaction.channel, member, picks)
+        await ui.respond(interaction, ui.truncate(text or ui.line(ui.DONE, "Done."), ui.MESSAGE_LIMIT))
 
     @tasks.loop(hours=SALE_CHECK_HOURS)
     async def sale_loop(self):
@@ -5864,6 +6346,31 @@ class GameManager(commands.Cog):
     async def games_wanted(self, ctx: commands.Context):
         """The server's most-wanted games: who wants each one, and which are on sale."""
         await self.most_wanted(ctx)
+
+    @games.command(name="deals", aliases=["deal"])
+    async def games_deals(self, ctx: commands.Context, *who_for: str):
+        """
+        Games on sale that suit a group: the whole server, a session's players, or people you name.
+
+        Shows games some of you have that are on sale for the rest, wishlisted games on sale, and a few picks
+        that an AI chooses from Steam's multiplayer sales to fit what you play. Start with `new` for new releases
+        instead. The card's menus add games to your wishlist or library.
+
+        **Examples:**
+        `[p]games deals` (everyone with a library)
+        `[p]games deals session` (this channel's session)
+        `[p]games deals Alex Sam` (you and them)
+        `[p]games deals new me` (new releases, just for you)
+        """
+        words = list(who_for)
+        mode = "sale"
+        if words and words[0].lower() in ("new", "newest", "releases"):
+            mode, words = "new", words[1:]
+        group = await self.deal_group(ctx, words)
+        if group is None:
+            return
+        async with ctx.typing():
+            await self.show_deals(ctx, group[0], group[1], mode)
 
     @games.group(name="recurring", aliases=["repeating"], invoke_without_command=True)
     async def games_recurring(self, ctx: commands.Context):

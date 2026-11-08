@@ -87,9 +87,7 @@ async def main():
                 claude_mod.ClaudeChat):
         await bot.add_cog(cls(bot))
     cc, gm = bot.get_cog("ClaudeChat"), bot.get_cog("GameManager")
-    persona = (HERE / "ButlerBot-persona.txt")
-    if persona.exists():
-        await cc.config.guild(guild).persona.set(persona.read_text(encoding="utf-8").strip())
+    # No server persona set: the eval uses ButlerBot's own, data/cogs/CogManager/cogs/claude/persona.md
 
     async def no_title(name, member):
         return None

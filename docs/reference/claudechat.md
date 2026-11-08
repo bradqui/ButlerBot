@@ -123,7 +123,7 @@ Set the persona that `!claude persona reset` goes back to.
 
 - `!claude defaultpersona <text>` saves new text as the default (or attach it as a `.txt` file).
 - `!claude defaultpersona current` saves the persona in use right now.
-- `!claude defaultpersona clear` goes back to the built-in default.
+- `!claude defaultpersona clear` goes back to ButlerBot's own persona.
 - Run with nothing to see the saved default.
 
 <a id="claude-guideactions"></a>
@@ -180,11 +180,11 @@ List the available Claude models and their prices.
 Set Claude's personality and instructions for this server.
 
 Applies to the AI chat and, as a speaking style, to the bot guide (whose command help stays exact).
-Up to 3,000 characters. Discord messages stop at 2,000, so for a long persona attach it as a
+Up to 8,000 characters. Discord messages stop at 2,000, so for a long persona attach it as a
 `.txt` file to `!claude persona` instead of typing it.
 
 Run with no text to see the current persona, or `reset` to go back to the server's default
-persona (set with `!claude defaultpersona`).
+persona (set with `!claude defaultpersona`), or ButlerBot's own persona if there isn't one.
 
 **Example:** `!claude persona You are a grizzled pirate quartermaster. Keep answers short and salty.`
 

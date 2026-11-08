@@ -71,11 +71,11 @@ Or use Gemini directly:
 
 ## Personality
 
-ButlerBot's personality (a slightly put-upon robot butler) is set by the server's admins, and it applies everywhere the bot uses AI.
+ButlerBot comes with its own personality: a slightly put-upon robot butler who runs "the Manor." It applies everywhere the bot uses AI, and a server's admins can replace or adjust it.
 
 {: .staff }
 > **Admin settings** (`!claude …`):
-> - `persona [text]` and `defaultpersona [text|current|clear]` set the personality. You can attach a `.txt` file for long ones (up to 3,000 characters).
+> - `persona [text]` and `defaultpersona [text|current|clear]` set the personality. You can attach a `.txt` file for long ones (up to 8,000 characters). `persona reset` goes back to the server's saved default, or to ButlerBot's own when there isn't one.
 > - `websearch on|off`
 > - `limit <per day>`
 > - `usage [member]`: the server's totals and every member's usage, or one member's usage, shown where you ask

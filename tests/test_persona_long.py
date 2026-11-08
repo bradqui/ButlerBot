@@ -44,8 +44,8 @@ async def main():
     out = await run("!claude persona")
     check(len(out) == 2 and all(len(o) <= 2000 for o in out) and out[0].startswith("**Current persona:**"),
           f"long persona shown in {len(out)} messages")
-    out = await run("!claude persona", Att("x" * 3001))
-    check("under 3,000" in out[-1] and await cc.config.guild(guild).persona() == long_text, "over-limit rejected")
+    out = await run("!claude persona", Att("x" * 8001))
+    check("under 8,000" in out[-1] and await cc.config.guild(guild).persona() == long_text, "over-limit rejected")
     out = await run("!claude defaultpersona current")
     check(await cc.config.guild(guild).default_persona() == long_text, "long persona saved as default")
     await run("!claude persona Be brief.")

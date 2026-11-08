@@ -27,7 +27,26 @@ async def main():
         await bot.invoke(ctx)
         return channel.sent[-1].content
 
-    check(await cc._persona(guild) == claude_mod.DEFAULT_PERSONA, "built-in default")
+    check(await cc._persona(guild) == claude_mod.default_persona(), "built-in default")
+    # ButlerBot's own persona comes from persona.md: comments left out, re-read when the file changes
+    own = claude_mod.default_persona()
+    check(own.startswith("You are ButlerBot") and "<!--" not in own and "never reach the AI" not in own
+          and len(own) > 1000, own[:80])
+    real_file = claude_mod.PERSONA_FILE
+    import tempfile
+    import pathlib
+    import os
+    tmp = pathlib.Path(tempfile.mkdtemp()) / "persona.md"
+    tmp.write_text("<!-- notes -->\nYou are a test butler.\n", encoding="utf-8")
+    claude_mod.PERSONA_FILE = tmp
+    check(claude_mod.default_persona() == "You are a test butler.", "another file, without its comment")
+    tmp.write_text("You are a newer test butler.", encoding="utf-8")
+    os.utime(tmp, (tmp.stat().st_atime, tmp.stat().st_mtime + 5))
+    check(claude_mod.default_persona() == "You are a newer test butler.", "a changed file is re-read")
+    tmp.unlink()
+    check(claude_mod.default_persona() == claude_mod.FALLBACK_PERSONA, "a missing file falls back to one line")
+    claude_mod.PERSONA_FILE = real_file
+    check(claude_mod.default_persona() == own, "back to persona.md")
     await run(brad, "!claude persona You are a pirate.")
     await run(brad, "!claude defaultpersona current")
     check(await cc.config.guild(guild).default_persona() == "You are a pirate.", "save current as default")
@@ -38,7 +57,7 @@ async def main():
     check("You are a pirate." in await cc._system_prompt(guild, False, False), "AI prompt uses default")
     check("You are a pirate." in await cc._system_prompt(guild, False, False, actions=True), "the AI uses the default")
     await run(brad, "!claude defaultpersona clear")
-    check(await cc._persona(guild) == claude_mod.DEFAULT_PERSONA, "clear -> built-in")
+    check(await cc._persona(guild) == claude_mod.default_persona(), "clear -> built-in")
     await run(brad, "!claude defaultpersona Be brief.")
     out = await run(brad, "!claude defaultpersona")
     check("Be brief." in out, "show default")

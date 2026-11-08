@@ -36,9 +36,8 @@ __pycache__/
 *.pyc
 /.vscode/
 
-# Offline tests: published, but not their local libraries, outputs or the server's persona text
+# Offline tests: published, but not their local libraries or outputs
 /tests/pylibs/
 /tests/apilibs/
-/tests/ButlerBot-persona.txt
 /tests/*.png
 /tests/*.log

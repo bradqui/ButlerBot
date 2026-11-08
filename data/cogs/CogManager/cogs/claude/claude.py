@@ -72,8 +72,25 @@ FALLBACK_BETA = "server-side-fallback-2026-07-01"
 MAX_TOKENS = 16000  # covers thinking + reply; non-streaming safe
 MAX_PAUSE_CONTINUATIONS = 3
 
-DEFAULT_PERSONA = "You are friendly, helpful, and to the point."
-MAX_PERSONA_CHARS = 3000
+PERSONA_FILE = Path(__file__).resolve().parent / "persona.md"   # the bot's own persona, kept in the repo
+FALLBACK_PERSONA = "You are friendly, helpful, and to the point."   # only if persona.md is missing or empty
+MAX_PERSONA_CHARS = 8000   # for personas a server sets; enough to start from persona.md and change it
+_persona_file = {"mtime": None, "text": ""}
+
+
+def default_persona() -> str:
+    """
+    The bot's default persona: persona.md next to this file, re-read whenever it changes (so a `git pull` is enough),
+    without its <!-- --> comments, which are notes for whoever edits it. FALLBACK_PERSONA if the file is missing.
+    """
+    try:
+        mtime = PERSONA_FILE.stat().st_mtime
+    except OSError:
+        return FALLBACK_PERSONA
+    if _persona_file["mtime"] != mtime:
+        text = re.sub(r"<!--.*?-->", "", PERSONA_FILE.read_text(encoding="utf-8"), flags=re.S).strip()
+        _persona_file.update(mtime=mtime, text=text)
+    return _persona_file["text"] or FALLBACK_PERSONA
 
 # ==========================================
 #               ATTACHMENTS
@@ -431,7 +448,7 @@ class ClaudeChat(commands.Cog):
         )
         self.config.register_guild(
             persona=None,        # None = use default_persona
-            default_persona=None,  # what `persona reset` returns to; None = DEFAULT_PERSONA
+            default_persona=None,  # what `persona reset` returns to; None = the bot's persona.md
             web_search=True,
             guide_mentions=True, # @mentions and replies to the bot's other messages reach the AI chat
             guide_actions=True,  # the AI may run commands on the asker's behalf
@@ -527,9 +544,9 @@ class ClaudeChat(commands.Cog):
             del threads[:-500]
 
     async def _persona(self, guild: discord.Guild) -> str:
-        """The server's persona, else its saved default, else the built-in one."""
+        """The server's persona, else its saved default, else the bot's own (persona.md)."""
         conf = self.config.guild(guild)
-        return await conf.persona() or await conf.default_persona() or DEFAULT_PERSONA
+        return await conf.persona() or await conf.default_persona() or default_persona()
 
     async def _model_for(self, key: str, author: discord.Member, channel) -> str:
         if isinstance(channel, discord.Thread) and channel.parent is not None:
@@ -2061,7 +2078,7 @@ class ClaudeChat(commands.Cog):
         p = ctx.clean_prefix
         g = await self.config.guild(ctx.guild).all()
         # A one-line preview: the whole persona is `[p]claude persona`.
-        persona = " ".join((g["persona"] or g["default_persona"] or DEFAULT_PERSONA).split())
+        persona = " ".join((g["persona"] or g["default_persona"] or default_persona()).split())
         persona = ui.truncate(persona, 200) + ("" if g["persona"] else " *(default)*")
         channel = ctx.channel.parent if isinstance(ctx.channel, discord.Thread) and ctx.channel.parent else ctx.channel
         models = ui.settings_text([
@@ -2252,11 +2269,11 @@ class ClaudeChat(commands.Cog):
         Set Claude's personality and instructions for this server.
 
         Applies to the AI chat and, as a speaking style, to the bot guide (whose command help stays exact).
-        Up to 3,000 characters. Discord messages stop at 2,000, so for a long persona attach it as a
+        Up to 8,000 characters. Discord messages stop at 2,000, so for a long persona attach it as a
         `.txt` file to `[p]claude persona` instead of typing it.
 
         Run with no text to see the current persona, or `reset` to go back to the server's default
-        persona (set with `[p]claude defaultpersona`).
+        persona (set with `[p]claude defaultpersona`), or ButlerBot's own persona if there isn't one.
 
         **Example:** `[p]claude persona You are a grizzled pirate quartermaster. Keep answers short and salty.`
         """
@@ -2305,7 +2322,7 @@ class ClaudeChat(commands.Cog):
 
         - `[p]claude defaultpersona <text>` saves new text as the default (or attach it as a `.txt` file).
         - `[p]claude defaultpersona current` saves the persona in use right now.
-        - `[p]claude defaultpersona clear` goes back to the built-in default.
+        - `[p]claude defaultpersona clear` goes back to ButlerBot's own persona.
         - Run with nothing to see the saved default.
         """
         conf = self.config.guild(ctx.guild)
@@ -2314,11 +2331,11 @@ class ClaudeChat(commands.Cog):
             return await ctx.send(error)
         if persona is None:
             saved = await conf.default_persona()
-            return await self._send_persona(ctx, "**Default persona:**", saved or f"(built-in) {DEFAULT_PERSONA}")
+            return await self._send_persona(ctx, "**Default persona:**", saved or f"(ButlerBot's own) {default_persona()}")
         lowered = persona.lower()
         if lowered == "clear":
             await conf.default_persona.set(None)
-            return await ctx.send("✅ The default persona is the built-in one again.")
+            return await ctx.send("✅ The default persona is ButlerBot's own again.")
         if lowered == "current":
             persona = await self._persona(ctx.guild)
         await conf.default_persona.set(persona)

@@ -301,7 +301,7 @@ async def persona_test():
     cc = claude_mod.ClaudeChat(bot)
     await bot.add_cog(cc)
     default = await cc._system_prompt(guild, False, False, actions=True)
-    check(claude_mod.DEFAULT_PERSONA in default, "default persona in the prompt")
+    check(claude_mod.default_persona() in default, "default persona in the prompt")
     await cc.config.guild(guild).persona.set("You are a grizzled pirate quartermaster.")
     custom = await cc._system_prompt(guild, False, False, actions=True)
     check("grizzled pirate" in custom and "never changes command names" in custom, "custom persona with accuracy rule")

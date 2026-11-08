@@ -48,11 +48,29 @@ ButlerBot spells out a game in emoji (🧟🔫🚁🏝️), and the first person
 ```
 
 ButlerBot thinks of a game and opens a thread. Everyone asks yes-or-no questions there.
-- **Asking:** end a question with `?`. Messages without one are just chat.
+- **Asking:** address the question to ButlerBot: @mention it ("@ButlerBot is it multiplayer?"), reply to one of its answers, or use `!butler is it multiplayer?`. Everything else is just chat between players, question marks included.
 - **Guessing:** type the game's name at any time. The first right answer wins.
 - **The limit:** after 20 questions you get 2 more minutes for last guesses, then the answer is revealed.
 - **Giving up:** `!twentyq stop` in the thread reveals the answer.
 - **Idle rounds:** a round with no questions for 15 minutes ends on its own.
+
+## Murder at the Manor
+
+```
+!mystery
+!mystery long
+```
+
+Someone has died at the manor, and one of the suspects did it. ButlerBot opens a thread with the case and the suspects.
+- **Questioning:** `!interrogate Colonel where were you at nine?` (or `!question`). Start with the suspect's name; a surname or title is enough when it's clear who you mean. The suspect answers in character. Only `!interrogate` reaches the suspects, so talk the case over freely.
+- **Clues:** a new clue turns up every so often, in the thread and on the card.
+- **Accusing:** you get one accusation: `!accuse Colonel Ashby`. Right, and you solve the case. Wrong, and you can keep asking questions to help the others, but you can't accuse again.
+- **Timing:** a mystery runs about an hour. `!mystery long` runs four days, with clues spread across them. If nobody solves it in time, ButlerBot reveals what happened.
+- **One at a time:** one mystery per server. Whoever started it, or a mod, can close it early with `!mystery stop`.
+- **Winning:** solving a case counts on `!parlor top`.
+
+{: .staff }
+> **Weekly mysteries** (admins): `!mystery weekly #channel` starts a long mystery there every week, the first one right away. `!mystery weekly off` stops them. `!parlor settings` shows the weekly games and where game threads are off.
 
 ## Caption contests
 

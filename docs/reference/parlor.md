@@ -12,6 +12,20 @@ Parlor games: guess the game, the emoji game, twenty questions, adventures, judg
 For a task-by-task guide, see [Fun and games]({{ '/fun/' | relative_url }}).
 
 {% raw %}
+<a id="accuse"></a>
+### !accuse
+
+`!accuse [who]`
+
+**Who:** everyone
+
+Make your one accusation in Murder at the Manor, in the mystery's thread.
+
+Name the suspect you think did it. Get it right and you solve the case; get it wrong and you can keep asking
+questions, but you can't accuse again.
+
+**Example:** `!accuse Colonel Ashby`
+
 <a id="adventure"></a>
 ### !adventure
 
@@ -181,6 +195,19 @@ End the round running here, or in this thread, and reveal the answer (mods).
 
 The parlor leaderboard (the same as `!parlor top`).
 
+<a id="interrogate"></a>
+### !interrogate
+
+`!interrogate [text]`
+
+**Who:** everyone · **Also:** `!question`
+
+Question a suspect in Murder at the Manor, in the mystery's thread.
+
+Start with the suspect's name (a surname or title is enough when it's clear who you mean).
+
+**Example:** `!interrogate Colonel where were you at nine?`
+
 <a id="judge"></a>
 ### !judge
 
@@ -252,6 +279,43 @@ to see every list, right here. Long lists page with ◀ ▶.
 
 **Example:** `!maketrivia show our games`
 
+<a id="mystery"></a>
+### !mystery
+
+`!mystery [length]`
+
+**Who:** everyone · **Also:** `!murder`
+
+Murder at the Manor: question the suspects and work out who did it.
+
+Opens a thread with the case and its suspects. Question them with `!interrogate <name> <question>`, watch
+for clues, and make your one accusation with `!accuse <name>`. A mystery runs about an hour; `!mystery long`
+runs for a few days, with clues spread across them. One mystery at a time per server.
+
+**Examples:** `!mystery` or `!mystery long`
+
+<a id="mystery-stop"></a>
+### !mystery stop
+
+`!mystery stop`
+
+**Who:** everyone · **Also:** `!mystery end`
+
+Close the running mystery and reveal the answer (whoever started it, or a mod).
+
+<a id="mystery-weekly"></a>
+### !mystery weekly
+
+`!mystery weekly [where]`
+
+**Who:** admins, or anyone with the manage guild permission
+
+Start a long mystery every week in one channel (admins).
+
+The first one starts right away, then one a week from then.
+
+**Examples:** `!mystery weekly #fun`, `!mystery weekly` (show it), `!mystery weekly off`
+
 <a id="parlor"></a>
 ### !parlor
 
@@ -260,6 +324,15 @@ to see every list, right here. Long lists page with ◀ ▶.
 **Who:** everyone
 
 What's in ButlerBot's parlor: the games and toys, and how to start each one.
+
+<a id="parlor-settings"></a>
+### !parlor settings
+
+`!parlor settings`
+
+**Who:** everyone
+
+The parlor's settings for this server: weekly games and channels where game threads are off.
 
 <a id="parlor-threads"></a>
 ### !parlor threads

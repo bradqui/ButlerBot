@@ -25,7 +25,8 @@ These run only when someone uses them. The text goes to Anthropic's Claude, and 
 | `!maketrivia` (mods) | Writes trivia questions | The topic. For "our games", the server's game list. |
 | `!guessgame` | Describes and draws a game for people to guess | The game's name |
 | `!emojigame` | Spells out a game in emoji (and, with `any`, picks the game) | The game's name |
-| `!twentyq` | Answers yes-or-no questions about a secret game (and, with `any`, picks the game) | The questions asked in the round's thread, and the game's name and Steam details |
+| `!twentyq` | Answers yes-or-no questions about a secret game (and, with `any`, picks the game) | The questions addressed to ButlerBot in the round's thread, and the game's name and Steam details. Other messages in the thread aren't sent. |
+| `!mystery` | Writes the case, then answers `!interrogate` questions in character | The questions asked with `!interrogate`. Other messages in the mystery's thread aren't sent. |
 | `!critique` | Reviews a picture | The picture, and the words you add |
 | `!caption` | Draws the picture when there's no screenshot, and picks the Butler's Award | Your idea, if any (to Gemini). For the award, the picture and the captions (to Claude). With `people`, the votes alone decide and no AI judges. |
 | `!roast` | Roasts a game library | That member's library, favorites and wishlist, and the server's most-owned games |

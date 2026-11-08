@@ -1257,6 +1257,23 @@ class ClaudeChat(commands.Cog):
                     log.debug("guide_member_roles failed in %s", cog.qualified_name, exc_info=True)
         return ", ".join([level, *extra])
 
+    async def _game_takes(self, message: discord.Message, text: str, *, command: bool) -> bool:
+        """
+        Whether a running game owns this channel (Parlor's game threads), so the AI chat steps aside. Cogs offer
+        `async game_takes_message(message, text, *, command) -> bool`; with `command` (`[p]ai` or `[p]butler`), the game
+        also handles the text itself, since only commands skip the game's own message listener. No AI is involved.
+        """
+        for cog in list(self.bot.cogs.values()):
+            hook = getattr(cog, "game_takes_message", None)
+            if hook is None:
+                continue
+            try:
+                if await hook(message, text, command=command):
+                    return True
+            except Exception:
+                log.exception("game_takes_message failed in %s", cog.qualified_name)
+        return False
+
     async def _member_notes(self, member: discord.Member) -> List[str]:
         """Facts other cogs report about the asker via guide_member_notes() (e.g. GameManager's saved timezone)."""
         notes = []
@@ -1813,6 +1830,8 @@ class ClaudeChat(commands.Cog):
         """
         if not prompt and not ctx.message.attachments:
             return await ctx.send_help()
+        if await self._game_takes(ctx.message, prompt, command=True):
+            return
         await self._respond(ctx.message, prompt, self._session_key(ctx))
 
     @ai.command(name="reset")
@@ -1871,6 +1890,8 @@ class ClaudeChat(commands.Cog):
             actions = await self.config.guild(ctx.guild).guide_actions()
             await self._send(ctx.message, ctx.channel, self._butler_intro(await self._prefix(ctx.guild), actions))
             return
+        if await self._game_takes(ctx.message, request, command=True):
+            return
         await self._respond(ctx.message, request, self._session_key(ctx))
 
     @commands.Cog.listener()
@@ -1899,6 +1920,9 @@ class ClaudeChat(commands.Cog):
         if not await self.bot.ignored_channel_or_guild(message):
             return
         if not await self.bot.allowed_by_whitelist_blacklist(message.author):
+            return
+        # In a game's thread (twenty questions, an adventure, a mystery…), @mentions and replies belong to the game.
+        if await self._game_takes(message, re.sub(mention, "", message.content).strip(), command=False):
             return
 
         if entry is not None:

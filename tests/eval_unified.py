@@ -72,6 +72,10 @@ CASES = [
     ("sam", "which of those does Brad have installed?", "n", {"source": True}),
     ("alex", "what's the most wanted game?", "o", {"source": True, "prefer": "wanted"}),
     ("alex", "who's been most active here this month?", "o", {"source": True, "prefer": "stats"}),
+    # Deals (2026-11-08): plain questions about sales and new games run `games deals`, so the real card is posted.
+    ("alex", "is anything on sale right now that Sam and I would both like?", "p",
+     {"lookup": True, "run": ["games deals", "Sam"]}),
+    ("sam", "any good new co-op games out lately?", "q", {"lookup": True, "run": ["games deals new"]}),
 ]
 
 

@@ -4874,8 +4874,8 @@ class GameManager(commands.Cog):
         session = await self.pick_session(target, name, "here", this_channel=True)
         if session is None:
             return
-        last = self._here_last.get(channel.id, 0.0)
-        if time.monotonic() - last < HERE_COOLDOWN:
+        last = self._here_last.get(channel.id)   # None, not 0: the clock can be under a minute right after a boot
+        if last is not None and time.monotonic() - last < HERE_COOLDOWN:
             return await self.reply(target, ephemeral=True,
                                     content=ui.line(ui.WAIT, "The card was just moved. Try again in a minute."))
         self._here_last[channel.id] = time.monotonic()

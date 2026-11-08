@@ -43,6 +43,8 @@ To change one, fork it into a new, differently named cog under `CogManager/cogs/
 CLAUDE.md           detailed notes for working on the bot with Claude Code
 LICENSE             MIT
 docs/               the user handbook (GitHub Pages, Jekyll + just-the-docs)
+tests/              offline tests (stubbed Red, real discord.py); run on every push by .github/workflows
+tools/              build_reference.py (the handbook's command reference), reload_hint.py (deploy steps)
 data/cogs/CogManager/cogs/<cog>/   our custom cogs
 ```
 
@@ -109,6 +111,7 @@ Then run `!reload <cog>` in Discord for each cog that changed. If a cog's `info.
 ## Development
 
 - Edit the cogs here, then push to `main`. You can't run the bot locally: the venv in `data/venv` holds Linux binaries. To check syntax before pushing, run `python -m py_compile <file>`.
+- **Tests:** `python -m pip install -r tests/requirements.txt`, then `python tests/run_all.py` (or `python tests/run_all.py parlor` for some). They need no Discord connection or Red install. GitHub runs them on Python 3.11 for every push to `main`; the Actions tab shows the results.
 - Persist data with Red's `Config`. Never change an existing cog's Config identifier, because that orphans its saved data.
 - Don't hand-edit `settings.json` while the bot is running. Red keeps the data in memory and will overwrite your edits. Change settings through bot commands instead.
 - Never commit secrets. The bot token and API keys live in untracked `settings.json` files.

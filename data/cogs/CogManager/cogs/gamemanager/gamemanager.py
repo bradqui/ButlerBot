@@ -10,6 +10,7 @@ running votes resume after a reload.
 import asyncio
 import difflib
 import importlib.util
+import io
 import logging
 import random
 import re
@@ -911,11 +912,12 @@ def game_admin():
 # ==========================================
 
 class SessionButton(discord.ui.DynamicItem[discord.ui.Button],
-                    template=r"gm:s:(?P<action>join|leave|vote|event|plan|end):(?P<sid>[a-z0-9]+)"):
+                    template=r"gm:s:(?P<action>join|leave|vote|cal|event|plan|end):(?P<sid>[a-z0-9]+)"):
     LOOKS = {   # one main action (Join); everything else grey
         "join": ("Join", "➕", discord.ButtonStyle.primary),
         "leave": ("Leave", "➖", discord.ButtonStyle.secondary),
         "vote": ("Start vote", "🗳️", discord.ButtonStyle.secondary),
+        "cal": ("Add to calendar", "🗓️", discord.ButtonStyle.secondary),
         "event": ("Edit", "✏️", discord.ButtonStyle.secondary),   # (the ID says "event": it began as Edit event)
         "plan": ("Plan next", "📅", discord.ButtonStyle.secondary),
         "end": ("End session", "🏁", discord.ButtonStyle.secondary),
@@ -1017,12 +1019,73 @@ class InstallButton(discord.ui.DynamicItem[discord.ui.Button], template=r"gm:i:(
 def session_buttons(sid: str, scheduled: bool = False, *, vote: bool = True,
                     plan: bool = False) -> List[discord.ui.Item]:
     """
-    Join, Leave, Start vote (not when the game is set ahead), Edit (scheduled sessions: their settings and Discord
-    event), Plan next (special nights from a schedule), End session.
+    Join, Leave, Start vote (not when the game is set ahead), Add to calendar and Edit (scheduled sessions: an .ics
+    file, and their settings and Discord event), Plan next (special nights from a schedule), End session.
     """
-    actions = ["join", "leave"] + (["vote"] if vote else []) + (["event"] if scheduled else [])
+    actions = ["join", "leave"] + (["vote"] if vote else []) + (["cal", "event"] if scheduled else [])
     actions += (["plan"] if plan else []) + ["end"]
     return [SessionButton(action, sid) for action in actions]
+
+
+ICS_DAYS = ["MO", "TU", "WE", "TH", "FR", "SA", "SU"]
+
+
+def ics_escape(text: str) -> str:
+    return (text or "").replace("\\", "\\\\").replace(";", "\\;").replace(",", "\\,").replace("\n", "\\n")
+
+
+def ics_fold(line: str) -> str:
+    """Lines longer than 75 bytes continue on the next line after a space (RFC 5545)."""
+    out, current = [], ""
+    for char in line:
+        if len((current + char).encode("utf-8")) > 75:
+            out.append(current)
+            current = " " + char
+        else:
+            current += char
+    return "\r\n".join(out + [current])
+
+
+def schedule_rrule(schedule: dict) -> str:
+    """The repeat rule for a schedule: weekly, every other week, or the nth (or last) weekday of each month."""
+    day = ICS_DAYS[schedule["weekday"]]
+    if schedule.get("nth"):
+        return f"FREQ=MONTHLY;BYDAY={schedule['nth']}{day}"
+    interval = max(1, int(schedule.get("interval") or 7) // 7)
+    return f"FREQ=WEEKLY;BYDAY={day}" + (f";INTERVAL={interval}" if interval > 1 else "")
+
+
+def ics_calendar(uid: str, title: str, start: datetime, end: datetime, *, description: str = "", location: str = "",
+                 url: str = "", rrule: Optional[str] = None, tz_name: Optional[str] = None) -> bytes:
+    """
+    An .ics file with one event. A repeating one is written in its own timezone (TZID, which Google, Apple and Outlook
+    all read) so the local time holds across daylight saving changes; a single one is written in UTC.
+    """
+    def stamp(when: datetime) -> str:
+        if rrule and tz_name:
+            return f";TZID={tz_name}:" + when.astimezone(load_zone(tz_name)).strftime("%Y%m%dT%H%M%S")
+        return ":" + when.astimezone(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+
+    lines = ["BEGIN:VCALENDAR", "VERSION:2.0", "PRODID:-//ButlerBot//Game nights//EN", "CALSCALE:GREGORIAN",
+             "METHOD:PUBLISH", "BEGIN:VEVENT", f"UID:{uid}@butlerbot",
+             "DTSTAMP:" + datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ"),
+             "DTSTART" + stamp(start), "DTEND" + stamp(end)]
+    if rrule:
+        lines.append(f"RRULE:{rrule}")
+    lines.append(f"SUMMARY:{ics_escape(title)}")
+    if description:
+        lines.append(f"DESCRIPTION:{ics_escape(description)}")
+    if location:
+        lines.append(f"LOCATION:{ics_escape(location)}")
+    if url:
+        lines.append(f"URL:{url}")
+    lines += ["END:VEVENT", "END:VCALENDAR"]
+    return ("\r\n".join(ics_fold(line) for line in lines) + "\r\n").encode("utf-8")
+
+
+def ics_filename(title: str) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "-", (title or "game night").lower()).strip("-")[:40]
+    return f"{slug or 'game-night'}.ics"
 
 
 def plans_next(session: dict) -> bool:
@@ -3576,6 +3639,43 @@ class GameManager(commands.Cog):
     def session_link(self, guild: discord.Guild, session: dict) -> str:
         return message_link(guild.id, session.get("channel_id"), session.get("message_id"))
 
+    async def calendar_files(self, guild: discord.Guild, session: dict) -> List[Tuple[str, bytes]]:
+        """
+        (filename, .ics) for a scheduled session, plus one that repeats when it comes from a schedule. Times, place
+        and length match its Discord event.
+        """
+        starts = parse_iso(session.get("starts_at"))
+        if starts is None:
+            return []
+        fields = await self._event_fields(guild, session)
+        end = fields.get("end_time") or starts + timedelta(hours=EVENT_LENGTH_HOURS)
+        place = fields["channel"].name if fields.get("channel") is not None else fields.get("location", "")
+        link = self.session_link(guild, session)
+        title = f"{session['title']} ({guild.name})"
+        description = fields["description"]
+        files = [(ics_filename(session["title"]),
+                  ics_calendar(f"session-{session['id']}", title, starts, end, description=description,
+                               location=place, url=link))]
+        schedule = (await self.config.guild(guild).recurring()).get(session.get("recurring_id") or "")
+        if schedule is not None:
+            files.append((ics_filename(f"{schedule.get('title') or session['title']} every time"),
+                          ics_calendar(f"schedule-{schedule['id']}", title, starts, end, description=description,
+                                       location=place, url=link, rrule=schedule_rrule(schedule),
+                                       tz_name=schedule["tz"])))
+        return files
+
+    async def send_calendar(self, interaction: discord.Interaction, session: dict):
+        """Add to calendar: the session (and its schedule) as .ics files, privately."""
+        files = await self.calendar_files(interaction.guild, session)
+        if not files:
+            return await ui.respond(interaction, ui.line(ui.ASK, "This session has no start time to add."))
+        text = ui.line(None, f"🗓️ **{session['title']}** for your calendar: open the file, or import it.",
+                       hint=("The second file adds every night on the schedule; nights that get skipped or replaced "
+                             "still show there. " if len(files) > 1 else "")
+                       + "Google Calendar imports them under Settings → Import & export.")
+        await ui.respond(interaction, text, files=[discord.File(io.BytesIO(data), filename=name)
+                                                   for name, data in files])
+
     async def create_session(self, target: Target, text: Optional[str], details: Optional[dict] = None):
         """
         Start a session from text like "friday 9pm Raid night". `details` are its Discord event's (description,
@@ -4616,6 +4716,8 @@ class GameManager(commands.Cog):
                 await interaction.response.edit_message(embed=self.session_embed(session), view=session_view(sid))
             return
 
+        if action == "cal":
+            return await self.send_calendar(interaction, session)
         if not await self.can_manage(member, session["host_id"]):
             return await ui.respond(interaction, "🔒 Only the host or a game admin can do that.")
         if action == "event":

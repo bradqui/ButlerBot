@@ -62,6 +62,8 @@ These are short for the `!games …` versions (`!games session`, `!games join`, 
 - `!session join` and `!session leave` work without the card. With more than one session around, add its name: `!session join Raid night`.
 - The slash versions (`/games join`, `/games leave`, `/games here`) answer just to you and list the sessions as you type.
 
+**Your own calendar:** scheduled sessions have a **🗓️ Add to calendar** button. It sends you (privately) a calendar file for that night; open it, or import it into Google Calendar (Settings → Import & export), Apple Calendar or Outlook. For a weekly or monthly game night you also get a second file that adds every night on the schedule. Nights that get skipped or replaced still show in that one.
+
 **Discord events:**
 - Scheduled sessions also show up in the server's **Events** list.
 - Pressing **Interested** there joins the session too, and Discord reminds you.

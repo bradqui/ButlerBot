@@ -88,6 +88,7 @@ Quirks to know:
   - Without a rules role, the rules step is skipped and admins get a note.
   - Saying No keeps the rules prompt up so the member can change their mind.
 - **GameManager internals:**
+  - **Draw banner (2026-11-07):** the Edit menu's `BannerModal` (an optional idea, plus the future option) calls `draw_banner`, which has Gemini's `render_image` paint a wide, wordless banner from the title and game, then saves it like an upload (`store_details`, the schedule too with future, `push_event`, card refresh).
   - **Add to calendar (2026-11-07):** scheduled cards have a `cal` button (anyone): `send_calendar` replies privately with `calendar_files()`: an `.ics` for the night (UTC, with `_event_fields`' end, place and description) and, for a schedule's session, one repeating with `schedule_rrule` (weekly, `INTERVAL=2`, or monthly `BYDAY=<nth><day>`) written with `TZID` so daylight saving doesn't shift it. `ics_calendar` escapes and folds lines per RFC 5545.
   - **Persistent buttons:** session, vote, request and install buttons are discord.py `DynamicItem`s (custom IDs `gm:s:<action>:<sid>`, `gm:v:<vid>:<gid>`, `gm:r:<action>:<rid>`, `gm:rb:<action>:<bid>`, `gm:i:<rid>`), registered in `cog_load`. They keep working after restarts. Buttons posted by the pre-2026-11 version used static IDs and are dead.
   - **Vote timers:** they live in `self.vote_tasks`. `_resume_votes` reschedules them from each vote's `ends_at` on load.

@@ -1565,6 +1565,22 @@ class GameModal(SettingsModal):
                                              self.game.value or "", self.for_future)
 
 
+class BannerModal(SettingsModal):
+    """Draw banner: Gemini paints the event's banner from the title and game, plus an optional idea."""
+
+    def __init__(self, menu: "SessionEditMenu"):
+        super().__init__(menu, "Draw a banner")
+        self.idea = discord.ui.TextInput(required=False, max_length=300, style=discord.TextStyle.paragraph,
+                                         placeholder="A space battle at dusk, a cozy tavern…")
+        self.add_item(discord.ui.Label(text="What it should show", component=self.idea,
+                                       description="Optional: leave it empty to go by the title and game"))
+        self.add_future()
+
+    async def save(self, interaction: discord.Interaction) -> str:
+        return await self.menu.cog.draw_banner(interaction.guild, interaction.user, self.menu.sid,
+                                               self.idea.value or "", self.for_future)
+
+
 class RemindersModal(SettingsModal):
     def __init__(self, menu: "SessionEditMenu"):
         super().__init__(menu, "Reminders")
@@ -1666,7 +1682,8 @@ class SessionEditMenu(OwnerOnlyCard):
         buttons = [make_button("Title & time", self._open(TitleTimeModal)),
                    make_button("Event details", self._event), make_button("Game", self._open(GameModal)),
                    make_button("Reminders", self._open(RemindersModal)), make_button("Replaces", self._replaces)]
-        more = [make_button("Plan next", self._plan)] if s.get("recurring_id") else None
+        more = ([make_button("Plan next", self._plan)] if s.get("recurring_id") else []) + \
+            [make_button("Draw banner", self._open(BannerModal))]
         footer = ("Each form can also change future sessions · " if self.schedule else "") + \
             "Changes show on the card and the Discord event"
         return ui.card(self.note, ui.settings_text(rows), ui.SEPARATOR, buttons, more,
@@ -4210,6 +4227,47 @@ class GameManager(commands.Cog):
         if problem:
             return ui.line(ui.WARN, "The details are saved, but " + problem)
         return ui.line(ui.DONE, "Event details saved." + (" Future sessions use them too." if future else ""))
+
+    async def draw_banner(self, guild: discord.Guild, member: discord.Member, sid: str, idea: str,
+                          future: bool) -> str:
+        """Have Gemini draw the event's banner, then save it like an uploaded one. Returns a line."""
+        session, problem = await self._editable(guild, member, sid)
+        if session is None:
+            return problem
+        gemini = self.bot.get_cog("GeminiChat")
+        if gemini is None or not hasattr(gemini, "render_image"):
+            return ui.line(ui.WARN, "Drawing a banner needs image generation, which isn't running.",
+                           hint="Upload your own in Event details instead.")
+        game = (session.get("game") or {}).get("name")
+        prompt = (f"A wide, eye-catching event banner, about two and a half times as wide as it is tall, for a game "
+                  f"night called \"{session['title']}\"" + (f" playing {game}" if game else "")
+                  + (f". It shows: {' '.join(idea.split())}" if idea.strip() else "")
+                  + ". Bold colors and a clear focal point. No text, letters, words, logos or watermarks anywhere.")
+        channel = guild.get_channel_or_thread(session["channel_id"]) or guild.text_channels[0]
+        data, error = await gemini.render_image(prompt, channel=channel)
+        if data is None:
+            return error
+        if image_ext(data) is None:
+            return ui.line(ui.FAIL, "Gemini's picture wasn't one Discord takes as a banner. Try again.")
+        future = future and bool(session.get("recurring_id"))
+        owner = session["recurring_id"] if future else sid
+        old = session.get("event") or {}
+        details = self.store_details(owner, {**{k: v for k, v in old.items() if k != "cover_url"}, "banner_data": data})
+        async with self.config.guild(guild).play_sessions() as sessions:
+            if sid not in sessions:
+                return "⚠️ This session has ended."
+            sessions[sid]["event"] = details
+            session = dict(sessions[sid])
+        if future:
+            async with self.config.guild(guild).recurring() as recurring:
+                if session["recurring_id"] in recurring:
+                    recurring[session["recurring_id"]]["event"] = dict(details)
+        problem = await self.push_event(guild, session, True)
+        await self.refresh_session_message(guild, (await self.config.guild(guild).play_sessions()).get(sid, session))
+        if problem:
+            return ui.line(ui.WARN, "The banner is drawn and saved, but " + problem)
+        return ui.line(ui.DONE, "New banner drawn." + (" Future sessions use it too." if future else ""),
+                       hint="Not quite right? Draw it again, or upload your own in Event details.")
 
     # ---------- Plan next ----------
 

@@ -19,6 +19,7 @@ These run only when someone uses them. The text goes to Anthropic's Claude, and 
 | `!ai` (also `!chat`, `!ask`, `!g`), `!aithread`, `!butler` (also `!guide`) | The [AI chat]({{ '/ai/' | relative_url }}) | That conversation, and any files attached to it |
 | @mentioning ButlerBot, or replying to one of its messages | Goes to the AI chat too | Your message, and the one you replied to |
 | `!draw`, `!draw edit` | Makes a picture | Your description |
+| **Draw banner** (a session's Edit menu) | Paints the event's banner | The session's title and game, and your idea if you give one (to Gemini) |
 | `!catchup`, `/catchup` | Sums up what you missed | The channel's messages since you last spoke (up to 400) |
 | `!judge` (also `!verdict`) | Rules on an argument | The channel's last 20–60 messages |
 | `!adventure` | Narrates a text adventure in its own thread, keeps story notes, and writes **Catch me up** summaries | The players' messages in that thread, and their character bios |

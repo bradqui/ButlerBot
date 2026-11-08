@@ -78,6 +78,7 @@ These are short for the `!games …` versions (`!games session`, `!games join`, 
   - Asking the AI works too: "`!ai` set up a weekly session on Fridays at 9pm in #Raid Voice, banner attached". Attach the image to that message and mention the channel with `#`.
 - **The banner shows on the session card too,** full width across the top, the same picture as the event.
 - **Change them later** with the session card's **✏️ Edit** button (host or game admin). It opens a private menu showing everything about the session, with a short form for each part: **Title & time**, **Event details** (description, length, voice channel, banner), **Game**, **Reminders** and **Replaces**. You don't need Discord's Manage Events permission for this.
+- **No banner handy?** **Draw banner** in the same menu has Gemini paint one from the title and the game, plus an idea if you give one ("a space battle at dusk"). It goes on the event and the card; draw again if you don't like it.
 - **Repeating sessions:** each week's session is its own event (not one repeating Discord event, so each week has its own Interested list, card and details). Details set when you create it are used every time. In the **Edit** forms, tick **Also use for future sessions** to change every one from then on; otherwise only that one changes.
 - **Edited the event in Discord instead?** That works too: a new time, name or voice channel carries over to the session card and its reminders, and cancelling the event ends the session. It only changes that one week's session.
 

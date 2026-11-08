@@ -89,26 +89,27 @@ FALLBACK_TIMEZONES = [
 DAILY_LIMITS = [0, 10, 20, 30, 50, 100]
 SPEAKUP_FEATURES = [("times", "Times"), ("steam", "Steam cards"), ("links", "Link summaries"),
                     ("mistakes", "Typo help")]
-ROOM_TYPES = [("public", "Public", "Anyone can see and join; the owner can kick people."),
-              ("locked", "Locked", "Visible, but the owner lets people in."),
-              ("private", "Private", "Hidden; the owner lets people in."),
-              ("server", "Server", "Public, with no owner and no changes.")]
-ROOM_NAMES = [("username", "Owner's name", "“Alex's Room”"),
-              ("game", "Owner's game", "The game they're playing, else their name")]
+ROOM_TYPES = [("public", "Anyone", "Anyone can join; the room's owner can kick people out"),
+              ("locked", "Owner lets them in", "Everyone can see it, but the owner allows people in"),
+              ("private", "Hidden, owner lets them in", "Only people the owner allows can see it"),
+              ("server", "Anyone, no owner", "Open to all, and nobody can change it")]
+ROOM_NAMES = [("username", "The owner's name", "Like “Alex's Room”"),
+              ("game", "The owner's game", "The game they're playing, else their name")]
 ANTISPAM_PRESETS = {   # name: (commands, seconds, timeout seconds, description)
     "relaxed": (8, 10, 120, "8 commands in 10 seconds, then a 2-minute break"),
     "normal": (5, 5, 300, "5 commands in 5 seconds, then a 5-minute break"),
     "strict": (4, 10, 900, "4 commands in 10 seconds, then a 15-minute break"),
 }
-# (name, kind, the cog that provides it, how it's shown)
+# (name, kind, the cog that provides it, how it's shown, what it does)
 APP_COMMANDS = [
-    ("games", "slash", "GameManager", "/games"),
-    ("catchup", "slash", "ClaudeChat", "/catchup"),
-    ("Summarize link", "message", "SpeakUp", "Summarize link (right-click)"),
-    ("Translate", "message", "EasyTranslate", "Translate (right-click)"),
-    ("translate", "slash", "EasyTranslate", "/translate"),
-    ("setmylanguage", "slash", "EasyTranslate", "/setmylanguage"),
+    ("games", "slash", "GameManager", "/games", "Game library and game nights as slash commands"),
+    ("catchup", "slash", "ClaudeChat", "/catchup", "A private summary of what you missed in a channel"),
+    ("Summarize link", "message", "SpeakUp", "Summarize link", "Right-click a message → Apps: a private summary"),
+    ("Translate", "message", "EasyTranslate", "Translate", "Right-click a message → Apps: translate it privately"),
+    ("translate", "slash", "EasyTranslate", "/translate", "Translate some text"),
+    ("setmylanguage", "slash", "EasyTranslate", "/setmylanguage", "The language Translate turns things into"),
 ]
+PERSONA_FORM_MAX = 4000         # Discord's limit for one text box in a form
 VOICE_CATEGORY = "Voice rooms"
 VOICE_SOURCE = "➕ Join to create"
 
@@ -204,14 +205,14 @@ class OpenButton(discord.ui.DynamicItem[discord.ui.Button], template=r"sw:open")
 #                THE WIZARD
 # ==========================================
 
-class LabelModal(discord.ui.Modal, title="Group button"):
+class LabelModal(discord.ui.Modal, title="New group button"):
     """The label for a new welcome group button (also the [TAG] in nicknames)."""
 
     def __init__(self, wizard: "Wizard", role: discord.Role):
         super().__init__()
         self.wizard, self.role = wizard, role
-        self.label = discord.ui.TextInput(label="Button label (the nickname tag)", default=role.name[:40],
-                                          max_length=40)
+        self.label = discord.ui.TextInput(label="Button label and nickname tag", default=role.name[:40],
+                                          max_length=40, placeholder="RDR")
         self.add_item(self.label)
 
     async def on_submit(self, interaction: discord.Interaction):
@@ -219,21 +220,39 @@ class LabelModal(discord.ui.Modal, title="Group button"):
         await self.wizard.act(interaction, [f"bg addrole {self.role.id} {label}"])
 
 
+class PersonaModal(discord.ui.Modal, title="ButlerBot's personality"):
+    """Write the server's own personality for the AI (runs `[p]claude persona <text>`)."""
+
+    def __init__(self, wizard: "Wizard", current: str):
+        super().__init__()
+        self.wizard = wizard
+        self.text = discord.ui.TextInput(
+            label="Who ButlerBot is and how it talks", style=discord.TextStyle.paragraph, max_length=PERSONA_FORM_MAX,
+            default=current[:PERSONA_FORM_MAX] or None,
+            placeholder="You are a cheerful pirate quartermaster. Keep answers short and salty.")
+        self.add_item(self.text)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        text = str(self.text.value).strip()
+        await self.wizard.act(interaction, [f"claude persona {text}"] if text else [])
+
+
 class Wizard(ui.ExpiringCard):
     """
-    The private setup menu: a home card listing every step with its status, and one card per step with pickers.
-    Every change runs the server's own command as the admin; its reply shows at the top of the card.
+    The private setup menu: an overview listing every step with its status, one page per step, and a finish page.
+    Every setting is a labelled field (a bold name and a line saying what it does) with its menu under it, or a
+    switch (the name and On/Off, with a Turn on/off button beside it). Changes run the server's own commands as the
+    admin; what they said shows under the page title.
     """
 
-    expired_note = "Expired. Run the setup command again to carry on."
-
-    def __init__(self, cog: "SetupWizard", member: discord.Member, base: discord.Message):
+    def __init__(self, cog: "SetupWizard", member: discord.Member, base: discord.Message, prefix: str = "!"):
         super().__init__(member.id, timeout=WIZARD_TIMEOUT)
-        self.cog, self.member, self.guild, self.base = cog, member, member.guild, base
-        self.page: Optional[str] = None   # None = the overview
+        self.expired_note = f"Expired. Run `{prefix}setup` to carry on."
+        self.cog, self.member, self.guild, self.base, self.p = cog, member, member.guild, base, prefix
+        self.page: Optional[str] = None   # None = the overview; "done" = the finish page
         self.note: Optional[str] = None   # the last change's result
-        self.voice: Dict[str, Optional[object]] = {"source": None, "category": None, "type": "public",
-                                                   "names": "username"}
+        self.voice: Dict[str, object] = {"source": None, "category": None, "type": "public", "names": "username",
+                                         "loaded": False}
 
     # ---------- navigation ----------
 
@@ -242,7 +261,7 @@ class Wizard(ui.ExpiringCard):
 
     async def show(self, interaction: discord.Interaction, *, edit: bool = True):
         """Draw the current page; edit the message the interaction came from (or answer it with the wizard)."""
-        if self.page is not None:
+        if self.page not in (None, "done"):
             await self.cog.mark_visited(self.guild, self.page)
         self.clear_items()
         self.add_item(await self.render())
@@ -259,6 +278,18 @@ class Wizard(ui.ExpiringCard):
             self.page, self.note = page, None
             await self.show(interaction)
         return callback
+
+    async def close(self, interaction: discord.Interaction):
+        """Remove the wizard (it's a private message, so deleting it only affects this admin)."""
+        self.stop()
+        await interaction.response.defer()
+        try:
+            await interaction.delete_original_response()
+        except discord.HTTPException:
+            self.clear_items()
+            self.add_item(ui.card(ui.line(ui.DONE, f"Setup closed. Run `{self.p}setup` any time to come back."),
+                                  title=f"{TOPIC} Server setup"))
+            await interaction.edit_original_response(view=self)
 
     async def act(self, interaction: discord.Interaction, lines: List[str]):
         """Run commands as the admin and show what they said."""
@@ -277,19 +308,38 @@ class Wizard(ui.ExpiringCard):
         keys = [k for k, _ in self.steps()]
         at = keys.index(self.page) if self.page in keys else -1
         back = keys[at - 1] if at > 0 else None
-        nxt = keys[at + 1] if 0 <= at < len(keys) - 1 else None
-        return [self.button("Back", self.go(back)),
-                self.button("Next", self.go(nxt), style=discord.ButtonStyle.primary) if nxt
-                else self.button("Finish", self.go(None), style=discord.ButtonStyle.primary),
-                self.button("All steps", self.go(None))]
+        nxt = keys[at + 1] if 0 <= at < len(keys) - 1 else "done"
+        return [self.button("Back", self.go(back), disabled=at <= 0),
+                self.button("Next" if nxt != "done" else "Finish", self.go(nxt), style=discord.ButtonStyle.primary),
+                self.button("Overview", self.go(None)),
+                self.button("Close", self.close)]
 
     @staticmethod
     def values(interaction: discord.Interaction) -> List[int]:
         """The IDs picked in a select menu (read from the interaction, so it works however the menu was built)."""
         return [int(v) for v in ((getattr(interaction, "data", None) or {}).get("values") or []) if str(v).isdigit()]
 
-    def channel_select(self, placeholder: str, callback, *, current=(), kinds=(discord.ChannelType.text,),
-                       optional: bool = False, many: bool = False) -> discord.ui.ChannelSelect:
+    # ---------- fields ----------
+
+    @staticmethod
+    def field(label: str, explain: str, control) -> list:
+        """A setting: its name in bold and what it does in small text, with its menu right under it."""
+        return [ui.two_line(f"**{label}**", explain), [control]]
+
+    def switch(self, label: str, on: bool, explain: str, callback, *, disabled: bool = False) -> discord.ui.Section:
+        """An on/off setting: `**Name** · On` and what it does, with a Turn off / Turn on button beside it."""
+        text = ui.two_line(f"**{label}** · {'On' if on else 'Off'}", explain)
+        return discord.ui.Section(discord.ui.TextDisplay(text), accessory=self.button(
+            "Turn off" if on else "Turn on", callback, disabled=disabled))
+
+    def action(self, label: str, explain: str, button_label: str, callback, *, disabled: bool = False,
+               style=discord.ButtonStyle.secondary) -> discord.ui.Section:
+        """A one-off action: what it does, with its button beside it."""
+        return discord.ui.Section(discord.ui.TextDisplay(ui.two_line(f"**{label}**", explain)),
+                                  accessory=self.button(button_label, callback, disabled=disabled, style=style))
+
+    def channel_select(self, callback, *, current=(), kinds=(discord.ChannelType.text,), optional: bool = False,
+                       many: bool = False, placeholder: str = "Pick a channel…") -> discord.ui.ChannelSelect:
         defaults = [discord.Object(id=c) for c in current if c]
         select = discord.ui.ChannelSelect(placeholder=placeholder, channel_types=list(kinds),
                                           min_values=0 if optional else 1, max_values=25 if many else 1,
@@ -297,16 +347,16 @@ class Wizard(ui.ExpiringCard):
         select.callback = callback
         return select
 
-    def role_select(self, placeholder: str, callback, *, current=(), optional: bool = False,
-                    many: bool = False) -> discord.ui.RoleSelect:
+    def role_select(self, callback, *, current=(), optional: bool = False, many: bool = False,
+                    placeholder: str = "Pick a role…") -> discord.ui.RoleSelect:
         defaults = [discord.Object(id=r) for r in current if r]
         select = discord.ui.RoleSelect(placeholder=placeholder, min_values=0 if optional else 1,
                                        max_values=10 if many else 1, default_values=defaults[:10 if many else 1])
         select.callback = callback
         return select
 
-    def choice_select(self, placeholder: str, options: List[Tuple[str, str, Optional[str]]], current: Optional[str],
-                      callback) -> discord.ui.Select:
+    def choice_select(self, options: List[Tuple[str, str, Optional[str]]], current: Optional[str], callback,
+                      placeholder: str = "Pick one…") -> discord.ui.Select:
         select = discord.ui.Select(placeholder=placeholder, options=[
             discord.SelectOption(label=label[:100], value=value, description=(desc or None) and desc[:100],
                                  default=value == current) for value, label, desc in options][:25])
@@ -317,50 +367,87 @@ class Wizard(ui.ExpiringCard):
         select.callback = chosen
         return select
 
-    @staticmethod
-    def toggle(on: bool) -> str:
-        return "☑️" if on else "⬜"
+    def picked_one(self, command: str, off: Optional[str] = None):
+        """A select callback that runs `command <id>`, or `off` when the menu is cleared."""
+        async def callback(interaction):
+            picked = self.values(interaction)
+            await self.act(interaction, [f"{command} {picked[0]}"] if picked else [off] if off else [])
+        return callback
+
+    def flips(self, command: str, on: bool, words=("on", "off")):
+        async def callback(interaction):
+            await self.act(interaction, [f"{command} {words[1] if on else words[0]}"])
+        return callback
 
     # ---------- pages ----------
 
     async def render(self) -> discord.ui.Container:
         if self.page is None:
             return await self.overview()
+        if self.page == "done":
+            return await self.finished()
         title = dict((k, t) for k, t, _ in STEPS)[self.page]
         keys = [k for k, _ in self.steps()]
         number = f" ({keys.index(self.page) + 1} of {len(keys)})" if self.page in keys else ""
-        parts = [ui.hint(self.note)] if self.note else []
+        parts = [self.note] if self.note else []
         parts += await getattr(self, f"page_{self.page}")()
         parts += [ui.SEPARATOR, self.nav()]
-        return ui.card(*parts, title=f"{TOPIC} Setup: {title}{number}", footer="Only you can see this")
+        return ui.card(*parts, title=f"{TOPIC} Setup: {title}{number}",
+                       footer="Changes save as soon as you make them")
 
     async def overview(self) -> discord.ui.Container:
         rows = []
         for key, title in self.steps():
             symbol, detail = await self.cog.status(self.guild, key)
             rows.append(ui.two_line(f"**{title}**" + (f" {symbol}" if symbol else ""), detail))
-        start = await self.cog.next_step(self.guild, [k for k, _ in self.steps()])
+        keys = [k for k, _ in self.steps()]
+        start = await self.cog.next_step(self.guild, keys)
         begun = bool(await self.cog.config.guild(self.guild).visited())
-        menu = self.choice_select("Go to a step…", [(k, t, None) for k, t in self.steps()], None,
-                                  lambda i, key: self.go(key)(i))
-        return ui.card("Set ButlerBot up for this server. Every step is optional, and you can come back any time.",
+        menu = self.choice_select([(k, t, None) for k, t in self.steps()], None, lambda i, key: self.go(key)(i),
+                                  placeholder="Go to a step…")
+        return ui.card("A step-by-step setup for ButlerBot in this server. Every step is optional, changes save as "
+                       "you make them, and you can come back any time.",
                        *rows, ui.SEPARATOR, [menu],
-                       [self.button("Carry on" if begun else "Start", self.go(start),
-                                    style=discord.ButtonStyle.primary)],
-                       title=f"{TOPIC} Server setup", footer="✅ set up · ⚠️ needs a look · Only you can see this")
+                       [self.button("Carry on" if begun else "Start", self.go(start), style=discord.ButtonStyle.primary),
+                        self.button("Close", self.close)],
+                       title=f"{TOPIC} Server setup", footer="✅ set up · ⚠️ needs a look")
+
+    async def finished(self) -> discord.ui.Container:
+        attention = []
+        for key, title in self.steps():
+            symbol, detail = await self.cog.status(self.guild, key)
+            if symbol == "⚠️":
+                attention.append(ui.two_line(f"**{title}** ⚠️", detail))
+        handbook = self.cog.bot.get_cog("Handbook")
+        base = await handbook.base_url() if handbook is not None and hasattr(handbook, "base_url") else None
+        parts = [ui.line(ui.DONE, "That's every step.")]
+        if attention:
+            parts += ["These could still use a look:", *attention]
+        else:
+            parts.append("Nothing needs a look.")
+        parts += [ui.SEPARATOR,
+                  ui.two_line("**What's next**", f"Point members to the handbook's Getting started page, so they set "
+                                                 f"up their game profile. Run `{self.p}setup` any time to change "
+                                                 "things.")]
+        buttons = [self.button("Close", self.close, style=discord.ButtonStyle.primary),
+                   self.button("Back to overview", self.go(None))]
+        if base:
+            buttons.append(discord.ui.Button(label="Getting started", url=f"{base}start/"))
+        parts.append(buttons)
+        return ui.card(*parts, title=f"{TOPIC} Setup finished")
 
     async def page_perms(self) -> list:
         missing = self.cog.missing_permissions(self.guild)
+        parts = ["ButlerBot's role needs these permissions server-wide. Each line says what breaks without it."]
         if not missing:
-            body = ui.line(ui.DONE, "ButlerBot has every permission it uses.")
+            parts.append(ui.line(ui.DONE, "ButlerBot has every permission it uses."))
         else:
-            body = "\n".join(ui.two_line(f"**{', '.join(PERMISSION_NAMES[p] for p in perms)}**", f"For {what}")
-                             for perms, what in missing)
-            body = (ui.line(ui.WARN, "ButlerBot's role is missing some permissions:") + "\n\n" + body + "\n\n"
-                    + ui.hint("Give them to ButlerBot's role in Server Settings → Roles, then check again."))
-        warnings = await self.cog.role_order_problems(self.guild)
-        return [body, *(ui.line(ui.WARN, w) for w in warnings),
-                [self.button("Check again", self.go("perms"))]]
+            parts += [ui.two_line(f"**{', '.join(PERMISSION_NAMES[p] for p in perms)}** ⚠️", f"For {what}")
+                      for perms, what in missing]
+            parts.append(ui.hint("Add them to ButlerBot's role in Server Settings → Roles, then check again."))
+        parts += [ui.line(ui.WARN, w) for w in await self.cog.role_order_problems(self.guild)]
+        parts.append([self.button("Check again", self.go("perms"))])
+        return parts
 
     async def page_staff(self) -> list:
         bot, guild = self.cog.bot, self.guild
@@ -368,55 +455,39 @@ class Wizard(ui.ExpiringCard):
         admins = [r.id for r in await bot.get_admin_roles(guild)] if hasattr(bot, "get_admin_roles") else []
         owner = guild.owner_id == self.member.id or await bot.is_owner(self.member)
         gm = bot.get_cog("GameManager")
-        game_admin = await gm.config.guild(guild).admin_role() if gm else None
-        rows = [("Mod roles", ", ".join(f"<@&{r}>" for r in mods) or "none"),
-                ("Admin roles", ", ".join(f"<@&{r}>" for r in admins) or "none")]
-        if gm:
-            rows.append(("Game admin role", role_value(game_admin)))
 
-        async def set_roles(interaction, kind: str, current: List[int]):
-            picked = self.values(interaction)
-            lines = [f"set roles add{kind}role {r}" for r in picked if r not in current]
-            lines += [f"set roles remove{kind}role {r}" for r in current if r not in picked]
-            await self.act(interaction, lines)
+        def roles_picked(kind: str, current: List[int]):
+            async def callback(interaction):
+                picked = self.values(interaction)
+                lines = [f"set roles add{kind}role {r}" for r in picked if r not in current]
+                lines += [f"set roles remove{kind}role {r}" for r in current if r not in picked]
+                await self.act(interaction, lines)
+            return callback
 
-        async def mods_picked(interaction):
-            await set_roles(interaction, "mod", mods)
-
-        async def admins_picked(interaction):
-            await set_roles(interaction, "admin", admins)
-
-        async def game_admin_picked(interaction):
-            picked = self.values(interaction)
-            await self.act(interaction, [f"games admin setrole {picked[0]}" if picked else "games admin setrole"])
-
-        parts = [ui.settings_text(rows),
-                 ui.hint("Mods can moderate and run mod commands; admins can do that and change settings. "
-                         "Game admins approve games and run any game night.")]
+        parts = ["Staff roles decide who can use ButlerBot's mod and admin commands."]
+        mod_help = "Can warn, mute and clean up. Pick every role that should count; removing one here takes it away."
+        admin_help = "Everything mods can do, plus changing ButlerBot's settings."
         if owner:
-            parts += [[self.role_select("Mod roles…", mods_picked, current=mods, optional=True, many=True)],
-                      [self.role_select("Admin roles…", admins_picked, current=admins, optional=True, many=True)]]
+            parts += self.field("Mod roles", mod_help, self.role_select(
+                roles_picked("mod", mods), current=mods, optional=True, many=True, placeholder="No mod roles"))
+            parts += self.field("Admin roles", admin_help, self.role_select(
+                roles_picked("admin", admins), current=admins, optional=True, many=True,
+                placeholder="No admin roles"))
         else:
-            parts.append(ui.line(ui.LOCKED, "Only the server owner can change mod and admin roles."))
+            parts += [ui.two_line("**Mod roles**", ", ".join(f"<@&{r}>" for r in mods) or "None"),
+                      ui.two_line("**Admin roles**", ", ".join(f"<@&{r}>" for r in admins) or "None"),
+                      ui.line(ui.LOCKED, "Only the server owner can change mod and admin roles.")]
         if gm:
-            parts.append([self.role_select("Game admin role…", game_admin_picked, current=[game_admin],
-                                           optional=True)])
+            game_admin = await gm.config.guild(guild).admin_role()
+            parts += self.field("Game admin role", "Approves game requests and can run any game night. Server admins "
+                                                   "can always do this too.",
+                                self.role_select(self.picked_one("games admin setrole", "games admin setrole"),
+                                                 current=[game_admin], optional=True, placeholder="No game admin role"))
         return parts
 
     async def page_welcome(self) -> list:
         conf = await self.cog.bot.get_cog("ButtonGreeter").config.guild(self.guild).all()
-        groups = ", ".join(f"{label} (<@&{rid}>)" for label, rid in conf["roles"].items()) or "none yet"
-        rows = [("Greeting channel", channel_value(conf["welcome_channel"])),
-                ("Group buttons", groups),
-                ("Rules channel", channel_value(conf["rules_channel"])),
-                ("Rules role", role_value(conf["rules_role"])),
-                ("Problems reported in", channel_value(conf["admin_channel"]))]
-
-        def one(command: str):
-            async def callback(interaction):
-                picked = self.values(interaction)
-                await self.act(interaction, [f"{command} {picked[0]}"] if picked else [])
-            return callback
+        groups = ", ".join(f"{label} (<@&{rid}>)" for label, rid in conf["roles"].items())
 
         async def group_picked(interaction):
             picked = self.values(interaction)
@@ -425,16 +496,24 @@ class Wizard(ui.ExpiringCard):
                 return await self.act(interaction, [])
             await interaction.response.send_modal(LabelModal(self, role))
 
-        return [ui.settings_text(rows),
-                ui.hint("Newcomers pick a group (its role, and a [TAG] nickname), then agree to the rules. "
-                        "Remove a group with the bg removerole command."),
-                [self.channel_select("Greeting channel…", one("bg setchannel"),
-                                     current=[conf["welcome_channel"]])],
-                [self.role_select("Add a group button…", group_picked)],
-                [self.channel_select("Rules channel…", one("bg setruleschannel"), current=[conf["rules_channel"]])],
-                [self.role_select("Rules role…", one("bg setrulesrole"), current=[conf["rules_role"]])],
-                [self.channel_select("Report problems in…", one("bg setadminchannel"),
-                                     current=[conf["admin_channel"]])]]
+        return ["New members get a greeting with buttons: they pick a group, which gives them its role and a "
+                "[TAG] in front of their nickname, then agree to the rules to unlock the server.",
+                *self.field("Greeting channel", "Where newcomers are greeted.",
+                            self.channel_select(self.picked_one("bg setchannel"), current=[conf["welcome_channel"]])),
+                *self.field("Group buttons", (f"Now: {groups}. " if groups else "None yet. ")
+                            + f"Pick a role to add it as a button; you'll name its tag next. Remove one with "
+                              f"`{self.p}bg removerole <label>`.",
+                            self.role_select(group_picked, placeholder="Add a group…")),
+                *self.field("Rules channel", "Where your rules are; the greeting points to it.",
+                            self.channel_select(self.picked_one("bg setruleschannel"),
+                                                current=[conf["rules_channel"]])),
+                *self.field("Rules role", "Given when someone agrees to the rules. Without one, the rules step is "
+                                          "skipped.",
+                            self.role_select(self.picked_one("bg setrulesrole"), current=[conf["rules_role"]])),
+                *self.field("Report problems in", "Where ButlerBot tells staff when it couldn't give a role or change "
+                                                  "a nickname.",
+                            self.channel_select(self.picked_one("bg setadminchannel"),
+                                                current=[conf["admin_channel"]]))]
 
     async def page_games(self) -> list:
         gm = self.cog.bot.get_cog("GameManager")
@@ -443,93 +522,91 @@ class Wizard(ui.ExpiringCard):
         zones = list(getattr(module, "COMMON_TIMEZONES", FALLBACK_TIMEZONES))
         if conf["timezone"] and conf["timezone"] not in [z for _, z in zones]:
             zones.insert(0, (conf["timezone"], conf["timezone"]))
-        rows = [("Timezone", conf["timezone"] or "UTC (not set)"),
-                ("Sale alerts", channel_value(conf["sale_channel"]) if conf["sale_channel"] else "off"),
-                ("Discord events", conf["events"]),
-                ("Events in voice channel", channel_value(conf["event_channel"]) if conf["event_channel"]
-                 else "no (external events)"),
-                ("Free Epic games", conf["free_games"]),
-                ("Members add games", conf["member_add"])]
+        can_events = self.guild.me.guild_permissions.manage_events
 
         async def zone_picked(interaction, zone):
             await self.act(interaction, [f"games admin timezone {zone}"] if zone else [])
 
-        async def sales_picked(interaction):
-            picked = self.values(interaction)
-            await self.act(interaction, [f"games admin sales {picked[0]}" if picked else "games admin sales"])
-
-        async def voice_picked(interaction):
-            picked = self.values(interaction)
-            await self.act(interaction, [f"games admin eventchannel {picked[0]}" if picked
-                                         else "games admin eventchannel"])
-
-        def flip(command: str, on: bool):
-            async def callback(interaction):
-                await self.act(interaction, [f"{command} {'false' if on else 'true'}"])
-            return callback
-
-        return [ui.settings_text(rows),
-                ui.hint("Session times people type are read in their own timezone, else this one. Sale alerts "
-                        "ping people when a game on their wishlist goes on sale."),
-                [self.choice_select("Server timezone…", [(z, label, z) for label, z in zones], conf["timezone"],
-                                    zone_picked)],
-                [self.channel_select("Sale alerts channel (clear to turn off)…", sales_picked,
-                                     current=[conf["sale_channel"]], optional=True)],
-                [self.channel_select("Voice channel for events (optional)…", voice_picked,
-                                     current=[conf["event_channel"]], kinds=(discord.ChannelType.voice,),
-                                     optional=True)],
-                [self.button("Discord events", flip("games admin events", conf["events"]),
-                             emoji=self.toggle(conf["events"])),
-                 self.button("Free Epic games", flip("games admin freegames", conf["free_games"]),
-                             emoji=self.toggle(conf["free_games"]), disabled=not conf["sale_channel"]),
-                 self.button("Members add games", flip("games admin memberadd", conf["member_add"]),
-                             emoji=self.toggle(conf["member_add"]))]]
+        return ["Game nights, the game library and sale alerts.",
+                *self.field("Server timezone", "Session times people type are read in their own timezone if they've "
+                                               "set one, otherwise in this one.",
+                            self.choice_select([(z, label, z) for label, z in zones], conf["timezone"], zone_picked,
+                                               placeholder="UTC (not set)")),
+                *self.field("Sale alerts channel", "When a game on someone's wishlist goes on sale, they're pinged "
+                                                   "here. Clear it to turn sale alerts off.",
+                            self.channel_select(self.picked_one("games admin sales", "games admin sales"),
+                                                current=[conf["sale_channel"]], optional=True,
+                                                placeholder="Sale alerts are off")),
+                self.switch("Free Epic games", conf["free_games"],
+                            "Also posts games that are free to keep on the Epic Games Store in the sale alerts channel."
+                            + ("" if conf["sale_channel"] else " Needs a sale alerts channel first."),
+                            self.flips("games admin freegames", conf["free_games"], ("true", "false")),
+                            disabled=not conf["sale_channel"] and not conf["free_games"]),
+                self.switch("Discord events", conf["events"],
+                            "Scheduled game nights also show in the server's Events list."
+                            + ("" if can_events else " ⚠️ Needs the Manage Events permission."),
+                            self.flips("games admin events", conf["events"], ("true", "false"))),
+                *self.field("Event voice channel", "Optional: events point people to this voice channel instead of "
+                                                   "the text channel the game night was posted in.",
+                            self.channel_select(self.picked_one("games admin eventchannel", "games admin eventchannel"),
+                                                current=[conf["event_channel"]], kinds=(discord.ChannelType.voice,),
+                                                optional=True, placeholder="No voice channel")),
+                self.switch("Members add games", conf["member_add"],
+                            "Members can add new games to the server library themselves, instead of requesting them "
+                            "for a game admin to approve.",
+                            self.flips("games admin memberadd", conf["member_add"], ("true", "false")))]
 
     async def page_ai(self) -> list:
         cc = self.cog.bot.get_cog("ClaudeChat")
         conf = await cc.config.guild(self.guild).all()
-        persona = ("the server's own" if conf["persona"] else "the server's saved default" if conf["default_persona"]
-                   else "ButlerBot's own")
-        rows = [("@mentions reach the AI", conf["guide_mentions"]),
-                ("AI can run commands for people", conf["guide_actions"]),
-                ("Web search", conf["web_search"]),
-                ("Daily limit per member", f"{conf['daily_limit']} AI messages" if conf["daily_limit"] else "none"),
-                ("Personality", persona)]
-
-        def flip(command: str, on: bool):
-            async def callback(interaction):
-                await self.act(interaction, [f"{command} {'off' if on else 'on'}"])
-            return callback
+        if conf["persona"]:
+            which, text = "This server's own", conf["persona"]
+        elif conf["default_persona"]:
+            which, text = "This server's saved default", conf["default_persona"]
+        else:
+            module = sys.modules.get(type(cc).__module__)
+            which = "ButlerBot's own"
+            text = module.default_persona() if hasattr(module, "default_persona") else ""
+        preview = ui.truncate(" ".join(text.split()), 160) if text else "Not set"
 
         async def limit_picked(interaction, value):
             await self.act(interaction, [f"claude limit {value}"] if value is not None else [])
 
-        async def persona_reset(interaction):
+        async def write_persona(interaction):
+            await interaction.response.send_modal(PersonaModal(self, conf["persona"] or ""))
+
+        async def reset_persona(interaction):
             await self.act(interaction, ["claude persona reset"])
 
-        limits = [(str(n), f"{n} a day" if n else "No limit", "Mods and admins aren't limited" if n else None)
-                  for n in DAILY_LIMITS]
-        parts = [ui.settings_text(rows),
-                 ui.hint("Change the personality with the claude persona command; the bot owner can set a "
-                         "monthly budget."),
-                 [self.button("@mentions", flip("claude guidementions", conf["guide_mentions"]),
-                              emoji=self.toggle(conf["guide_mentions"])),
-                  self.button("Runs commands", flip("claude guideactions", conf["guide_actions"]),
-                              emoji=self.toggle(conf["guide_actions"])),
-                  self.button("Web search", flip("claude websearch", conf["web_search"]),
-                              emoji=self.toggle(conf["web_search"]))],
-                 [self.choice_select("Daily limit per member…", limits, str(conf["daily_limit"]), limit_picked)]]
-        if conf["persona"]:
-            parts.append([self.button("Use the default personality", persona_reset)])
-        return parts
+        limits = [(str(n), f"{n} a day" if n else "No limit", None) for n in DAILY_LIMITS]
+        return [f"The AI chat: `{self.p}ai`, `{self.p}butler`, and mentioning ButlerBot.",
+                self.switch("@mentions go to the AI", conf["guide_mentions"],
+                            "Mentioning ButlerBot, or replying to one of its messages, gets an AI answer.",
+                            self.flips("claude guidementions", conf["guide_mentions"])),
+                self.switch("AI runs commands", conf["guide_actions"],
+                            "The AI can run commands for the person asking. Staff commands still need them to press "
+                            "Run first.", self.flips("claude guideactions", conf["guide_actions"])),
+                self.switch("Web search", conf["web_search"], "The AI can search the web for current information.",
+                            self.flips("claude websearch", conf["web_search"])),
+                *self.field("Daily limit per member", "AI messages each member can send a day. Mods and admins aren't "
+                                                      "limited, and questions about the bot don't count.",
+                            self.choice_select(limits, str(conf["daily_limit"]), limit_picked)),
+                ui.two_line(f"**Personality** · {which}", preview),
+                [self.button("Write your own", write_persona),
+                 self.button("Use ButlerBot's own", reset_persona, disabled=not conf["persona"])],
+                ui.hint(f"The form holds up to {PERSONA_FORM_MAX:,} characters; for a longer one, attach a .txt file "
+                        f"to `{self.p}claude persona`.")]
 
     async def page_voice(self) -> list:
-        ar = self.cog.bot.get_cog("AutoRoom")
         sources = await self.cog.autoroom_sources(self.guild)
-        listed = "\n".join(ui.two_line(f"<#{cid}>", f"Rooms go in <#{data.get('dest_category_id')}> · "
-                                                    f"{data.get('room_type', 'public')}")
-                           for cid, data in sources.items()) or "None yet."
         draft = self.voice
+        if not draft["loaded"]:   # start from the first existing setup, so the menus show what's there
+            draft["loaded"] = True
+            if sources:
+                cid, data = next(iter(sources.items()))
+                draft.update(source=int(cid), category=data.get("dest_category_id"),
+                             type=data.get("room_type") or "public", names=data.get("channel_name_type") or "username")
+        editing = str(draft["source"]) in sources if draft["source"] else False
         source = self.guild.get_channel(draft["source"] or 0)
         category = self.guild.get_channel(draft["category"] or 0)
 
@@ -540,13 +617,11 @@ class Wizard(ui.ExpiringCard):
                 await self.act(interaction, [])
             return callback
 
-        async def kind_picked(interaction, value):
-            draft["type"] = value or draft["type"]
-            await self.act(interaction, [])
-
-        async def names_picked(interaction, value):
-            draft["names"] = value or draft["names"]
-            await self.act(interaction, [])
+        def choose(key: str):
+            async def callback(interaction, value):
+                draft[key] = value or draft[key]
+                await self.act(interaction, [])
+            return callback
 
         async def make(interaction):
             await interaction.response.defer()
@@ -558,28 +633,52 @@ class Wizard(ui.ExpiringCard):
             self.note = await self.cog.save_autoroom(self.guild, draft)
             await self.show(interaction)
 
-        return [ui.two_line("**Voice rooms now**", None), listed,
-                ui.hint("Joining a “join to create” channel makes a temporary voice room for that person, which "
-                        "goes away when it's empty. Pick the channel and a category, or let me make both."),
-                [self.channel_select("“Join to create” channel…", pick("source"), current=[draft["source"]],
-                                     kinds=(discord.ChannelType.voice,))],
-                [self.channel_select("Category for the rooms…", pick("category"), current=[draft["category"]],
-                                     kinds=(discord.ChannelType.category,))],
-                [self.choice_select("Room type…", [(v, l, d) for v, l, d in ROOM_TYPES], draft["type"], kind_picked)],
-                [self.choice_select("Room names…", [(v, l, d) for v, l, d in ROOM_NAMES], draft["names"],
-                                    names_picked)],
-                [self.button("Make them for me", make, disabled=bool(source and category)),
-                 self.button("Save", save, style=discord.ButtonStyle.primary, disabled=not (source and category))],
-                ui.hint(f"More options: the autoroomset command ({'loaded' if ar else 'not loaded'}).")]
+        async def add_another(interaction):
+            draft.update(source=None, category=None, type="public", names="username")
+            self.note = None
+            await self.show(interaction)
+
+        async def remove(interaction):
+            sid = draft["source"]
+            draft.update(source=None, category=None, loaded=False)
+            await self.act(interaction, [f"autoroomset remove {sid}"])
+
+        others = [f"<#{cid}>" for cid in sources if cid != str(draft["source"])]
+        parts = ["Voice rooms give each person their own voice channel: they join a “join to create” channel, get "
+                 "moved into a new room, and the room is deleted when everyone leaves.",
+                 ui.two_line(f"**{'Editing' if editing else 'New'}: " + (source.mention if source else "a join-to-create "
+                                                                                                       "channel") + "**",
+                             ("Also set up: " + ", ".join(others)) if others else None),
+                 *self.field("Join-to-create channel", "The voice channel people join to get a room.",
+                             self.channel_select(pick("source"), current=[draft["source"]],
+                                                 kinds=(discord.ChannelType.voice,),
+                                                 placeholder="Pick a voice channel…")),
+                 *self.field("Where new rooms go", "The category the temporary rooms are made in. A category of their "
+                                                   "own keeps the channel list tidy.",
+                             self.channel_select(pick("category"), current=[draft["category"]],
+                                                 kinds=(discord.ChannelType.category,),
+                                                 placeholder="Pick a category…")),
+                 *self.field("Who can get in", "The person who makes a room is its owner.",
+                             self.choice_select([(v, l, d) for v, l, d in ROOM_TYPES], draft["type"],
+                                                choose("type"))),
+                 *self.field("Room names", "What new rooms are called.",
+                             self.choice_select([(v, l, d) for v, l, d in ROOM_NAMES], draft["names"],
+                                                choose("names")))]
+        buttons = [self.button("Save", save, style=discord.ButtonStyle.primary, disabled=not (source and category))]
+        if not (source and category):
+            buttons.append(self.button("Make the channels", make))
+        if editing:
+            buttons += [self.button("Add another", add_another), self.button("Turn off", remove)]
+        parts.append(buttons)
+        if not (source and category):
+            parts.append(ui.hint("Make the channels creates a “Voice rooms” category and a “➕ Join to create” "
+                                 "channel in it for you."))
+        parts.append(ui.hint(f"More options, like letting room owners rename them: `{self.p}autoroomset modify`."))
+        return parts
 
     async def page_replies(self) -> list:
         conf = await self.cog.bot.get_cog("SpeakUp").config.guild(self.guild).all()
-        quiet = conf["quiet_channels"]
-
-        def flip(feature: str, on: bool):
-            async def callback(interaction):
-                await self.act(interaction, [f"speakup feature {feature} {'off' if on else 'on'}"])
-            return callback
+        quiet, features = conf["quiet_channels"], conf["features"]
 
         async def quiet_picked(interaction):
             picked = self.values(interaction)
@@ -587,18 +686,26 @@ class Wizard(ui.ExpiringCard):
             lines += [f"speakup on {c}" for c in quiet if c not in picked]
             await self.act(interaction, lines)
 
-        features = conf["features"]
-        return [ui.settings_text([(label, features.get(key, True)) for key, label in SPEAKUP_FEATURES]
-                                 + [("Quiet channels", ", ".join(f"<#{c}>" for c in quiet) or "none")]),
-                ui.hint("ButlerBot chimes in on its own: 🕘 on times, cards for Steam links, 📄 on article links, "
-                        "and help with mistyped commands. Members can opt out with the speakup me command."),
-                [self.button(label, flip(key, features.get(key, True)), emoji=self.toggle(features.get(key, True)))
-                 for key, label in SPEAKUP_FEATURES],
-                [self.channel_select("Quiet channels…", quiet_picked, current=quiet, optional=True, many=True)]]
+        explain = {
+            "times": "Adds 🕘 to messages with a time in them; clicking it shows the time in everyone's timezone.",
+            "steam": "Replies to Steam store links with the price and who here owns the game.",
+            "links": "Adds 📄 to article links; clicking it posts a short summary (this uses AI).",
+            "mistakes": "Suggests the right command when someone mistypes one.",
+        }
+        return ["ButlerBot can chime in on its own in chat. Switch each kind off for the whole server here; members "
+                f"can also opt themselves out with `{self.p}speakup me off`.",
+                *[self.switch(label, features.get(key, True), explain[key],
+                              self.flips(f"speakup feature {key}", features.get(key, True)))
+                  for key, label in SPEAKUP_FEATURES],
+                *self.field("Quiet channels", "Channels where ButlerBot never chimes in on its own (no 🕘, 📄, Steam "
+                                              "cards or typo help). Commands still work there.",
+                            self.channel_select(quiet_picked, current=quiet, optional=True, many=True,
+                                                placeholder="No quiet channels"))]
 
     async def page_stats(self) -> list:
         conf = await self.cog.bot.get_cog("ActivityStats").config.guild(self.guild).all()
         excluded = [c for c in conf["excluded_channels"] if isinstance(c, int)]
+        since = conf["backfilled_from"] or conf["started_at"]
 
         async def excluded_picked(interaction):
             picked = self.values(interaction)
@@ -606,148 +713,133 @@ class Wizard(ui.ExpiringCard):
             lines += [f"stats admin include {c}" for c in excluded if c not in picked]
             await self.act(interaction, lines)
 
-        async def digest_picked(interaction):
-            picked = self.values(interaction)
-            await self.act(interaction, [f"stats admin digest channel {picked[0]}"] if picked else [])
-
-        async def digest_flip(interaction):
-            await self.act(interaction, [f"stats admin digest {'off' if conf['digest_enabled'] else 'on'}"])
-
         async def backfill(interaction):
             await self.act(interaction, ["stats admin backfill 30"])
 
-        rows = [("Left out of stats", ", ".join(f"<#{c}>" for c in excluded) or "nothing"),
-                ("Weekly digest", (f"on, in {channel_value(conf['digest_channel'])}" if conf["digest_enabled"]
-                                   else "off")),
-                ("Counted since", f"<t:{int(conf['backfilled_from'] or conf['started_at'])}:D>"
-                 if conf["backfilled_from"] or conf["started_at"] else "not started")]
-        return [ui.settings_text(rows),
-                ui.hint("Stats count messages, voice time and games per hour; they never store what anyone wrote."),
-                [self.channel_select("Leave out of stats…", excluded_picked, current=excluded,
-                                     kinds=(discord.ChannelType.text, discord.ChannelType.voice,
-                                            discord.ChannelType.category), optional=True, many=True)],
-                [self.channel_select("Weekly digest channel…", digest_picked, current=[conf["digest_channel"]])],
-                [self.button("Weekly digest", digest_flip, emoji=self.toggle(conf["digest_enabled"]),
-                             disabled=not conf["digest_channel"]),
-                 self.button("Count last 30 days", backfill, emoji="📊")]]
+        return ["Server stats count messages, voice time and games per hour. They never store what anyone wrote.",
+                *self.field("Left out of stats", "Nothing in these channels or categories is counted, such as staff "
+                                                 "or bot channels.",
+                            self.channel_select(excluded_picked, current=excluded, optional=True, many=True,
+                                                kinds=(discord.ChannelType.text, discord.ChannelType.voice,
+                                                       discord.ChannelType.category),
+                                                placeholder="Everything is counted")),
+                *self.field("Weekly digest channel", "Where the weekly summary of the server's activity goes.",
+                            self.channel_select(self.picked_one("stats admin digest channel"),
+                                                current=[conf["digest_channel"]], placeholder="Not set")),
+                self.switch("Weekly digest", conf["digest_enabled"],
+                            "A weekly summary of the server's activity, with charts."
+                            + ("" if conf["digest_channel"] else " Needs a digest channel first."),
+                            self.flips("stats admin digest", conf["digest_enabled"]),
+                            disabled=not conf["digest_channel"] and not conf["digest_enabled"]),
+                self.action("Count past messages", "Stats start when ButlerBot arrives. This counts the last 30 days "
+                                                   "of messages so the charts aren't empty"
+                            + (f" (counted since <t:{int(since)}:D>)." if since else "."), "Count 30 days", backfill)]
 
     async def page_moderation(self) -> list:
         bot, guild = self.cog.bot, self.guild
-        parts, rows = [], []
+        parts = ["Records and limits for staff."]
         modlog = await self.cog.modlog_channel(guild)
-        rows.append(("Mod log channel", channel_value(modlog)))
+        parts += self.field("Mod log channel", "Where bans, kicks, mutes and warnings are recorded. Clear it to turn "
+                                               "the log off.",
+                            self.channel_select(self.picked_one("modlogset modlog", "modlogset modlog"),
+                                                current=[modlog], optional=True, placeholder="No mod log"))
         warnings = bot.get_cog("Warnings")
-        warn = await warnings.config.guild(guild).all() if warnings else None
-        if warn:
-            rows += [("Warnings sent by DM", warn["toggle_dm"]),
-                     ("Warnings posted in", channel_value(warn["warn_channel"]) if warn["toggle_channel"]
-                      else "the channel they're given in")]
+        if warnings:
+            warn = await warnings.config.guild(guild).all()
+
+            async def warn_picked(interaction):
+                picked = self.values(interaction)
+                await self.act(interaction, [f"warningset warnchannel {picked[0]}", "warningset usewarnchannel true"]
+                               if picked else ["warningset usewarnchannel false"])
+
+            parts += self.field("Warnings channel", "Where warnings are announced. Clear it to announce them in the "
+                                                    "channel where they're given.",
+                                self.channel_select(warn_picked, optional=True, placeholder="Where they're given",
+                                                    current=[warn["warn_channel"] if warn["toggle_channel"] else None]))
+            parts.append(self.switch("Warnings by DM", warn["toggle_dm"], "Members get a DM when they're warned.",
+                                     self.flips("warningset senddm", warn["toggle_dm"], ("true", "false"))))
         censor = bot.get_cog("Censord")
-        filt = await censor.config.guild(guild).all() if censor else None
-        if filt:
-            rows += [("Word filter", filt["global_level"]), ("Word filter action", filt["action"])]
+        if censor:
+            filt = await censor.config.guild(guild).all()
+
+            async def level_picked(interaction, value):
+                await self.act(interaction, [f"censor level {value}"] if value else [])
+
+            async def action_picked(interaction, value):
+                await self.act(interaction, [f"censor action {value}"] if value else [])
+
+            parts += self.field("Word filter", "Deletes messages with blocked words. Mods and admins aren't filtered.",
+                                self.choice_select([("off", "Off", None), ("low", "Low", "Slurs only"),
+                                                    ("high", "High", "Slurs and swearing")],
+                                                   filt["global_level"], level_picked))
+            parts += self.field("Repeat offenders", f"What happens when someone trips the filter "
+                                                    f"{filt['threshold_count']} times within "
+                                                    f"{filt['threshold_time']} seconds.",
+                                self.choice_select([("delete", "Just delete", None), ("kick", "Kick them", None),
+                                                    ("ban", "Ban them", None)], filt["action"], action_picked))
         spam = bot.get_cog("AntiSpam")
-        spam_conf = await spam.config.all() if spam else None
-        preset = None
-        if spam_conf:
+        if spam:
+            conf = await spam.config.all()
             preset = next((name for name, (amount, per, length, _) in ANTISPAM_PRESETS.items()
-                           if (spam_conf["amount"], spam_conf["per"], spam_conf["mute_length"]) == (amount, per, length)),
-                          None)
-            rows.append(("Command spam limit", ANTISPAM_PRESETS[preset][3] if preset else "custom"))
+                           if (conf["amount"], conf["per"], conf["mute_length"]) == (amount, per, length)), None)
 
-        async def modlog_picked(interaction):
-            picked = self.values(interaction)
-            await self.act(interaction, [f"modlogset modlog {picked[0]}" if picked else "modlogset modlog"])
+            async def spam_picked(interaction, value):
+                if value not in ANTISPAM_PRESETS:
+                    return await self.act(interaction, [])
+                amount, per, length, _ = ANTISPAM_PRESETS[value]
+                await self.act(interaction, [f"antispamset amount {amount}", f"antispamset per {per} seconds",
+                                             f"antispamset length {length} seconds"])
 
-        async def warn_picked(interaction):
-            picked = self.values(interaction)
-            await self.act(interaction, [f"warningset warnchannel {picked[0]}", "warningset usewarnchannel true"]
-                           if picked else ["warningset usewarnchannel false"])
-
-        async def dm_flip(interaction):
-            await self.act(interaction, [f"warningset senddm {'false' if warn['toggle_dm'] else 'true'}"])
-
-        async def level_picked(interaction, value):
-            await self.act(interaction, [f"censor level {value}"] if value else [])
-
-        async def action_picked(interaction, value):
-            await self.act(interaction, [f"censor action {value}"] if value else [])
-
-        async def spam_picked(interaction, value):
-            if value not in ANTISPAM_PRESETS:
-                return await self.act(interaction, [])
-            amount, per, length, _ = ANTISPAM_PRESETS[value]
-            await self.act(interaction, [f"antispamset amount {amount}", f"antispamset per {per} seconds",
-                                         f"antispamset length {length} seconds"])
-
-        parts += [ui.settings_text(rows),
-                  [self.channel_select("Mod log channel (clear to turn off)…", modlog_picked, current=[modlog],
-                                       optional=True)]]
-        if warn:
-            parts += [[self.channel_select("Post warnings in (clear for where they're given)…", warn_picked,
-                                           current=[warn["warn_channel"] if warn["toggle_channel"] else None],
-                                           optional=True)],
-                      [self.button("Warnings by DM", dm_flip, emoji=self.toggle(warn["toggle_dm"]))]]
-        if filt:
-            parts += [[self.choice_select("Word filter…", [("off", "Off", None),
-                                                           ("low", "Low", "Slurs only"),
-                                                           ("high", "High", "Slurs and swearing")],
-                                          filt["global_level"], level_picked)],
-                      [self.choice_select("When the filter catches someone often…",
-                                          [("delete", "Delete", "Just delete the messages"),
-                                           ("kick", "Kick", "Kick them"), ("ban", "Ban", "Ban them")],
-                                          filt["action"], action_picked)]]
-        if spam_conf:
+            explain = "Stops people flooding commands. It covers every server ButlerBot is in."
             if await bot.is_owner(self.member):
-                parts.append([self.choice_select("Command spam limit (every server)…",
-                                                 [(k, k.title(), d) for k, (_, _, _, d) in ANTISPAM_PRESETS.items()],
-                                                 preset, spam_picked)])
+                parts += self.field("Command spam limit", explain, self.choice_select(
+                    [(k, k.title(), d) for k, (_, _, _, d) in ANTISPAM_PRESETS.items()], preset, spam_picked,
+                    placeholder="Custom"))
             else:
-                parts.append(ui.hint("The command spam limit covers every server, so only the bot owner sets it."))
+                parts.append(ui.two_line(f"**Command spam limit** · "
+                                         f"{ANTISPAM_PRESETS[preset][3] if preset else 'custom'}",
+                                         explain + " Only the bot owner can change it."))
         return parts
 
     async def page_fun(self) -> list:
         conf = await self.cog.bot.get_cog("Parlor").config.guild(self.guild).all()
         caption, mystery = conf["caption_weekly"].get("channel"), conf["mystery_weekly"].get("channel")
-
-        def weekly(command: str):
-            async def callback(interaction):
-                picked = self.values(interaction)
-                await self.act(interaction, [f"{command} {picked[0]}" if picked else f"{command} off"])
-            return callback
-
-        return [ui.settings_text([("Weekly caption contest", channel_value(caption) if caption else "off"),
-                                  ("Weekly murder mystery", channel_value(mystery) if mystery else "off")]),
-                ui.hint("Each runs once a week in its channel, starting right away. Games make their own threads; "
-                        "turn that off in a channel with the parlor threads command."),
-                [self.channel_select("Weekly caption contest (clear to turn off)…", weekly("caption weekly"),
-                                     current=[caption], optional=True)],
-                [self.channel_select("Weekly murder mystery (clear to turn off)…", weekly("mystery weekly"),
-                                     current=[mystery], optional=True)]]
+        return ["Weekly games run on their own once a week in the channel you pick. The first one starts right "
+                "away.",
+                *self.field("Weekly caption contest", "A picture goes up, members write captions and vote, and "
+                                                      "ButlerBot gives its own award. Clear it to turn it off.",
+                            self.channel_select(self.picked_one("caption weekly", "caption weekly off"),
+                                                current=[caption], optional=True, placeholder="Off")),
+                *self.field("Weekly murder mystery", f"A days-long mystery: members question suspects with "
+                                                     f"`{self.p}interrogate` and name the culprit with "
+                                                     f"`{self.p}accuse`. Clear it to turn it off.",
+                            self.channel_select(self.picked_one("mystery weekly", "mystery weekly off"),
+                                                current=[mystery], optional=True, placeholder="Off")),
+                ui.hint(f"Games make their own threads. To keep them in a channel instead, run "
+                        f"`{self.p}parlor threads off` there.")]
 
     async def page_apps(self) -> list:
         bot = self.cog.bot
         enabled = await self.cog.enabled_apps()
         available = [a for a in APP_COMMANDS if bot.get_cog(a[2])]
-        rows = [ui.two_line(f"**{shown}**" + (" ✅" if name in enabled.get(kind, {}) else ""),
-                            None if name in enabled.get(kind, {}) else "Off")
-                for name, kind, _, shown in available]
-        off = [(name, kind) for name, kind, _, _ in available if name not in enabled.get(kind, {})]
+        rows = [ui.two_line(f"**{shown}** · " + ("On" if name in enabled.get(kind, {}) else "Off"), what)
+                for name, kind, _, shown, what in available]
+        off = [(name, kind) for name, kind, _, _, _ in available if name not in enabled.get(kind, {})]
 
         async def turn_on(interaction):
-            lines = [f'slash enable "{name}" {kind}' for name, kind in off] + ["slash sync"]
-            await self.act(interaction, lines)
+            await self.act(interaction, [f'slash enable "{name}" {kind}' for name, kind in off] + ["slash sync"])
 
-        parts = [ui.hint("Slash and right-click commands belong to the bot, so they're switched on once for every "
-                         "server."), *rows]
+        parts = ["Slash commands and right-click menus (Apps). They belong to the bot as a whole, so they're "
+                 "switched on once for every server.", *rows]
         if not available:
             parts.append("None of the cogs with slash commands are loaded.")
         elif await bot.is_owner(self.member):
-            parts.append([self.button("Turn them all on", turn_on, style=discord.ButtonStyle.primary,
-                                      disabled=not off)])
+            if off:
+                parts.append(self.action("Switch them on", "Turns on everything above that's off, then updates "
+                                                           "Discord. They can take a few minutes to appear.",
+                                         "Turn them on", turn_on, style=discord.ButtonStyle.primary))
         elif off:
-            parts.append(ui.line(ui.LOCKED, "Only the bot owner can switch these on. Ask them to run the setup "
-                                            "wizard's last step."))
+            parts.append(ui.line(ui.LOCKED, "Only the bot owner can switch these on. Ask them to run this step."))
         return parts
 
 
@@ -990,8 +1082,10 @@ class SetupWizard(commands.Cog):
         if not required or not optional:
             return ui.line(ui.FAIL, "I'm missing permissions in that channel or category:") + "\n" + \
                 ui.truncate(str(details or ""), 800)
-        await cog.config.custom("AUTOROOM_SOURCE", str(guild.id), str(source.id)).set(
-            {"dest_category_id": category.id, "room_type": draft["type"], "channel_name_type": draft["names"]})
+        group = cog.config.custom("AUTOROOM_SOURCE", str(guild.id), str(source.id))
+        current = dict(await group.all())   # keeps settings made with autoroomset modify
+        current.update(dest_category_id=category.id, room_type=draft["type"], channel_name_type=draft["names"])
+        await group.set(current)
         return ui.line(ui.DONE, f"Voice rooms are on: joining {source.mention} makes a room in {category.mention}.")
 
     # ==========================================
@@ -1020,5 +1114,5 @@ class SetupWizard(commands.Cog):
         member = interaction.user
         if getattr(member, "guild", None) is None or not await self.can_setup(member):
             return await ui.respond(interaction, ui.line(ui.LOCKED, "Only the server's admins can run setup."))
-        wizard = Wizard(self, member, interaction.message)
+        wizard = Wizard(self, member, interaction.message, await self._prefix(interaction.guild))
         await wizard.show(interaction, edit=False)

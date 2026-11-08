@@ -92,6 +92,7 @@ Then, in Discord, as the bot owner. Delete the messages containing keys afterwar
 **Notes on that list:**
 - **`!unload customhelp` first:** the handbook cog replaces `!help`, and only one cog can do that.
 - **Already-loaded cogs:** use `!reload <cog>` instead of `!load`.
+- **After each `git pull`:** `python3 tools/reload_hint.py` prints exactly what to run in Discord (unload, install, load, reload, slash sync), in order.
 - **Bot permissions:** besides the usual ones, the bot needs **Manage Events** (session events) and **Add Reactions** (time and link offers).
 - **Command reference:** `!handbook export` generates it for [`docs/reference/`](docs/reference/).
 

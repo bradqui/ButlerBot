@@ -41,3 +41,4 @@ __pycache__/
 /tests/apilibs/
 /tests/*.png
 /tests/*.log
+/tests/eval_unified_report*.txt

@@ -218,6 +218,19 @@ async def main():
     await cc.on_message_without_command(m)
     check(channel.sent[-1].content == "Hello!", "@mention answered")
     check("hi there" in str(cc._sessions[key].messages[-2]["content"]), "@mention joins the channel conversation")
+    # Discord's @ menu also offers the bot's own role under its name; that counts as addressing the bot
+    guild.self_role = SimpleNamespace(id=4321)
+    client.queue.append(response([Block("text", "Good afternoon.")], "end_turn"))
+    m = msg(alex, "<@&4321> critique this please")
+    await cc.on_message_without_command(m)
+    turn = cc._sessions[key].messages[-2]["content"]
+    turn = turn if isinstance(turn, str) else turn[-1]["text"]
+    check(channel.sent[-1].content == "Good afternoon." and turn.endswith("\ncritique this please"),
+          "the bot's role mention is answered, with the mention taken out")
+    before = len(channel.sent)
+    await cc.on_message_without_command(msg(alex, "<@&555> another role"))
+    check(len(channel.sent) == before, "other roles' mentions aren't for the bot")
+    del guild.self_role
 
     # --- replies to the bot's announcements: answered when for the bot, silent otherwise ---
     announcement = RefMessage(4242, guild.me, "✅ **Barony** was added to the server library.")

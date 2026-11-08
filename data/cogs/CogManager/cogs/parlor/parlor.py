@@ -1337,15 +1337,20 @@ class Parlor(commands.Cog):
                 await message.reply(ui.line(ui.FAIL, "Something went wrong with that question. Try asking again."),
                                     mention_author=False, allowed_mentions=ui.NO_PINGS)
 
+    def _bot_mention(self, guild: Optional[discord.Guild]) -> str:
+        """A pattern for addressing the bot: its own mention, or its role's (Discord's @ menu offers both)."""
+        role = getattr(guild, "self_role", None)
+        return rf"<@!?{self.bot.user.id}>" + (rf"|<@&{role.id}>" if role is not None else "")
+
     def _addressed(self, message: discord.Message) -> bool:
-        """Whether a message is meant for the bot: it @mentions it, or replies to one of its messages."""
-        if self.bot.user in message.mentions:
+        """Whether a message is meant for the bot: it @mentions it (or its role), or replies to one of its messages."""
+        if self.bot.user in message.mentions or re.search(self._bot_mention(message.guild), message.content):
             return True
         resolved = getattr(message.reference, "resolved", None) if message.reference else None
         return getattr(getattr(resolved, "author", None), "id", None) == self.bot.user.id
 
     def _without_mention(self, message: discord.Message) -> str:
-        return " ".join(re.sub(rf"<@!?{self.bot.user.id}>", "", message.content).split())
+        return " ".join(re.sub(self._bot_mention(message.guild), "", message.content).split())
 
     async def _twentyq_turn(self, message: discord.Message, round_: dict, text: str, *, asked: bool):
         """A guess (anyone, any time) or, when it's addressed to the bot, a question."""
@@ -1631,7 +1636,7 @@ class Parlor(commands.Cog):
             return True
         mystery = await self.config.guild(message.guild).mystery()
         if mystery.get("thread_id") == channel.id and mystery.get("phase") == "open":
-            if command or self.bot.user in message.mentions:
+            if command or self._addressed(message):
                 p = await self._prefix(message.guild)
                 await message.reply(ui.line(None, f"🔎 The suspects answer `{p}interrogate <name> <question>`.",
                                             hint=f"One `{p}accuse <name>` each. Chat here freely; it isn't sent "

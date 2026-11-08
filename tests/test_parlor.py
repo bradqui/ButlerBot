@@ -315,6 +315,18 @@ async def main():
     check(reply.content == "**1.** Yes, and loudly so." and f'"{secret}"' in call["system"]
           and call["messages"][0]["content"] == "New question from Chris: Is it multiplayer?" and call["fast"]
           and call["count_toward_limit"] is False, reply.content)
+    guild.self_role = SimpleNamespace(id=4321)   # the bot's own role, picked from Discord's @ menu
+    claude.replies.append("No.")
+    by_role = FakeMessage(thread, "<@&4321> Is it a racing game?", author=chris)
+
+    async def role_reply(content, **kw):
+        return await thread.send(content, **kw)
+    by_role.reply = role_reply
+    await pc.on_message_without_command(by_role)
+    check(claude.calls[-1]["messages"][0]["content"].endswith("Chris: Is it a racing game?")
+          and thread.sent[-1].content == "**2.** No.", "a question addressed to the bot's role counts")
+    del guild.self_role
+    round_["qa"].pop()   # keep the numbering the rest of this test expects
     n = len(claude.calls)
     await say(chris, "this is fun", thread, asked=False)
     await say(chris, "did anyone check if it's on Steam?", thread, asked=False)

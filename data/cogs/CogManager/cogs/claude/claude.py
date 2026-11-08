@@ -1304,6 +1304,14 @@ class ClaudeChat(commands.Cog):
                     log.debug("guide_member_roles failed in %s", cog.qualified_name, exc_info=True)
         return ", ".join([level, *extra])
 
+    def _bot_mention(self, guild: Optional[discord.Guild]) -> str:
+        """
+        A pattern for addressing the bot: its own mention, or its role's. Discord's @ menu offers both under the
+        bot's name, and picking the role is easy to do by accident.
+        """
+        role = getattr(guild, "self_role", None)
+        return rf"<@!?{self.bot.user.id}>" + (rf"|<@&{role.id}>" if role is not None else "")
+
     async def _game_takes(self, message: discord.Message, text: str, *, command: bool) -> bool:
         """
         Whether a running game owns this channel (Parlor's game threads), so the AI chat steps aside. Cogs offer
@@ -1961,14 +1969,15 @@ class ClaudeChat(commands.Cog):
         ref = message.reference
         entry = self._answers.get(ref.message_id) if ref is not None and ref.message_id else None
         in_ai_thread = message.channel.id in self._threads
-        mention = rf"<@!?{self.bot.user.id}>"
+        mention = self._bot_mention(message.guild)
         # Replies count as mentions too, so only a typed @mention in a fresh message counts here.
         asked = ref is None and not in_ai_thread and re.search(mention, message.content) is not None
         # Replies to the bot's other messages (game announcements, results...) go to the channel's conversation,
         # which stays silent when the reply is meant for other people.
         reply_to_bot = (entry is None and not in_ai_thread and ref is not None
                         and isinstance(ref.resolved, discord.Message) and ref.resolved.author.id == self.bot.user.id)
-        if entry is None and not (in_ai_thread and self.bot.user in message.mentions) and not asked and not reply_to_bot:
+        mentioned = self.bot.user in message.mentions or re.search(mention, message.content) is not None
+        if entry is None and not (in_ai_thread and mentioned) and not asked and not reply_to_bot:
             return
 
         if await self.bot.cog_disabled_in_guild(self, message.guild):

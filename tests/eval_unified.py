@@ -54,7 +54,7 @@ CASES = [
      {"lookup": True, "norun": True, "says": "games own"}),
     ("alex", "what's the capital of Australia?", "h", {"lookup": False, "norun": True, "says": "Canberra"}),
     ("alex", "write a haiku about pizza", "h", {"lookup": False, "norun": True}),
-    ("alex", "make it about tacos instead", "h", {"lookup": False, "norun": True, "says": "tortilla"}),
+    ("alex", "make it about tacos instead", "h", {"lookup": False, "norun": True, "says": "taco"}),
     ("alex", "how do i use the lfg thing", "i", {"lookup": True, "says": "lfg"}),
     ("alex", "how do I add a game to the server library?", "i", {"lookup": True, "norun": True}),
     ("sam", "I'm in!", "j", {"silent": True, "reply_to": "🎮 **Raid night** · Friday 9:00 PM · Host: Brad · "

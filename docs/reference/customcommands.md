@@ -1,7 +1,7 @@
 ---
 title: CustomCommands
 parent: Command reference
-nav_order: 13
+nav_order: 12
 permalink: /reference/customcommands/
 ---
 

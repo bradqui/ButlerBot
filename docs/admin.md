@@ -16,6 +16,9 @@ For admins: a checklist for a new server, who can use what, custom commands, the
 
 When ButlerBot joins a server, work through these steps in order. Every step after the first is optional: ButlerBot works without it, just with less.
 
+{: .tip }
+> **The quick way:** run `!setup` and press **Open setup**. A private wizard walks you through every step below, plus voice rooms, the mod log, warnings and spam limits. Each step shows what's set now and changes it with menus and buttons. Behind the scenes it runs the same commands listed here, as you, so it can only change what you're allowed to. Every step is optional, and it remembers where you got to.
+
 ### 1. Give the bot its permissions
 
 Give ButlerBot's role these permissions server-wide. A missing one usually shows up later as an error in a single feature.

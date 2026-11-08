@@ -303,6 +303,8 @@ class Estate(commands.Cog):
                              f"{ui.plural(guild.member_count or 0, 'member')}, owned by "
                              f"{discord.utils.escape_markdown(owner.display_name) if owner else 'someone unknown'}.",
                        hint=f"Server ID {guild.id} · `estate server {guild.id}` shows more")
+        if self.bot.get_cog("SetupWizard") is not None:
+            text += "\n" + ui.hint("Its admins can run `setup` there for a guided setup.")
         with contextlib.suppress(Exception):
             await self.bot.send_to_owners(text, view=view, allowed_mentions=ui.NO_PINGS)
 

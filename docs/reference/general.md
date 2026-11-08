@@ -1,7 +1,7 @@
 ---
 title: General
 parent: Command reference
-nav_order: 19
+nav_order: 18
 permalink: /reference/general/
 ---
 

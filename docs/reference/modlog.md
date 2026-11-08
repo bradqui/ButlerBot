@@ -1,7 +1,7 @@
 ---
 title: ModLog
 parent: Command reference
-nav_order: 22
+nav_order: 21
 permalink: /reference/modlog/
 ---
 

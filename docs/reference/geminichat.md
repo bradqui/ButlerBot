@@ -1,7 +1,7 @@
 ---
 title: GeminiChat
 parent: Command reference
-nav_order: 18
+nav_order: 17
 permalink: /reference/geminichat/
 ---
 

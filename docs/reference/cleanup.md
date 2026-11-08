@@ -1,7 +1,7 @@
 ---
 title: Cleanup
 parent: Command reference
-nav_order: 10
+nav_order: 9
 permalink: /reference/cleanup/
 ---
 

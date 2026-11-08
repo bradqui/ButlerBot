@@ -48,6 +48,7 @@ Right-click a message (long-press on mobile) → **Apps**. Only you see the resu
 | [Mutes]({{ '/reference/mutes/' | relative_url }}) | Mute users temporarily or indefinitely. | 16 |
 | [Parlor]({{ '/reference/parlor/' | relative_url }}) | Parlor games: guess the game, the emoji game, twenty questions, adventures, judge, critiques, roasts and trivia. | 33 |
 | [Permissions]({{ '/reference/permissions/' | relative_url }}) | Customise permissions for commands and cogs. | 12 |
+| [SetupWizard]({{ '/reference/setupwizard/' | relative_url }}) | A guided setup for new servers: `!setup` walks admins through every part of ButlerBot. | 1 |
 | [SpeakUp]({{ '/reference/speakup/' | relative_url }}) | The bot chiming in when it can help: times, Steam links, link summaries, command mistakes, and reminders. | 9 |
 | [Trivia]({{ '/reference/trivia/' | relative_url }}) | Play trivia with friends! | 17 |
 | [Warnings]({{ '/reference/warnings/' | relative_url }}) | Warn misbehaving users and take automated actions. | 20 |

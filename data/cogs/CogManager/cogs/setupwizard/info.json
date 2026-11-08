@@ -1,0 +1,14 @@
+{
+    "name": "SetupWizard",
+    "short": "A guided setup for new servers.",
+    "description": "`[p]setup` walks a server's admins through setting ButlerBot up: permissions, staff roles, the welcome flow, game nights, AI chat, voice rooms, auto-replies, stats, moderation, weekly games and slash commands. Each step shows what's set and changes it with Discord's own pickers, by running the server's own commands privately.",
+    "end_user_data_statement": "This cog stores which setup steps each server has looked at. It stores no data about users.",
+    "author": ["Quillshot"],
+    "required_cogs": {},
+    "requirements": [],
+    "tags": ["setup", "admin", "wizard"],
+    "min_bot_version": "3.5.0",
+    "hidden": false,
+    "disabled": false,
+    "type": "COG"
+}

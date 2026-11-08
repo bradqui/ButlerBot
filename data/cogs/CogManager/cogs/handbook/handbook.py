@@ -79,7 +79,7 @@ TOPICS = [
 ]
 # Which handbook page covers a cog (by qualified name, lowercased). GameManager is split by command below.
 COG_TOPICS = {
-    "claudechat": "ai/", "geminichat": "ai/", "gamemanager": "games/library/", "parlor": "fun/", "estate": "admin/",
+    "claudechat": "ai/", "geminichat": "ai/", "gamemanager": "games/library/", "parlor": "fun/", "estate": "admin/", "setupwizard": "admin/",
     "trivia": "fun/", "general": "fun/", "chatchart": "stats/", "activitystats": "stats/", "speakup": "speakup/",
     "autoroom": "voice/", "easytranslate": "translate/", "mod": "moderation/", "mutes": "moderation/",
     "warnings": "moderation/", "modlog": "moderation/", "cleanup": "moderation/", "clearchannel": "moderation/",
@@ -92,7 +92,7 @@ COG_NAMES = {
     "claudechat": "AI chat", "geminichat": "Image generation", "gamemanager": "Games", "parlor": "Parlor games",
     "activitystats": "Server stats", "chatchart": "Chat charts", "censord": "Word filter", "antispam": "Spam protection",
     "customcommands": "Custom commands", "buttongreeter": "Welcome flow", "modlog": "Mod log",
-    "clearchannel": "Clear channel",
+    "clearchannel": "Clear channel", "setupwizard": "Setup wizard",
 }
 # The footer hint on help cards: one thing (the butler is the AI chat now, and the home card mentions it).
 HELP_FOOTER = "`{p}help <command>` for details"

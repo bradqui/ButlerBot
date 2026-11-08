@@ -1,7 +1,7 @@
 ---
 title: Handbook
 parent: Command reference
-nav_order: 20
+nav_order: 19
 permalink: /reference/handbook/
 ---
 

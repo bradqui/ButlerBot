@@ -1,7 +1,7 @@
 ---
 title: ClearChannel
 parent: Command reference
-nav_order: 11
+nav_order: 10
 permalink: /reference/clearchannel/
 ---
 

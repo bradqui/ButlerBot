@@ -24,6 +24,7 @@
 !/data/cogs/CogManager/cogs/gemini/
 !/data/cogs/CogManager/cogs/handbook/
 !/data/cogs/CogManager/cogs/parlor/
+!/data/cogs/CogManager/cogs/setupwizard/
 !/data/cogs/CogManager/cogs/speakup/
 
 # Never track config data, even inside a cog folder

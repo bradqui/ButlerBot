@@ -1,7 +1,7 @@
 ---
 title: Permissions
 parent: Command reference
-nav_order: 25
+nav_order: 24
 permalink: /reference/permissions/
 ---
 

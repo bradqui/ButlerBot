@@ -1,7 +1,7 @@
 ---
 title: Parlor
 parent: Command reference
-nav_order: 24
+nav_order: 23
 permalink: /reference/parlor/
 ---
 

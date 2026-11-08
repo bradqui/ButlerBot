@@ -1,7 +1,7 @@
 ---
 title: Downloader
 parent: Command reference
-nav_order: 14
+nav_order: 13
 permalink: /reference/downloader/
 ---
 

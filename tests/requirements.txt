@@ -1,0 +1,6 @@
+# For the offline tests: python -m pip install -r tests/requirements.txt  (Red itself is stubbed by harness.py)
+discord.py==2.7.1
+tzdata
+pyyaml
+pillow
+matplotlib

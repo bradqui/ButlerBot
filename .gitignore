@@ -35,3 +35,10 @@ settings.json
 __pycache__/
 *.pyc
 /.vscode/
+
+# Offline tests: published, but not their local libraries, outputs or the server's persona text
+/tests/pylibs/
+/tests/apilibs/
+/tests/ButlerBot-persona.txt
+/tests/*.png
+/tests/*.log

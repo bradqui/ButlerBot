@@ -1,0 +1,15 @@
+{
+    "name": "Estate",
+    "short": "The bot owner's view of every server: AI spend, budget caps, a remote AI switch, new-server alerts and health.",
+    "description": "Owner only, and it works in DMs. Lists every server the bot is in with members and this month's AI spend (Claude's reported cost plus an estimate for Gemini images), sets a monthly budget for the whole bot and per server with DM alerts at 50%, 80% and 100% (AI pauses at 100%), switches AI off in a server remotely, DMs the owner when the bot joins a new server (with a Leave button), and reports background tasks, recent errors and missing permissions. Numbers only: never message content.",
+    "end_user_data_statement": "This cog stores no data about users: only budget settings, a per-server AI switch, and which budget alerts were already sent this month.",
+    "install_msg": "Thanks for installing Estate! Run [p]estate in a DM with the bot. The Claude and Gemini cogs check its budget and AI switch before each request.",
+    "author": ["Quillshot"],
+    "required_cogs": {},
+    "requirements": [],
+    "tags": ["owner", "budget", "monitoring"],
+    "min_bot_version": "3.5.0",
+    "hidden": false,
+    "disabled": false,
+    "type": "COG"
+}

@@ -438,6 +438,7 @@ class ClaudeChat(commands.Cog):
             daily_limit=0,      # AI messages per user per day; 0 = unlimited
             usage=dict(EMPTY_USAGE),
             usage_since=None,
+            usage_months={},     # "YYYY-MM" -> usage, for the owner's monthly spend and budget (Estate)
         )
         self.config.register_channel(model=None)
         self.config.register_user(model=None)   # unused since !myai was removed (2026-11-05); old values are cleared on data deletion
@@ -603,6 +604,30 @@ class ClaudeChat(commands.Cog):
             async with scope.usage() as totals:
                 for k, v in usage.items():
                     totals[k] = totals.get(k, 0) + v
+        month = datetime.now(timezone.utc).strftime("%Y-%m")
+        async with guild_conf.usage_months() as months:
+            totals = months.setdefault(month, dict(EMPTY_USAGE))
+            for k, v in usage.items():
+                totals[k] = totals.get(k, 0) + v
+            for old in sorted(months)[:-13]:
+                months.pop(old)   # a year and a month is plenty
+
+    async def monthly_usage(self, month: str) -> Dict[int, dict]:
+        """For the Estate cog: each server's usage in `month` ("YYYY-MM")."""
+        return {gid: data["usage_months"][month] for gid, data in (await self.config.all_guilds()).items()
+                if month in (data.get("usage_months") or {})}
+
+    async def _ai_blocked(self, guild: Optional[discord.Guild]) -> Optional[str]:
+        """Why AI is off for `guild` right now (the owner switched it off, or a monthly budget ran out), else None."""
+        estate = self.bot.get_cog("Estate")
+        check = getattr(estate, "ai_blocked", None)
+        if check is None or guild is None:
+            return None
+        try:
+            return await check(guild)
+        except Exception:
+            log.exception("The Estate cog's budget check failed; allowing the request")
+            return None
 
     def _image_generator(self):
         """The Gemini cog if it's loaded and exposes the image API, else None."""
@@ -871,6 +896,11 @@ class ClaudeChat(commands.Cog):
         if client is None:
             if not may_stay_silent:
                 await self._send(message, channel, await self._not_set_up(message.author))
+            return
+        blocked = await self._ai_blocked(guild)
+        if blocked:
+            if not may_stay_silent:
+                await self._send(message, channel, blocked)
             return
 
         # Over the daily limit, only questions about the bot are answered (they never counted toward it).
@@ -1547,6 +1577,8 @@ class ClaudeChat(commands.Cog):
         client = await self._get_client()
         if client is None:
             return None
+        if await self._ai_blocked(member.guild):
+            return None
         prompt = (
             "Someone in a Discord server typed the name of a video game, possibly misspelled or with the wrong "
             f"capitalization: \"{name[:150]}\"\n\n"
@@ -1613,6 +1645,9 @@ class ClaudeChat(commands.Cog):
         client = await self._get_client()
         if client is None:
             return None, await self._not_set_up(member)
+        blocked = await self._ai_blocked(guild)
+        if blocked:
+            return None, blocked
         if count_toward_limit:
             limit = await self._limit_reached(member)
             if limit:
@@ -1676,6 +1711,8 @@ class ClaudeChat(commands.Cog):
         client = await self._get_client()
         if client is None:
             return None
+        if await self._ai_blocked(member.guild):
+            return None
         prompt = (
             f"Read this page (fetch it, or search for it if you can't) and summarize it for a Discord chat: {url}\n\n"
             "Reply with at most three short bullet points (\"- \"), plain and factual, under 80 words in total. For "
@@ -1728,6 +1765,8 @@ class ClaudeChat(commands.Cog):
         """
         client = await self._get_client()
         if client is None or message.guild is None:
+            return None
+        if await self._ai_blocked(message.guild):
             return None
         guild, member = message.guild, message.author
         prefix = await self._prefix(guild)

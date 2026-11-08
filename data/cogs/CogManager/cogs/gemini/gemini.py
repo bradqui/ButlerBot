@@ -3,7 +3,8 @@ import io
 import logging
 import sys
 from pathlib import Path
-from typing import List, Optional, Tuple
+from datetime import datetime, timezone
+from typing import Dict, List, Optional, Tuple
 
 import discord
 from google import genai
@@ -46,6 +47,7 @@ class GeminiChat(commands.Cog):
         self.config.register_global(api_key=None)
         self.config.register_user(image_model=DEFAULT_IMAGE_MODEL)   # unused since !myai was removed (2026-11-05)
         self.config.register_channel(image_model=DEFAULT_IMAGE_MODEL)
+        self.config.register_guild(images={})   # "YYYY-MM" -> images generated, for the owner's spend estimates (Estate)
 
         self.client = None
         self.current_api_key = None
@@ -148,6 +150,11 @@ class GeminiChat(commands.Cog):
             if not quiet:
                 await self._send(reply_target, channel, await self._not_set_up(user))
             return None
+        blocked = await self._ai_blocked(channel.guild)
+        if blocked:
+            if not quiet:
+                await self._send(reply_target, channel, blocked)
+            return None
 
         conf_channel = channel.parent if isinstance(channel, discord.Thread) and channel.parent else channel
         model_name = await self.config.channel(conf_channel).image_model()
@@ -192,15 +199,46 @@ class GeminiChat(commands.Cog):
             return None
 
         # Just the image: echoing the prompt back is noise, and it would give away guess-the-game answers.
+        await self._count_image(channel.guild)
         return await self._send(reply_target, channel, None, files=files)
+
+    async def _count_image(self, guild: Optional[discord.Guild]):
+        """Count a generated image toward the server's month, for the owner's spend estimates (Estate)."""
+        if guild is None:
+            return
+        month = datetime.now(timezone.utc).strftime("%Y-%m")
+        async with self.config.guild(guild).images() as months:
+            months[month] = months.get(month, 0) + 1
+            for old in sorted(months)[:-13]:
+                months.pop(old)
+
+    async def monthly_images(self, month: str) -> Dict[int, int]:
+        """For the Estate cog: images each server generated in `month` ("YYYY-MM")."""
+        return {gid: data["images"][month] for gid, data in (await self.config.all_guilds()).items()
+                if month in (data.get("images") or {})}
+
+    async def _ai_blocked(self, guild: Optional[discord.Guild]) -> Optional[str]:
+        """Why AI is off for `guild` right now (switched off by the owner, or over budget), else None."""
+        check = getattr(self.bot.get_cog("Estate"), "ai_blocked", None)
+        if check is None or guild is None:
+            return None
+        try:
+            return await check(guild)
+        except Exception:
+            log.exception("The Estate cog's budget check failed; allowing the request")
+            return None
 
     async def render_image(self, prompt: str, *, channel) -> Tuple[Optional[bytes], Optional[str]]:
         """
-        For other cogs (Parlor's caption contest): generate one new image and return it instead of posting it.
-        Returns (image bytes, None), or (None, a short user-facing reason). Uses the channel's image model.
+        For other cogs (Parlor's caption contest, GameManager's banners): generate one new image and return it
+        instead of posting it. Returns (image bytes, None), or (None, a short user-facing reason). Uses the channel's
+        image model.
         """
         if not await self._init_genai():
             return None, await self._not_set_up(None)
+        blocked = await self._ai_blocked(channel.guild)
+        if blocked:
+            return None, blocked
         conf_channel = channel.parent if isinstance(channel, discord.Thread) and channel.parent else channel
         model_name = await self.config.channel(conf_channel).image_model()
         try:
@@ -211,6 +249,7 @@ class GeminiChat(commands.Cog):
         for candidate in (response.candidates or [])[:1]:
             for part in (candidate.content.parts if candidate.content else None) or []:
                 if part.inline_data and part.inline_data.data:
+                    await self._count_image(channel.guild)
                     return part.inline_data.data, None
         log.info("Gemini returned no image for a render_image request")
         return None, ui.line(ui.FAIL, "Gemini didn't return an image. Try a different idea.")

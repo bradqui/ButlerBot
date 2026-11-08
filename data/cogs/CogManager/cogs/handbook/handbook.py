@@ -79,7 +79,7 @@ TOPICS = [
 ]
 # Which handbook page covers a cog (by qualified name, lowercased). GameManager is split by command below.
 COG_TOPICS = {
-    "claudechat": "ai/", "geminichat": "ai/", "gamemanager": "games/library/", "parlor": "fun/",
+    "claudechat": "ai/", "geminichat": "ai/", "gamemanager": "games/library/", "parlor": "fun/", "estate": "admin/",
     "trivia": "fun/", "general": "fun/", "chatchart": "stats/", "activitystats": "stats/", "speakup": "speakup/",
     "autoroom": "voice/", "easytranslate": "translate/", "mod": "moderation/", "mutes": "moderation/",
     "warnings": "moderation/", "modlog": "moderation/", "cleanup": "moderation/", "clearchannel": "moderation/",

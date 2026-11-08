@@ -74,7 +74,7 @@ TOPICS = [
     ("translate/", "🌐", "Translation", "Translate messages between languages.", "everyone"),
     ("moderation/", "🔨", "Moderation", "Warnings, mutes, kicks, bans and cleanup.", "mods"),
     ("filters/", "🛡️", "Filters and spam", "Word filters and spam protection.", "mods"),
-    ("admin/", "⚙️", "Server setup", "Permissions, custom commands, welcome flow and cog settings.", "admins"),
+    ("admin/", "⚙️", "Server setup", "A new-server checklist, permissions, the welcome flow and cog settings.", "admins"),
     ("reference/", "📚", "Command reference", "Every command, generated from the bot.", "everyone"),
 ]
 # Which handbook page covers a cog (by qualified name, lowercased). GameManager is split by command below.

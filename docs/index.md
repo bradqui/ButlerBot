@@ -33,7 +33,7 @@ ButlerBot is our server's resident robot butler: overqualified, mildly put-upon,
 | 🌐 | [Translation]({{ '/translate/' | relative_url }}) | Translate messages between languages. |
 | 📚 | [Command reference]({{ '/reference/' | relative_url }}) | Every command, generated from the bot. |
 
-**For mods and admins:** [Moderation]({{ '/moderation/' | relative_url }}) · [Filters and spam]({{ '/filters/' | relative_url }}) · [Server setup]({{ '/admin/' | relative_url }})
+**For mods and admins:** [Moderation]({{ '/moderation/' | relative_url }}) · [Filters and spam]({{ '/filters/' | relative_url }}) · [Server setup]({{ '/admin/' | relative_url }}) (setting up a new server? Start with its [checklist]({{ '/admin/' | relative_url }}#new-server-checklist).)
 
 ## How to read commands
 

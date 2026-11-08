@@ -51,3 +51,6 @@ Every step is optional. You can also just tell ButlerBot: "@ButlerBot set up my 
 - **Privacy:**
   - ButlerBot counts activity for [Server stats]({{ '/stats/' | relative_url }}). It counts hourly totals and never stores message text. `!stats ignoreme` opts you out.
   - `!speakup me off` stops the bot reacting to your messages on its own.
+
+{: .staff }
+> Setting ButlerBot up in a new server? Follow the [new server checklist]({{ '/admin/' | relative_url }}#new-server-checklist).

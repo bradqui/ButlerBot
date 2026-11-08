@@ -7,10 +7,118 @@ permalink: /admin/
 # Server setup
 {: .no_toc }
 
-For admins: who can use what, custom commands, the welcome flow, and where each feature's settings live.
+For admins: a checklist for a new server, who can use what, custom commands, the welcome flow, and where each feature's settings live.
 
 1. TOC
 {:toc}
+
+## New server checklist
+
+When ButlerBot joins a server, work through these steps in order. Every step after the first is optional: ButlerBot works without it, just with less.
+
+### 1. Give the bot its permissions
+
+Give ButlerBot's role these permissions server-wide. A missing one usually shows up later as an error in a single feature.
+
+| Permission | What needs it |
+|---|---|
+| View Channels, Send Messages, Embed Links, Attach Files, Read Message History, Add Reactions | Everything: replies and cards, stats charts, calendar files, the 🕘 and 📄 reactions, and stats backfill |
+| Create Public Threads, Send Messages in Threads | Game threads: guess the game, the emoji game, twenty questions, adventures, mysteries and caption chats. Without them, the guessing games play in the channel instead. |
+| Manage Events | Discord events for game nights |
+| Manage Roles, Manage Nicknames | The welcome flow: group roles, the rules role, and `[TAG]` nicknames. Move ButlerBot's role **above** the roles it gives out and the members it renames. |
+| Manage Messages | The word filter, and `!cleanup` |
+| Kick Members, Ban Members | Moderation, and the word filter's kick and ban actions |
+| Manage Channels, Move Members | Voice rooms (`!autoroomset permissions` checks what they need) |
+
+### 2. Staff roles
+
+```
+!set roles addmodrole @Moderators
+!set roles addadminrole @Admins
+!games admin setrole @Game Admins     optional: who approves games and runs any session
+```
+
+### 3. Welcome flow
+
+```
+!bg setchannel #welcome
+!bg addrole @Raiders Raiders          one per group button: the role, then the button's label
+!bg setruleschannel #rules
+!bg setrulesrole @Member
+!bg setadminchannel #bot-log          where problems are reported
+!bg settings
+```
+
+More in [Welcome flow](#welcome-flow-buttongreeter) below.
+
+### 4. Game nights
+
+```
+!games admin timezone America/Los_Angeles   the default for session times
+!games admin sales #game-deals              wishlist sale alerts (off until a channel is set)
+!games admin freegames true                 optional: free Epic games in the same channel
+!games admin memberadd true                 optional: members add games without a request
+!games admin settings
+```
+
+Discord events are on by default. `!games admin eventchannel "Game Night"` makes them voice-channel events instead. See [Game nights]({{ '/games/nights/' | relative_url }}).
+
+### 5. AI chat
+
+```
+!claude settings
+!claude limit 30                 optional: AI messages a day per member (mods and admins aren't limited)
+!claude guidementions on         whether @ButlerBot and replies to it go to the AI chat
+!claude guideactions on          whether the AI can run commands for people
+!claude persona <text>           optional: your own personality instead of ButlerBot's
+```
+
+See [AI chat and images]({{ '/ai/' | relative_url }}) and [What uses AI]({{ '/ai-use/' | relative_url }}).
+
+{: .note }
+> **The bot owner** gets a DM when ButlerBot joins a new server, with a button to leave it. With `!estate cap <server> <amount>` they can set that server a monthly AI budget, and with `!estate ai <server> off` they can switch its AI off.
+
+### 6. Auto-replies and stats
+
+```
+!speakup                            what's switched on
+!speakup off #serious-talk          quiet in one channel
+!speakup feature links off          one feature off everywhere (times, steam, links, mistakes)
+!stats admin exclude #staff         keep a channel out of stats
+!stats admin backfill 30            count the last 30 days of messages
+!stats admin digest channel #stats
+!stats admin digest on              a weekly summary in that channel
+```
+
+### 7. Extras
+
+All optional:
+
+```
+!caption weekly #general            a weekly caption contest
+!mystery weekly #general            a weekly murder mystery
+!parlor threads off                 in a channel where games shouldn't make threads
+!autoroomset create "Join to Create" "Voice Rooms"    voice rooms
+!censor level low                   the word filter
+```
+
+See [Fun and games]({{ '/fun/' | relative_url }}), [Voice rooms]({{ '/voice/' | relative_url }}) and [Filters and spam]({{ '/filters/' | relative_url }}).
+
+### 8. Check it
+
+```
+!games admin settings
+!claude settings
+!bg settings
+!speakup
+!parlor settings
+!stats admin settings
+```
+
+Then run `!games newprofile` yourself to see what members see, and point everyone to [Getting started]({{ '/start/' | relative_url }}).
+
+{: .note }
+> **Slash commands** belong to the bot, not to a server, so the bot owner turns them on once for every server: `!slash enable games`, `!slash enable catchup`, `!slash enable "Summarize link" message`, then `!slash sync`. See [Slash commands](#slash-commands).
 
 ## Staff roles
 

@@ -85,6 +85,23 @@ async def main():
     check(await cc.suggest_command(message, "!nope") is None, "unknown command rejected")
     replies.append(resp([Block(type="text", text="none")]))
     check(await cc.suggest_command(message, "!nope") is None, "none -> None")
+    room = claude_mod.THINKING_ROOM
+    check(calls[-1]["max_tokens"] == 150 + room, f"suggestion leaves room to think: {calls[-1]['max_tokens']}")
+
+    # complete(): the caller's max_tokens is the reply length; thinking gets room on top (twenty questions asks
+    # for 80 tokens, and a question the model thought about came back with no text at all)
+    replies.append(resp([Block(type="text", text="Yes. Aliens everywhere.")]))
+    text, error = await cc.complete(alex, guild.channel, system="Twenty questions.", fast=True, max_tokens=80,
+                                    messages=[{"role": "user", "content": "Does it have aliens?"}],
+                                    count_toward_limit=False)
+    check(text == "Yes. Aliens everywhere." and error is None, f"complete: {text!r} {error!r}")
+    check(calls[-1]["max_tokens"] == 80 + room, f"complete leaves room to think: {calls[-1]['max_tokens']}")
+    thought_only = resp([Block(type="thinking", thinking="")])
+    thought_only.stop_reason = "max_tokens"
+    replies.append(thought_only)
+    text, error = await cc.complete(alex, guild.channel, system="x", fast=True, max_tokens=80,
+                                    messages=[{"role": "user", "content": "?"}], count_toward_limit=False)
+    check(text is None and error == cc.NO_REPLY, f"thinking only -> NO_REPLY: {error!r}")
     for name in ("GameManager", "ClaudeChat"):
         await bot.remove_cog(name)
 

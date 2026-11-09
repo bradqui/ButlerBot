@@ -70,6 +70,9 @@ WEB_SEARCH_COST = 0.01  # $10 per 1,000 searches
 EFFORT_LEVELS = ("low", "medium", "high")
 FALLBACK_BETA = "server-side-fallback-2026-07-01"
 MAX_TOKENS = 16000  # covers thinking + reply; non-streaming safe
+# Every current model thinks before replying, and thinking counts toward max_tokens. Short calls add this on top of the
+# reply length they want, or a question that needs some thought uses the whole allowance and comes back with no text.
+THINKING_ROOM = 2000
 MAX_PAUSE_CONTINUATIONS = 3
 
 PERSONA_FILE = Path(__file__).resolve().parent / "persona.md"   # the bot's own persona, kept in the repo
@@ -1685,7 +1688,8 @@ class ClaudeChat(commands.Cog):
         if persona:
             system = (f'You are {guild.me.display_name}, a bot in the Discord server "{guild.name}".\n'
                       f"Your personality (set by the server's admins):\n{await self._persona(guild)}\n\n{system}")
-        kwargs = dict(model=model, max_tokens=max_tokens, system=system, messages=messages,
+        # `max_tokens` is the reply length the caller wants; thinking gets its own room on top.
+        kwargs = dict(model=model, max_tokens=max_tokens + THINKING_ROOM, system=system, messages=messages,
                       output_config={"effort": await self.config.effort()},
                       extra_body={"cache_control": {"type": "ephemeral"}})
         try:
@@ -1704,6 +1708,8 @@ class ClaudeChat(commands.Cog):
         if response.stop_reason == "refusal":
             return None, self.REFUSAL
         if not text:
+            log.warning("Empty reply from %s (stop reason %s, %s output tokens)", model, response.stop_reason,
+                        getattr(response.usage, "output_tokens", "?"))
             return None, self.NO_REPLY
         return text, None
 
@@ -1809,7 +1815,7 @@ class ClaudeChat(commands.Cog):
                   "sure, reply with only: none")
         try:
             response = await client.messages.create(
-                model=model, max_tokens=150, output_config={"effort": "low"},
+                model=model, max_tokens=150 + THINKING_ROOM, output_config={"effort": "low"},
                 system=[{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}],
                 messages=[{"role": "user", "content": prompt}])
         except anthropic.APIError as e:

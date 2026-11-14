@@ -87,9 +87,13 @@ async def main():
     check(last_text() == "⚠️ You're already in.", last_text())
     await run(brad, "!games leave")
     check(last_text().startswith("❌ You're the host, so you can't leave."), last_text())
-    await run(alex, "!games leave")
-    check("2" not in (await session_named("Raid night"))["participants"] and last_text().startswith(
-        "✅ You've left **Raid night**."), last_text())
+    await run(alex, "!games leave")   # no set time, so it's under way: did you play? (test_gm_leave.py has more)
+    ask = channel.sent[-1]
+    check("Did you play in **Raid night**?" in card_text(ask), card_text(ask))
+    answer = FakeInteraction(bot, guild, alex, channel, message=ask)
+    await next(b for b in card_buttons(ask) if b.label == "Didn't play").callback(answer)
+    check("2" not in (await session_named("Raid night"))["participants"] and "✅ You've left **Raid night**."
+          in card_text(answer.response.calls[-1][1]["view"]), "answered: left")
 
     await run(sam, "!games session Chill night")
     await run(alex, "!games join")

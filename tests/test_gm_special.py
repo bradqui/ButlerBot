@@ -232,7 +232,8 @@ async def main():
     check("**Playing Star Citizen**" in text and "**Before you play**" in text and "Update your drivers" in text
           and "**Replaces Friday Night Games**" in text and "Reminder 15 min before" in text, text)
     labels = [b.label for b in card_buttons(card)]
-    check(labels == ["Join", "Leave", "Add to calendar", "Edit", "Plan next", "End session"], f"no vote, Plan next: {labels}")
+    check(labels == ["Join", "Leave", "Add to calendar", "Edit", "Plan next", "Remove player",
+                      "End session"], f"no vote, Plan next: {labels}")
     check(any("discord.com/channels" in (e.get("description") or "") for e in events[special["event_id"]].edits),
           "its event now links to the card")
 

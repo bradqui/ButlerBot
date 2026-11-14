@@ -116,7 +116,7 @@ async def main():
     check(card_color(card) == ui.ATTENTION and "🗳️ **Vote: what should we play?**\n-# Pick 1 · ends <t:" in text
           and "· 0 of 3 voted, waiting on Brad, Alex and Sam" in text, f"voting state: {text}")
     gids = vote["games"]
-    check(custom_ids(card) == [f"gm:v:{vid}:{g}" for g in gids] + [f"gm:s:end:{sid}"], custom_ids(card))
+    check(custom_ids(card) == [f"gm:v:{vid}:{g}" for g in gids] + [f"gm:s:remove:{sid}", f"gm:s:end:{sid}"], custom_ids(card))
     check("time read as UTC" in text and "Wrong time?" not in text, "timezone note still shown before the start "
                                                                        "(short; a voting card has no footer)")
 
@@ -147,7 +147,8 @@ async def main():
     check(card_color(card) == ui.SUCCESS and f"🏆 **{vote['names'][gids[0]]}** won the vote." in text
           and "🥇 **" in text and "2 votes (100%)" in text and "-# 2 of 3 voted · Time's up" in text,
           f"the result is in the card: {text}")
-    check([b.label for b in card_buttons(card)] == ["Join", "Leave", "Start vote", "Add to calendar", "Edit", "End session"],
+    check([b.label for b in card_buttons(card)] == ["Join", "Leave", "Start vote", "Add to calendar", "Edit",
+                                                 "Remove player", "End session"],
           "normal buttons back after the vote")
 
     # ---- reminder and start ----

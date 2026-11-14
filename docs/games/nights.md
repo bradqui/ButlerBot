@@ -54,7 +54,16 @@ These are short for the `!games …` versions (`!games session`, `!games join`, 
 - The whole game night happens in that one card: the vote and its result show up in it too, so there's one place to look.
 - Everyone who joined gets a reminder 15 minutes before and a ping at the start. If the card is still in view, the ping is one line with a link back to it. Each session can have its own reminders (see [Special nights](#special-nights)).
 - If you haven't set a timezone, the card says which one your time was read in, with how to fix it.
-- Sessions end on their own 12 hours after they start. An ended session's card turns grey and loses its buttons, and its pings are cleaned up.
+- Sessions end on their own 12 hours after they start. An ended session's card turns grey and loses its buttons, and its pings are cleaned up. It lists everyone who played.
+
+**Leaving partway through:**
+- Before a session starts, **Leave** just takes your name off.
+- Once it's under way (from its start time, or right away for a session with no set time), **Leave** privately asks whether you played. **Played** keeps you on the list of who played, shown on the card as "Played and left" and counted when it ends. **Didn't play** takes you off completely.
+- Either way, your games stop counting toward its votes. A vote that's running stops waiting on you, and any vote you'd already cast is taken back.
+- Rejoining puts you back in as a player.
+
+{: .staff }
+> **Remove player** (the host or a game admin) is for someone who dropped without pressing Leave. Pick who from the private menu. Before the start that removes them right away; once it's under way you're asked whether they played, the same as Leave. The host can't be removed: end the session instead.
 
 **When chatter buries the card:**
 - The card moves itself to the bottom of the channel for each reminder, the start and a vote, and pings players there instead of in a separate line. It only moves once it has 10 or more messages below it.

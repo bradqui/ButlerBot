@@ -938,6 +938,23 @@ def is_pending(session: dict) -> bool:
     return bool(session.get("pending")) and not session.get("message_id")
 
 
+def session_live(session: dict, now: Optional[datetime] = None) -> bool:
+    """
+    Whether a session is under way, so someone leaving it may already have played: it has started, or it has no set
+    time (those are played as soon as they're made). Before that, leaving or being removed just takes a name off.
+    """
+    if session.get("started"):
+        return True
+    starts = parse_iso(session.get("starts_at"))
+    return starts is None or starts <= (now or utcnow())
+
+
+def session_played(session: dict) -> List[str]:
+    """Everyone who played: the players still in, then those who left after playing (session "played")."""
+    players = list(session["participants"])
+    return players + [u for u in session.get("played") or [] if u not in players]
+
+
 def rank_score(users: dict, voter_ids: List[str], game_id: str) -> float:
     """Average preference among the voters who own a game: rank 1 = 1.0, rank 2 = 0.5, unranked = 0.01."""
     scores = []
@@ -1060,10 +1077,11 @@ def game_admin():
 # ==========================================
 
 class SessionButton(discord.ui.DynamicItem[discord.ui.Button],
-                    template=r"gm:s:(?P<action>join|leave|vote|cal|event|plan|end):(?P<sid>[a-z0-9]+)"):
+                    template=r"gm:s:(?P<action>join|leave|remove|vote|cal|event|plan|end):(?P<sid>[a-z0-9]+)"):
     LOOKS = {   # one main action (Join); everything else grey
         "join": ("Join", "➕", discord.ButtonStyle.primary),
         "leave": ("Leave", "➖", discord.ButtonStyle.secondary),
+        "remove": ("Remove player", "🚪", discord.ButtonStyle.secondary),   # host or game admin
         "vote": ("Start vote", "🗳️", discord.ButtonStyle.secondary),
         "cal": ("Add to calendar", "🗓️", discord.ButtonStyle.secondary),
         "event": ("Edit", "✏️", discord.ButtonStyle.secondary),   # (the ID says "event": it began as Edit event)
@@ -1194,10 +1212,11 @@ def session_buttons(sid: str, scheduled: bool = False, *, vote: bool = True,
                     plan: bool = False) -> List[discord.ui.Item]:
     """
     Join, Leave, Start vote (not when the game is set ahead), Add to calendar and Edit (scheduled sessions: an .ics
-    file, and their settings and Discord event), Plan next (special nights from a schedule), End session.
+    file, and their settings and Discord event), Plan next (special nights from a schedule), Remove player and End
+    session (host or game admin).
     """
     actions = ["join", "leave"] + (["vote"] if vote else []) + (["cal", "event"] if scheduled else [])
-    actions += (["plan"] if plan else []) + ["end"]
+    actions += (["plan"] if plan else []) + ["remove", "end"]
     return [SessionButton(action, sid) for action in actions]
 
 
@@ -1954,6 +1973,80 @@ class PlanNextView(OwnerOnlyCard):
                                          parse_iso(self.select.values[0]))
         await interaction.edit_original_response(view=final_card(line, title="🎮 Plan next"),
                                                  allowed_mentions=NO_PING)
+
+
+class LeaveView(OwnerOnlyCard):
+    """
+    Leaving a session, privately. Leave (once a session is under way) asks whether you played; Remove player (the
+    host or a game admin) first picks who, then asks the same about them, unless the session hasn't started, when
+    picking someone removes them straight away. "Played" keeps them on the session's played list (session_played);
+    either way they're out of its votes from then on.
+    """
+
+    expired_note = "Expired. Nobody was removed."
+
+    def __init__(self, cog: "GameManager", user_id: int, session: dict, *,
+                 players: Optional[List[Tuple[str, str]]] = None):
+        super().__init__(user_id, timeout=LIST_PRIVATE_TIMEOUT)
+        self.cog, self.sid, self.session_title = cog, session["id"], session["title"]
+        self.remove = players is not None              # Remove player: (uid, display name) of everyone but the host
+        self.names = dict(players or [])
+        self.target: Optional[str] = None if self.remove else str(user_id)
+        self.title = "🎮 Remove a player" if self.remove else "🎮 Leave the session"
+        self.redraw()
+
+    def build(self) -> discord.ui.Container:
+        title = discord.utils.escape_markdown(self.session_title)
+        if self.target is None:   # Remove player: who?
+            select = discord.ui.Select(placeholder="Pick a player", options=[
+                discord.SelectOption(label=ui.truncate(name, 100), value=uid)
+                for uid, name in list(self.names.items())[:25]])
+            select.callback = self._picked
+            return ui.card(f"Who's leaving **{title}**?", [select], [make_button("Cancel", self._cancel)],
+                           title=self.title, color=ui.BRAND)
+        name = discord.utils.escape_markdown(self.names.get(self.target, ""))
+        question = f"Did **{name}** play in **{title}**?" if self.remove else f"Did you play in **{title}**?"
+        back = make_button("Back", self._back) if self.remove else make_button("Cancel", self._cancel)
+        return ui.card(ui.two_line(question, "Either way, their games are left out of its votes from now on."
+                                   if self.remove else "Either way, your games are left out of its votes from now on."),
+                       [make_button("Played", self._played, style=discord.ButtonStyle.primary),
+                        make_button("Didn't play", self._not_played), back],
+                       title=self.title, color=ui.BRAND,
+                       footer="Players who played are listed when the session ends")
+
+    async def _picked(self, interaction: discord.Interaction):
+        values = (getattr(interaction, "data", None) or {}).get("values") or []
+        uid = values[0] if values else None
+        if uid not in self.names:
+            return await interaction.response.defer()
+        session = (await self.cog.config.guild(interaction.guild).play_sessions()).get(self.sid)
+        if session is not None and not session_live(session):   # not started yet: just take the name off
+            return await self._finish(interaction, uid, played=False)
+        self.target = uid
+        await interaction.response.edit_message(view=self.redraw(), allowed_mentions=NO_PING)
+
+    async def _played(self, interaction: discord.Interaction):
+        await self._finish(interaction, self.target, played=True)
+
+    async def _not_played(self, interaction: discord.Interaction):
+        await self._finish(interaction, self.target, played=False)
+
+    async def _back(self, interaction: discord.Interaction):
+        self.target = None
+        await interaction.response.edit_message(view=self.redraw(), allowed_mentions=NO_PING)
+
+    async def _cancel(self, interaction: discord.Interaction):
+        self.stop()
+        await interaction.response.edit_message(view=final_card("Nobody was removed." if self.remove
+                                                                else "You're still in.", title=self.title),
+                                                allowed_mentions=NO_PING)
+
+    async def _finish(self, interaction: discord.Interaction, uid: str, *, played: bool):
+        self.stop()
+        await interaction.response.defer()
+        line, _ = await self.cog.drop_player(interaction.guild, self.sid, uid, played=played,
+                                             by=interaction.user if self.remove else None)
+        await interaction.edit_original_response(view=final_card(line, title=self.title), allowed_mentions=NO_PING)
 
 
 class BatchReviewView(OwnerOnlyCard):
@@ -4025,12 +4118,18 @@ class GameManager(commands.Cog):
             blocks.append(ui.two_line(f"**{stamp(starts)}**", details(
                 stamp(starts, "R"), repeat_short(session["repeat"]) if session.get("repeat") else None,
                 f"time read as {zone}" if zone else "your local time", f"in <#{voice_id}>" if voice_id else None)))
-        players = [f"<@{uid}> (host)" if uid == host else f"<@{uid}>" for uid in session["participants"]]
+        # Once it has ended, everyone who played is listed, those who left partway through included.
+        roster = session_played(session) if ended else session["participants"]
+        players = [f"<@{uid}> (host)" if uid == host else f"<@{uid}>" for uid in roster]
         if len(players) > 40:
             players = players[:40] + [f"and {len(players) - 40} more"]
-        count = len(session["participants"])
+        count = len(roster)
         who_main = f"**{count} {'played' if ended else 'playing'}**" if count else "**Nobody yet**"
-        blocks.append(ui.two_line(who_main, ", ".join(players) or None))
+        who_detail = ", ".join(players)
+        left = [u for u in session.get("played") or [] if u not in roster]
+        if left and not ended:   # still counted as having played
+            who_detail += "\n" + f"Played and left: {mention_list(left, 20)}"
+        blocks.append(ui.two_line(who_main, who_detail.strip() or None))
         if session.get("game"):   # set ahead (a Star Citizen night): no vote
             blocks.append(ui.two_line(f"**{'Played' if ended else 'Playing'} {session['game']['name']}**",
                                       None if ended else "Set ahead, so there's no vote"))
@@ -4045,7 +4144,8 @@ class GameManager(commands.Cog):
         if vote is not None and vote.get("in_card") and not ended:   # voting: the options are in this card
             # How to vote is in the private reply to a vote button, so the card stays short and has no footer.
             return ui.CardView(ui.card(*blocks, ui.SEPARATOR, self.vote_status(vote, guild), vote_buttons(vote),
-                                       ui.SEPARATOR, [SessionButton("end", session["id"])],
+                                       ui.SEPARATOR, [SessionButton("remove", session["id"]),   # someone dropped
+                                                      SessionButton("end", session["id"])],
                                        title=title, color=ui.ATTENTION, banner=banner))
 
         # Every winner this session, in order; sessions from before the history only know the last one.
@@ -4937,7 +5037,11 @@ class GameManager(commands.Cog):
             players = sessions[sid]["participants"]
             if joined and uid not in players:
                 players.append(uid)
-            elif not joined and uid in players and uid != sessions[sid]["host_id"]:
+                if uid in (sessions[sid].get("played") or []):
+                    sessions[sid]["played"].remove(uid)
+            elif (not joined and uid in players and uid != sessions[sid]["host_id"]
+                  and not session_live(sessions[sid])):
+                # Before it starts only: once it's under way, leaving goes through Leave, which asks if they played.
                 players.remove(uid)
             else:
                 return
@@ -5245,6 +5349,9 @@ class GameManager(commands.Cog):
             await self._drop_buttons(interaction.message)
             return
 
+        if (action == "leave" and session_live(session) and uid in session["participants"]
+                and uid != session["host_id"]):
+            return await self.ask_if_played(interaction, session, member)   # under way: did they play?
         if action in ("join", "leave"):
             feedback, session = await self.set_membership(guild, sid, member, action == "join")
             if session is None:
@@ -5264,6 +5371,8 @@ class GameManager(commands.Cog):
             return await self.open_edit_menu(interaction, session)
         if action == "plan":
             return await self.open_plan_next(interaction, session)
+        if action == "remove":
+            return await self.open_remove_menu(interaction, session)
         if action == "vote":
             await self.start_vote(interaction, session_id=sid)
         else:
@@ -5274,25 +5383,102 @@ class GameManager(commands.Cog):
                              join: bool) -> Tuple[str, Optional[dict]]:
         """Join or leave a session. Returns (a line for the member, the saved session, or None if nothing changed)."""
         uid = str(member.id)
+        if not join:   # (a session under way asks first whether they played: LeaveView)
+            return await self.drop_player(guild, sid, uid, played=False, refresh=False)
         async with self.config.guild(guild).play_sessions() as sessions:
             session = sessions.get(sid)
             if session is None:
                 return "⚠️ This session has ended.", None
             players = session["participants"]
-            if join:
-                if uid in players:
-                    return "⚠️ You're already in.", None
-                players.append(uid)
-            else:
-                if uid == session["host_id"]:
-                    return ui.line(ui.FAIL, "You're the host, so you can't leave.",
-                                   hint="End the session instead."), None
-                if uid not in players:
-                    return "⚠️ You haven't joined.", None
-                players.remove(uid)
+            if uid in players:
+                return "⚠️ You're already in.", None
+            players.append(uid)
+            if uid in (session.get("played") or []):   # back after leaving: a player again, not one who left
+                session["played"].remove(uid)
             session = dict(session)
+        return ui.line(ui.DONE, f"You're in **{session['title']}**."), session
+
+    async def drop_player(self, guild: discord.Guild, sid: str, uid: str, *, played: bool,
+                          by: Optional[discord.Member] = None, refresh: bool = True) -> Tuple[str, Optional[dict]]:
+        """
+        Take a player out of a session: they left, or `by` (the host or a game admin) removed them. With `played`,
+        they stay on its played list (session_played: the ended card and stats count them). Either way they're out
+        of its votes: later ones are drawn from the players still in, and a running vote stops waiting on them and
+        drops their picks (finishing it if everyone left has voted). Redraws the card unless `refresh` is False (a
+        button that edits the card itself). Returns (a line saying what happened, the saved session or None).
+        """
+        yours = by is None or str(by.id) == uid
+        async with self.config.guild(guild).play_sessions() as sessions:
+            session = sessions.get(sid)
+            if session is None:
+                return "⚠️ This session has ended.", None
+            if uid == session["host_id"]:
+                return ui.line(ui.FAIL, "You're the host, so you can't leave." if yours
+                               else "The host can't be removed.", hint="End the session instead."), None
+            if uid not in session["participants"]:
+                return ("⚠️ You haven't joined." if yours else "⚠️ They've already left."), None
+            session["participants"].remove(uid)
+            left = session.setdefault("played", [])
+            if played and uid not in left:
+                left.append(uid)
+            elif not played and uid in left:
+                left.remove(uid)
+            session = dict(session)
+        if await self._drop_voter(guild, session.get("vote_id"), uid):
+            await self.finish_vote(guild, session["vote_id"], "Everyone voted")
+            session = (await self.config.guild(guild).play_sessions()).get(sid) or session
+        elif refresh:
+            await self.refresh_session_message(guild, session)
         title = session["title"]
-        return ui.line(ui.DONE, f"You're in **{title}**." if join else f"You've left **{title}**."), session
+        if yours:
+            text = f"You've left **{title}**."
+            hint = "You're still listed as having played." if played else None
+        else:
+            member = guild.get_member(int(uid))
+            name = discord.utils.escape_markdown(member.display_name) if member is not None else "That player"
+            text = f"Removed **{name}** from **{title}**."
+            hint = "They're still listed as having played." if played else None
+        return ui.line(ui.DONE, text, hint=hint), session
+
+    async def _drop_voter(self, guild: discord.Guild, vid: Optional[str], uid: str) -> bool:
+        """
+        Someone left during a vote: it stops waiting on them, and their picks are taken back. Returns True when
+        everyone still in has voted (the caller finishes it).
+        """
+        if not vid:
+            return False
+        async with self.config.guild(guild).votes() as votes:
+            vote = votes.get(vid)
+            if vote is None or uid not in vote["allowed_voters"]:
+                return False
+            vote["allowed_voters"].remove(uid)
+            tallies = vote["tallies"]
+            for gid in vote["user_votes"].pop(uid, []):
+                tallies[gid] = tallies.get(gid, 1) - 1
+                if tallies[gid] <= 0:
+                    del tallies[gid]
+            return len(vote["user_votes"]) >= len(vote["allowed_voters"])
+
+    async def ask_if_played(self, target: Target, session: dict, member: discord.Member):
+        """Leave on a session that's under way: privately ask whether they played (LeaveView) before taking them out."""
+        view = LeaveView(self, member.id, session)
+        await self.send_card(target, view, ephemeral=True)
+        view.message = target if isinstance(target, discord.Interaction) else None
+
+    async def open_remove_menu(self, interaction: discord.Interaction, session: dict):
+        """Remove player (host or game admin): a private menu of everyone but the host (LeaveView)."""
+        guild = interaction.guild
+        players = []
+        for uid in session["participants"]:
+            if uid != session["host_id"]:
+                member = guild.get_member(int(uid))
+                players.append((uid, member.display_name if member is not None else f"Player {uid[-4:]}"))
+        if not players:
+            return await ui.respond(interaction, ui.line(ui.ASK, "There's nobody to remove.",
+                                                         hint="Only the host is in, and the host can't be removed."))
+        view = LeaveView(self, interaction.user.id, session, players=players)
+        await self.send_card(interaction, view, ephemeral=True)
+        view.message = interaction
 
     async def pick_session(self, target: Target, name: Optional[str], verb: str, *,
                            this_channel: bool = False) -> Optional[dict]:
@@ -5342,6 +5528,9 @@ class GameManager(commands.Cog):
         session = await self.pick_session(target, name, "join" if join else "leave")
         if session is None:
             return
+        uid = str(member.id)
+        if not join and session_live(session) and uid in session["participants"] and uid != session["host_id"]:
+            return await self.ask_if_played(target, session, member)   # under way: did they play?
         feedback, changed = await self.set_membership(guild, session["id"], member, join)
         if changed is not None:
             await self.refresh_session_message(guild, changed)

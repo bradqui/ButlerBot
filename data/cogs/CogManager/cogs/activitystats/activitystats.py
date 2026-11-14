@@ -844,7 +844,8 @@ class ActivityStats(commands.Cog):
             return  # ended before it began
         window = (start_ts - ATTENDANCE_EARLY_MINUTES * 60, min(now, start_ts + ATTENDANCE_WINDOW_HOURS * 3600))
         showed = {uid for _, uid, s, e in await self._voice_rows(guild, *window) if e - s >= MIN_VOICE_SECONDS}
-        joined = [int(u) for u in session.get("participants", [])]
+        # Players still in, plus those who left partway through after playing (GameManager's "played").
+        joined = [int(u) for u in dict.fromkeys(list(session.get("participants", [])) + list(session.get("played") or []))]
         await self.db.query(
             "INSERT OR REPLACE INTO game_sessions VALUES (?, ?, ?, ?, ?, ?, ?)",
             (guild.id, str(session.get("id")), str(session.get("title", ""))[:200], int(start_ts), int(now),

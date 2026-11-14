@@ -84,9 +84,9 @@ async def main():
     check(card_color(smsg) == ui.SUCCESS, "open session is SUCCESS")
     check(any(isinstance(i, discord.ui.Separator) for i in smsg.view.walk_children()), "separator above the buttons")
     labels = [b.label for b in card_buttons(smsg)]
-    check(labels == ["Join", "Leave", "Start vote", "Add to calendar", "Edit", "End session"],
+    check(labels == ["Join", "Leave", "Start vote", "Add to calendar", "Edit", "Remove player", "End session"],
           f"session buttons inside the card (scheduled: Edit event too): {labels}")
-    check(custom_ids(smsg) == [f"gm:s:{a}:{sid}" for a in ("join", "leave", "vote", "cal", "event", "end")],
+    check(custom_ids(smsg) == [f"gm:s:{a}:{sid}" for a in ("join", "leave", "vote", "cal", "event", "remove", "end")],
           "persistent custom IDs")
     check([b.style for b in card_buttons(smsg)].count(discord.ButtonStyle.primary) == 1
           and card_buttons(smsg)[0].style == discord.ButtonStyle.primary, "Join is the one blurple button")
@@ -135,9 +135,9 @@ async def main():
     check((await gm.config.guild(guild).votes())[vid]["ping_id"] == ping.id, "ping line ID saved")
     check(vid not in vtext and "Vote ID" not in vtext, "vote ID hidden")
     gids = vote["games"]
-    check(custom_ids(smsg) == [f"gm:v:{vid}:{g}" for g in gids] + [f"gm:s:end:{sid}"]
+    check(custom_ids(smsg) == [f"gm:v:{vid}:{g}" for g in gids] + [f"gm:s:remove:{sid}", f"gm:s:end:{sid}"]
           and all(b.style == discord.ButtonStyle.secondary for b in card_buttons(smsg)),
-          f"grey option buttons inside, then End session: {custom_ids(smsg)}")
+          f"grey option buttons inside, then Remove player and End session: {custom_ids(smsg)}")
     # pressing an option redraws the session card (no pings)
     i = click(alex, smsg)
     await gm.on_vote_button(i, vid, gids[0])
@@ -167,9 +167,10 @@ async def main():
           and pinged(win.kw) == [1, 2, 3], f"winner line still pings the players: {win.content}")
     check("Voting now" not in rtext and [b.label for b in card_buttons(smsg)] == ["Join", "Leave", "Start vote",
                                                                                   "Add to calendar", "Edit",
-                                                                                  "End session"], rtext)
+                                                                                  "Remove player", "End session"],
+          rtext)
 
-    # many options: 20 buttons in 4 rows (plus End session), under the 40-component limit
+    # many options: 20 buttons in 4 rows (plus Remove player and End session), under the 40-component limit
     fake = {"id": "v20", "title": "Big", "games": [f"g{n}" for n in range(20)], "names": {}, "labels": {},
             "basis": "everyone owns these", "tallies": {}, "user_votes": {}, "allowed_voters": ["1", "2"],
             "max_choices": 1, "ends_at": gm_mod.utcnow().isoformat()}
@@ -179,7 +180,7 @@ async def main():
           f"20 options (old vote card): {len(rows)} rows, {components(view)} components")
     big = dict(session, participants=[str(10 ** 18 + n) for n in range(100)])   # snowflake-length IDs
     view = gm.session_card(big, vote=dict(fake, in_card=True, allowed_voters=big["participants"]))
-    check(len(card_buttons(view)) == 21 and components(view) <= 40,
+    check(len(card_buttons(view)) == 22 and components(view) <= 40,
           f"20 options in the session card: {components(view)} components")
     from harness import validate_layout
     check(not validate_layout(view), f"big voting card within Discord's limits: {validate_layout(view)}")

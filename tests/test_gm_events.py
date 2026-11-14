@@ -126,7 +126,7 @@ async def main():
     check(event.kw["description"].startswith("Hosted by Brad. Press Interested"), event.kw["description"][:60])
     card = channel.messages[raid["message_id"]]
     check("in <#900>" in card_text(card), "the card says where")
-    check(custom_ids(card) == [f"gm:s:{a}:{raid['id']}" for a in ("join", "leave", "vote", "cal", "event", "end")],
+    check(custom_ids(card) == [f"gm:s:{a}:{raid['id']}" for a in ("join", "leave", "vote", "cal", "event", "remove", "end")],
           "a scheduled session has Edit event")
     check((gm._banner_dir() / raid["event"]["banner"]).read_bytes() == PNG, "the banner is saved")
     first = card.view.children[0].children[0]
